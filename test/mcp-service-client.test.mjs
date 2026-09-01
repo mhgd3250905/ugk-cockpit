@@ -60,3 +60,72 @@ test('MCP service errors expose the public service message without leaking respo
     (error) => error.publicMessage === '这次接手码已经过期。' && !error.message.includes('secret'),
   );
 });
+
+test('MCP service handlers bootstrap a scoped local session when the API token is unavailable', async () => {
+  const calls = [];
+  const scopedToken = 'scoped-mcp-token-that-is-long-enough';
+  const handlers = createServiceHandlers({
+    token: null,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: url.toString(), options });
+      if (url.pathname === '/api/v1/mcp/session') {
+        return new Response(JSON.stringify({ ok: true, token: scopedToken }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, revision: 3 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+
+  const result = await handlers.ugk_work_progress({
+    sessionId: 'session-1', clientRequestId: 'progress-1', expectedRevision: 2,
+    status: 'working', note: '继续开发',
+  });
+
+  assert.equal(result.revision, 3);
+  assert.equal(calls[0].url, 'http://127.0.0.1:41737/api/v1/mcp/session');
+  assert.equal(calls[0].options.headers.authorization, undefined);
+  assert.equal(calls[1].options.headers.authorization, `Bearer ${scopedToken}`);
+});
+
+test('MCP service handlers refresh an expired scoped session once', async () => {
+  let bootstrapCount = 0;
+  const calls = [];
+  const handlers = createServiceHandlers({
+    token: null,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: url.toString(), options });
+      if (url.pathname === '/api/v1/mcp/session') {
+        bootstrapCount += 1;
+        return new Response(JSON.stringify({
+          ok: true,
+          token: `scoped-token-${bootstrapCount}-${'x'.repeat(32)}`,
+        }), { status: 201, headers: { 'content-type': 'application/json' } });
+      }
+      if (bootstrapCount === 1) {
+        return new Response(JSON.stringify({ code: 'AUTH_REQUIRED' }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, revision: 4 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+
+  const result = await handlers.ugk_work_progress({
+    sessionId: 'session-1', clientRequestId: 'progress-2', expectedRevision: 3,
+    status: 'working', note: '刷新会话后继续',
+  });
+
+  assert.equal(result.revision, 4);
+  assert.equal(bootstrapCount, 2);
+  assert.equal(calls.length, 4);
+  assert.notEqual(calls[1].options.headers.authorization, calls[3].options.headers.authorization);
+});

@@ -24,6 +24,8 @@ import { serveWebAsset } from './web-assets.mjs';
 import { VERSION } from '../version.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
+const MCP_SESSION_LIMIT = 64;
+const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../dist/web', import.meta.url));
 
 const PUBLIC_ERRORS = {
@@ -452,13 +454,24 @@ function cookieValue(cookieHeader, name) {
   return null;
 }
 
-function authenticate(request, apiToken, browserToken) {
+function authenticate(request, apiToken, browserToken, mcpSessions) {
   const bearer = request.headers.authorization;
   if (tokenMatches(bearer, apiToken)) {
     return {
       kind: 'bearer',
       principalHash: createHash('sha256').update(apiToken).digest('hex'),
     };
+  }
+  if (bearer?.startsWith('Bearer ')) {
+    const candidate = bearer.slice(7);
+    const session = mcpSessions.get(candidate);
+    if (session && session.expiresAt > Date.now()) {
+      return {
+        kind: 'mcp',
+        principalHash: createHash('sha256').update(`mcp:${candidate}`).digest('hex'),
+      };
+    }
+    if (session) mcpSessions.delete(candidate);
   }
   const session = cookieValue(request.headers.cookie, 'ugk_cockpit_session');
   if (tokenMatches(`Bearer ${session ?? ''}`, browserToken)) {
@@ -468,6 +481,10 @@ function authenticate(request, apiToken, browserToken) {
     };
   }
   return null;
+}
+
+function isLoopbackAddress(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
 function allowedOrigin(origin, port) {
@@ -532,6 +549,7 @@ export async function createCockpitHttpServer({
   const db = openCockpitDatabase(dbPath);
   const activeFolderGrants = folderGrants ?? new FolderGrantStore({ db });
   const browserSessionToken = randomBytes(32).toString('base64url');
+  const mcpSessions = new Map();
   db.prepare(`
     UPDATE runs SET health = 'recovery_uncertain'
     WHERE lifecycle = 'active'
@@ -654,7 +672,39 @@ export async function createCockpitHttpServer({
         sendError(response, 'ORIGIN_REJECTED');
         return;
       }
-      const authentication = authenticate(request, token, browserSessionToken);
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/session') {
+        if (
+          request.headers.origin
+          || request.headers['sec-fetch-site']
+          || !isLoopbackAddress(request.socket.remoteAddress)
+          || !request.headers['content-type']?.toLowerCase().startsWith('application/json')
+        ) {
+          sendError(response, 'ORIGIN_REJECTED');
+          return;
+        }
+        const body = await readJson(request);
+        if (body.client !== 'ugk-cockpit-stdio') {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const now = Date.now();
+        for (const [candidate, session] of mcpSessions) {
+          if (session.expiresAt <= now) mcpSessions.delete(candidate);
+        }
+        if (mcpSessions.size >= MCP_SESSION_LIMIT) {
+          mcpSessions.delete(mcpSessions.keys().next().value);
+        }
+        const scopedToken = randomBytes(32).toString('base64url');
+        const expiresAt = now + MCP_SESSION_TTL_MS;
+        mcpSessions.set(scopedToken, { expiresAt });
+        sendJson(response, 201, {
+          ok: true,
+          token: scopedToken,
+          expiresAt: new Date(expiresAt).toISOString(),
+        });
+        return;
+      }
+      const authentication = authenticate(request, token, browserSessionToken, mcpSessions);
       if (!authentication) {
         sendError(response, 'AUTH_REQUIRED');
         return;
@@ -681,7 +731,14 @@ export async function createCockpitHttpServer({
           .update(`browser:${clientId}`)
           .digest('hex');
       }
-      if (url.pathname.startsWith('/api/v1/mcp/') && authentication.kind !== 'bearer') {
+      if (
+        url.pathname.startsWith('/api/v1/mcp/')
+        && !['bearer', 'mcp'].includes(authentication.kind)
+      ) {
+        sendError(response, 'AUTH_REQUIRED');
+        return;
+      }
+      if (authentication.kind === 'mcp' && !url.pathname.startsWith('/api/v1/mcp/')) {
         sendError(response, 'AUTH_REQUIRED');
         return;
       }

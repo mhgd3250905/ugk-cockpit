@@ -106,6 +106,48 @@ test('local HTTP boundary requires auth and rejects foreign origins', async (t) 
   }), 403, 'ORIGIN_REJECTED');
 });
 
+test('local MCP bootstrap rejects web origins and issues a token scoped away from dashboard', async (t) => {
+  const root = createRepository();
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+
+  await assertUserError(await request(service, '/api/v1/mcp/session', {
+    method: 'POST',
+    headers: { origin: 'https://attacker.example', 'content-type': 'application/json' },
+    body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
+  }), 403, 'ORIGIN_REJECTED');
+
+  const issuedResponse = await request(service, '/api/v1/mcp/session', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
+  });
+  assert.equal(issuedResponse.status, 201);
+  const issued = await issuedResponse.json();
+  assert.equal(issued.ok, true);
+  assert.ok(issued.token.length >= 32);
+
+  await assertUserError(await request(service, '/api/v1/dashboard', {
+    headers: { authorization: `Bearer ${issued.token}` },
+  }), 401, 'AUTH_REQUIRED');
+
+  await assertUserError(await request(service, '/api/v1/mcp/work/progress', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${issued.token}`,
+      'content-type': 'application/json',
+    },
+    body: '{}',
+  }), 400, 'INVALID_REQUEST');
+});
+
 test('local web shell sets an HttpOnly session and browser mutations require same-origin evidence', async (t) => {
   const root = createRepository();
   let pickerCalls = 0;

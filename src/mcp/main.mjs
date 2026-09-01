@@ -4,8 +4,14 @@ import { createServiceHandlers } from './service-client.mjs';
 import { createMcpStdioServer } from './stdio-protocol.mjs';
 
 const dataRoot = process.env.LOCALAPPDATA;
-if (!dataRoot) throw new Error('LOCALAPPDATA is required on Windows.');
-const token = readFileSync(path.join(dataRoot, 'UGK Cockpit', 'api-token'), 'utf8').trim();
+let token = null;
+if (dataRoot) {
+  try {
+    token = readFileSync(path.join(dataRoot, 'UGK Cockpit', 'api-token'), 'utf8').trim();
+  } catch (error) {
+    if (!['ENOENT', 'EACCES', 'EPERM'].includes(error?.code)) throw error;
+  }
+}
 
 createMcpStdioServer({
   handlers: createServiceHandlers({ token, workingDirectory: process.cwd() }),

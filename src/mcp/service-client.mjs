@@ -6,25 +6,55 @@ export function createServiceHandlers({
   fetchImpl = fetch,
   workingDirectory = process.cwd(),
 }) {
-  if (typeof token !== 'string' || token.length < 32) {
+  if (token != null && (typeof token !== 'string' || token.length < 32)) {
     throw new Error('UGK Cockpit local API token is unavailable.');
   }
 
-  async function call(pathname, arguments_) {
+  let scopedToken = null;
+
+  async function bootstrapScopedToken() {
     let response;
     try {
-      response = await fetchImpl(new URL(pathname, baseUrl), {
+      response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
         method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify(arguments_),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
       });
     } catch (cause) {
       throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
         publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
       });
+    }
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || typeof body.token !== 'string' || body.token.length < 32) {
+      throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
+        publicMessage: body.message ?? 'UGK Cockpit 无法建立本地 MCP 会话，请重启 Cockpit 后重试。',
+      });
+    }
+    scopedToken = body.token;
+    return scopedToken;
+  }
+
+  async function call(pathname, arguments_) {
+    let response = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const bearer = token ?? scopedToken ?? await bootstrapScopedToken();
+      try {
+        response = await fetchImpl(new URL(pathname, baseUrl), {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${bearer}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify(arguments_),
+        });
+      } catch (cause) {
+        throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+          publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
+        });
+      }
+      if (response.status !== 401 || token || attempt === 1) break;
+      scopedToken = null;
     }
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
