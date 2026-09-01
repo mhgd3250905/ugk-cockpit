@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createApiClient } from './api.js';
 import './styles.css';
 
 const STATUS = {
@@ -35,31 +36,12 @@ const STAGES = {
   paused: '暂时放下',
 };
 
-const CLIENT_ID_KEY = 'ugk-cockpit-client-id';
-
-function clientId() {
-  let value = localStorage.getItem(CLIENT_ID_KEY);
-  if (!value) {
-    value = crypto.randomUUID();
-    localStorage.setItem(CLIENT_ID_KEY, value);
-  }
-  return value;
-}
-
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...options,
-    headers: {
-      'content-type': 'application/json',
-      'x-ugk-client-id': clientId(),
-      ...(options.headers ?? {}),
-    },
-  });
-  const body = await response.json();
-  if (!response.ok) throw Object.assign(new Error(body.message), body);
-  return body;
-}
+const api = createApiClient({
+  fetchImpl: (...args) => fetch(...args),
+  storage: localStorage,
+  randomUUID: () => crypto.randomUUID(),
+  origin: window.location.origin,
+});
 
 function formatTime(value) {
   if (!value) return '尚无记录';
