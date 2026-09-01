@@ -1,0 +1,14 @@
+{
+  "name": "ugk-cockpit",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.15.x"
+  },
+  "scripts": {
+    "serve": "node src/main.mjs",
+    "test": "node --test --test-concurrency=1",
+    "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs"
+  }
+}
