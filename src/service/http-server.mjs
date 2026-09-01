@@ -1,13 +1,20 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openCockpitDatabase } from '../core/database.mjs';
-import { beginCommand, parseCommandResponse } from '../core/command-journal.mjs';
+import { FolderGrantStore } from '../core/folder-grants.mjs';
+import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
+import { readDashboard, registerProject } from '../core/projects.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
+import { selectFolder } from '../platform/select-folder.mjs';
+import { serveWebAsset } from './web-assets.mjs';
 import { VERSION } from '../version.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
+const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../dist/web', import.meta.url));
 
 const PUBLIC_ERRORS = {
   AUTH_REQUIRED: {
@@ -124,6 +131,42 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 已停止读取，没有修改代码或已有记录。',
     requiredAction: '请在技术详情中检查 Git alternates 配置，确认后再重试。',
   },
+  FOLDER_GRANT_EXPIRED: {
+    status: 409,
+    message: '这次文件夹选择已经过期。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请重新点击“选择项目文件夹”。',
+  },
+  FOLDER_PICKER_UNAVAILABLE: {
+    status: 503,
+    message: '暂时无法打开系统文件夹选择器。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请稍后重试；当前不需要手动填写路径。',
+  },
+  FOLDER_GRANT_IN_USE: {
+    status: 409,
+    message: '这次文件夹选择正在用于另一项添加操作。',
+    impact: '没有重复添加项目，也没有修改文件。',
+    requiredAction: '请等待当前操作完成，或重新选择项目文件夹。',
+  },
+  FOLDER_SELECTION_CHANGED: {
+    status: 409,
+    message: '确认前，这个文件夹里的代码已经发生了身份变化。',
+    impact: 'Cockpit 已停止添加，没有把新代码绑定到旧选择。',
+    requiredAction: '请重新选择文件夹并确认当前看到的项目。',
+  },
+  CLIENT_ID_REQUIRED: {
+    status: 401,
+    message: '这个浏览器的本地身份已经失效。',
+    impact: '没有执行写入，代码和已有记录都不受影响。',
+    requiredAction: '请刷新 UGK Cockpit 页面后重试。',
+  },
+  PROJECT_LOCATION_CHANGED: {
+    status: 409,
+    message: '这份代码的位置与已有记录不一致。',
+    impact: 'Cockpit 没有自动改变绑定，也没有修改代码。',
+    requiredAction: '请从原项目卡片进入“重新选择位置”并确认。',
+  },
 };
 
 function id(prefix, value) {
@@ -233,6 +276,32 @@ function tokenMatches(actual, expected) {
   return candidate.length === reference.length && timingSafeEqual(candidate, reference);
 }
 
+function cookieValue(cookieHeader, name) {
+  for (const part of (cookieHeader ?? '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return rest.join('=');
+  }
+  return null;
+}
+
+function authenticate(request, apiToken, browserToken) {
+  const bearer = request.headers.authorization;
+  if (tokenMatches(bearer, apiToken)) {
+    return {
+      kind: 'bearer',
+      principalHash: createHash('sha256').update(apiToken).digest('hex'),
+    };
+  }
+  const session = cookieValue(request.headers.cookie, 'ugk_cockpit_session');
+  if (tokenMatches(`Bearer ${session ?? ''}`, browserToken)) {
+    return {
+      kind: 'browser',
+      principalHash: null,
+    };
+  }
+  return null;
+}
+
 function allowedOrigin(origin, port) {
   if (!origin) return true;
   return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
@@ -286,10 +355,15 @@ export async function createCockpitHttpServer({
   host = '127.0.0.1',
   port = 0,
   probe = probeGitWorktree,
+  folderPicker = selectFolder,
+  folderGrants = null,
+  webRoot = DEFAULT_WEB_ROOT,
   faultInjector,
 }) {
   if (!token || token.length < 32) throw new Error('A local API token of at least 32 characters is required.');
   const db = openCockpitDatabase(dbPath);
+  const activeFolderGrants = folderGrants ?? new FolderGrantStore({ db });
+  const browserSessionToken = randomBytes(32).toString('base64url');
   db.prepare(`
     UPDATE runs SET health = 'recovery_uncertain'
     WHERE lifecycle = 'active'
@@ -308,12 +382,147 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      if (await serveWebAsset({
+        request,
+        response,
+        pathname: url.pathname,
+        webRoot,
+        sessionToken: browserSessionToken,
+      })) return;
+
       if (!allowedOrigin(request.headers.origin, currentPort)) {
         sendError(response, 'ORIGIN_REJECTED');
         return;
       }
-      if (!tokenMatches(request.headers.authorization, token)) {
+      const authentication = authenticate(request, token, browserSessionToken);
+      if (!authentication) {
         sendError(response, 'AUTH_REQUIRED');
+        return;
+      }
+      if (
+        authentication.kind === 'browser'
+        && request.method !== 'GET'
+        && (
+          !request.headers.origin
+          || request.headers['sec-fetch-site'] !== 'same-origin'
+          || !request.headers['content-type']?.toLowerCase().startsWith('application/json')
+        )
+      ) {
+        sendError(response, 'ORIGIN_REJECTED');
+        return;
+      }
+      if (authentication.kind === 'browser' && request.method !== 'GET') {
+        const clientId = request.headers['x-ugk-client-id'];
+        if (typeof clientId !== 'string' || !/^[a-zA-Z0-9_-]{16,128}$/.test(clientId)) {
+          sendError(response, 'CLIENT_ID_REQUIRED');
+          return;
+        }
+        authentication.principalHash = createHash('sha256')
+          .update(`browser:${clientId}`)
+          .digest('hex');
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/folders/select') {
+        const selectedPath = await folderPicker();
+        if (!selectedPath) {
+          sendJson(response, 200, { ok: true, cancelled: true });
+          return;
+        }
+        const binding = authorizeExistingPath(selectedPath, selectedPath);
+        const observation = await probe(binding.candidateReal);
+        revalidateAuthorizedPath(binding);
+        authorizeObservation(observation, [binding.rootReal]);
+        const grant = activeFolderGrants.issue({
+          folderPath: binding.candidateReal,
+          canonicalPath: observation.canonicalPath,
+          repositoryIdentity: observation.repositoryIdentity,
+          worktreeIdentity: observation.worktreeIdentity,
+        }, authentication.principalHash);
+        sendJson(response, 200, {
+          ok: true,
+          cancelled: false,
+          grantId: grant.grantId,
+          folderName: path.basename(binding.candidateReal),
+          folderPath: binding.candidateReal,
+          expiresAt: grant.expiresAt,
+          promise: '只读取必要的代码状态；不会清理、覆盖、提交、上传或删除文件。',
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/projects') {
+        const body = await readJson(request);
+        if (
+          typeof body.commandId !== 'string' || body.commandId.length < 1
+          || typeof body.grantId !== 'string' || body.grantId.length < 1
+          || (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length < 1))
+          || (body.stage !== undefined && !['development', 'maintenance', 'paused'].includes(body.stage))
+        ) {
+          const error = new Error('Invalid project registration request.');
+          error.code = 'INVALID_REQUEST';
+          throw error;
+        }
+        const grant = activeFolderGrants.claim(
+          body.grantId,
+          body.commandId,
+          authentication.principalHash,
+        );
+        const replay = readCommand(db, body.commandId);
+        if (replay?.kind === 'project.register' && ['committed', 'failed'].includes(replay.state)) {
+          const frozen = JSON.parse(replay.request_json);
+          const expectedName = body.name?.trim() || path.basename(grant.canonical_path);
+          if (
+            frozen.grantId !== body.grantId
+            || frozen.name !== expectedName
+            || frozen.stage !== (body.stage ?? 'development')
+          ) {
+            const error = new Error('Command payload changed during replay.');
+            error.code = 'COMMAND_CONFLICT';
+            throw error;
+          }
+          activeFolderGrants.complete(body.grantId, body.commandId);
+            const result = parseCommandResponse(replay);
+            if (result.ok) sendJson(response, 200, result);
+            else sendError(response, result.code, { commandId: body.commandId });
+            return;
+        }
+        const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
+        const observation = await probe(binding.candidateReal);
+        revalidateAuthorizedPath(binding);
+        authorizeObservation(observation, [binding.rootReal]);
+        if (
+          observation.canonicalPath !== grant.canonical_path
+          || observation.repositoryIdentity !== grant.repository_identity
+          || observation.worktreeIdentity !== grant.worktree_identity
+        ) {
+          activeFolderGrants.complete(body.grantId, body.commandId);
+          const error = new Error('Folder identity changed after selection.');
+          error.code = 'FOLDER_SELECTION_CHANGED';
+          throw error;
+        }
+        const result = registerProject(db, {
+          commandId: body.commandId,
+          name: body.name?.trim() || path.basename(observation.canonicalPath),
+          stage: body.stage ?? 'development',
+          observation,
+          authorizedRoot: binding.rootReal,
+          grantId: body.grantId,
+        });
+        activeFolderGrants.complete(body.grantId, body.commandId);
+        if (result.ok) sendJson(response, 201, result);
+        else sendError(response, result.code, {
+          commandId: body.commandId,
+          extra: { project_id: result.projectId ?? null },
+        });
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/v1/dashboard') {
+        sendJson(response, 200, {
+          ok: true,
+          refreshedAt: new Date().toISOString(),
+          projects: readDashboard(db),
+        });
         return;
       }
 

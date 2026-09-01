@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
-import { readDashboard, registerProject } from '../src/core/projects.mjs';
+import { readDashboard, registerProject, worktreeIdFor } from '../src/core/projects.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-project-'));
@@ -18,6 +18,7 @@ function observation(overrides = {}) {
     repositoryIdentity: 'repository-one',
     worktreeIdentity: 'worktree-one',
     observedAt: '2026-09-01T00:00:00.000Z',
+    coherence: 'coherent',
     after: { hasChanges: false },
     ...overrides,
   };
@@ -75,6 +76,30 @@ test('same command replays and a same-path replacement fails closed', (t) => {
   });
   assert.equal(replaced.ok, false);
   assert.equal(replaced.code, 'WORKTREE_IDENTITY_CHANGED');
+  assert.equal(readDashboard(db).length, 1);
+  db.close();
+});
+
+test('a worktree known before Project registration is safely adopted', (t) => {
+  const db = fixture(t);
+  const observed = observation();
+  db.prepare(`
+    INSERT INTO worktrees (
+      id, canonical_path, repository_identity, identity_fingerprint, created_at
+    ) VALUES (?, ?, ?, ?, ?)
+  `).run(
+    worktreeIdFor(observed.worktreeIdentity),
+    observed.canonicalPath,
+    observed.repositoryIdentity,
+    observed.worktreeIdentity,
+    observed.observedAt,
+  );
+  const result = registerProject(db, {
+    commandId: 'adopt-known-worktree',
+    name: '已有代码位置',
+    observation: observed,
+  });
+  assert.equal(result.ok, true);
   assert.equal(readDashboard(db).length, 1);
   db.close();
 });

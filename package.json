@@ -1,13 +1,15 @@
 {
   "name": "ugk-cockpit",
-  "version": "0.0.1",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
   "engines": {
     "node": "24.15.x"
   },
   "scripts": {
-    "serve": "node src/main.mjs",
+    "serve": "npm run build:web && node src/main.mjs",
+    "dev:web": "vite",
+    "build:web": "vite build",
     "test": "node --test --test-concurrency=1",
     "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs"
   },

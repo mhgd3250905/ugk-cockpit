@@ -106,6 +106,263 @@ test('local HTTP boundary requires auth and rejects foreign origins', async (t) 
   }), 403, 'ORIGIN_REJECTED');
 });
 
+test('local web shell sets an HttpOnly session and browser mutations require same-origin evidence', async (t) => {
+  const root = createRepository();
+  let pickerCalls = 0;
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    folderPicker: async () => {
+      pickerCalls += 1;
+      return root;
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const shell = await request(service, '/');
+  assert.equal(shell.status, 200);
+  assert.match(shell.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  const cookie = shell.headers.get('set-cookie');
+  assert.match(cookie, /ugk_cockpit_session=/);
+  assert.match(cookie, /HttpOnly/i);
+  assert.match(cookie, /SameSite=Strict/i);
+  assert.doesNotMatch(await shell.text(), new RegExp(TOKEN));
+
+  await assertUserError(await request(service, '/api/v1/folders/select', {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: '{}',
+  }), 403, 'ORIGIN_REJECTED');
+  assert.equal(pickerCalls, 0);
+
+  const accepted = await request(service, '/api/v1/folders/select', {
+    method: 'POST',
+    headers: {
+      cookie,
+      origin: `http://127.0.0.1:${service.port}`,
+      'sec-fetch-site': 'same-origin',
+      'content-type': 'application/json',
+      'x-ugk-client-id': 'browser-fixture-client-0001',
+    },
+    body: '{}',
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(pickerCalls, 1);
+});
+
+test('durable folder grant can finish after a service restart with the same CLI identity', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  let service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    folderPicker: async () => root,
+  });
+  t.after(async () => {
+    await service?.close();
+    cleanup(root);
+  });
+  const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+  const selected = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST', headers, body: '{}',
+  })).json();
+  await service.close();
+  service = await createCockpitHttpServer({ dbPath, token: TOKEN });
+  const registered = await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'register-after-service-restart',
+      grantId: selected.grantId,
+      name: '重启后继续',
+    }),
+  });
+  assert.equal(registered.status, 201);
+  assert.equal((await registered.json()).name, '重启后继续');
+});
+
+test('browser can continue a selected folder after service restart without exposing the API token', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  const clientId = 'browser-restart-client-0001';
+  let service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    folderPicker: async () => root,
+  });
+  t.after(async () => {
+    await service?.close();
+    cleanup(root);
+  });
+  let shell = await request(service, '/');
+  const firstCookie = shell.headers.get('set-cookie');
+  const browserHeaders = (cookie) => ({
+    cookie,
+    origin: `http://127.0.0.1:${service.port}`,
+    'sec-fetch-site': 'same-origin',
+    'content-type': 'application/json',
+    'x-ugk-client-id': clientId,
+  });
+  const selected = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST', headers: browserHeaders(firstCookie), body: '{}',
+  })).json();
+  await service.close();
+  service = await createCockpitHttpServer({ dbPath, token: TOKEN });
+  shell = await request(service, '/');
+  const newCookie = shell.headers.get('set-cookie');
+  assert.notEqual(newCookie, firstCookie);
+  const registered = await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers: browserHeaders(newCookie),
+    body: JSON.stringify({
+      commandId: 'browser-register-after-restart',
+      grantId: selected.grantId,
+      name: '浏览器重启恢复',
+    }),
+  });
+  assert.equal(registered.status, 201);
+  assert.equal((await registered.json()).name, '浏览器重启恢复');
+});
+
+test('folder selection grants one registration and dashboard returns human project state', async (t) => {
+  const root = createRepository();
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    folderPicker: async () => root,
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    'content-type': 'application/json',
+  };
+  const selectedResponse = await request(service, '/api/v1/folders/select', {
+    method: 'POST',
+    headers,
+    body: '{}',
+  });
+  assert.equal(selectedResponse.status, 200);
+  const selected = await selectedResponse.json();
+  assert.equal(selected.cancelled, false);
+  assert.match(selected.promise, /不会.*修改|不会.*覆盖/);
+
+  const registeredResponse = await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'register-http-project',
+      grantId: selected.grantId,
+      name: '第一个项目',
+    }),
+  });
+  assert.equal(registeredResponse.status, 201);
+  assert.equal((await registeredResponse.json()).status, 'ready');
+
+  const dashboardResponse = await request(service, '/api/v1/dashboard', { headers });
+  assert.equal(dashboardResponse.status, 200);
+  const dashboard = await dashboardResponse.json();
+  assert.equal(dashboard.projects.length, 1);
+  assert.equal(dashboard.projects[0].name, '第一个项目');
+  assert.equal(dashboard.projects[0].statusReason, 'ready_to_start');
+
+  await assertUserError(await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'reuse-folder-grant',
+      grantId: selected.grantId,
+      name: '不能重复消费',
+    }),
+  }), 409, 'FOLDER_GRANT_IN_USE');
+});
+
+test('folder grant binds repository identity and survives a transient probe failure', async (t) => {
+  const root = createRepository();
+  let probeCalls = 0;
+  let failNextRegistration = true;
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    folderPicker: async () => root,
+    probe: async (candidate) => {
+      probeCalls += 1;
+      if (probeCalls > 1 && failNextRegistration) {
+        failNextRegistration = false;
+        throw new Error('transient fixture failure');
+      }
+      return fakeObservation(candidate);
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+  const selected = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST', headers, body: '{}',
+  })).json();
+  const body = JSON.stringify({
+    commandId: 'retry-project-registration',
+    grantId: selected.grantId,
+    name: '可以重试',
+  });
+  await assertUserError(await request(service, '/api/v1/projects', {
+    method: 'POST', headers, body,
+  }), 400, 'REQUEST_FAILED');
+  const retried = await request(service, '/api/v1/projects', {
+    method: 'POST', headers, body,
+  });
+  assert.equal(retried.status, 201);
+  assert.equal((await retried.json()).name, '可以重试');
+});
+
+test('same-path repository replacement after folder selection requires reselection', async (t) => {
+  const root = createRepository();
+  let probeCalls = 0;
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    folderPicker: async () => root,
+    probe: async (candidate) => {
+      probeCalls += 1;
+      return {
+        ...fakeObservation(candidate),
+        repositoryIdentity: probeCalls === 1 ? 'selected-repository' : 'replacement-repository',
+        worktreeIdentity: probeCalls === 1 ? 'selected-worktree' : 'replacement-worktree',
+      };
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+  const selected = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST', headers, body: '{}',
+  })).json();
+  await assertUserError(await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'replacement-after-selection',
+      grantId: selected.grantId,
+      name: '不应添加',
+    }),
+  }), 409, 'FOLDER_SELECTION_CHANGED');
+  const db = openCockpitDatabase(dataPath(root), { migrate: false });
+  assert.equal(db.prepare('SELECT count(*) AS count FROM projects').get().count, 0);
+  db.close();
+});
+
 test('invalid input and unknown runs do not create dangling commands', async (t) => {
   const root = createRepository();
   const dbPath = dataPath(root);

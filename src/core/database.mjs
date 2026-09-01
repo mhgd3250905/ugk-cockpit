@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 4;
+export const SUPPORTED_SCHEMA_VERSION = 6;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -141,6 +141,45 @@ CREATE TABLE projects (
   updated_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX idx_projects_status_updated ON projects(status, updated_at DESC);
+`,
+  },
+  {
+    version: 5,
+    name: 'project-observation-evidence',
+    sql: `
+ALTER TABLE projects ADD COLUMN authorized_root TEXT NOT NULL DEFAULT '';
+CREATE TABLE project_observations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  head TEXT,
+  branch TEXT,
+  index_fingerprint TEXT,
+  worktree_fingerprint TEXT,
+  has_changes INTEGER NOT NULL CHECK (has_changes IN (0, 1)),
+  coherence TEXT NOT NULL CHECK (coherence IN ('coherent', 'incoherent', 'unknown')),
+  observed_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_project_observations_latest
+  ON project_observations(project_id, observed_at DESC);
+`,
+  },
+  {
+    version: 6,
+    name: 'durable-folder-grants',
+    sql: `
+CREATE TABLE folder_grants (
+  id TEXT PRIMARY KEY,
+  principal_hash TEXT NOT NULL,
+  folder_path TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  repository_identity TEXT NOT NULL,
+  worktree_identity TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'claimed', 'consumed')),
+  claimed_by_command TEXT,
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_folder_grants_expiry ON folder_grants(expires_at);
 `,
   },
 ];
