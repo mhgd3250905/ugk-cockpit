@@ -358,6 +358,13 @@ export function readDashboard(db) {
         id: assignment.id,
         agent: assignment.agent_id,
         task: assignment.task_id,
+        mode: (() => {
+          try {
+            return JSON.parse(assignment.scope_json).mode ?? null;
+          } catch {
+            return null;
+          }
+        })(),
         expiresAt: db.prepare(`
           SELECT expires_at FROM dispatch_grants
           WHERE assignment_id = ? AND state = 'active'

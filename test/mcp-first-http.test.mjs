@@ -53,15 +53,28 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.ok(initCode);
   assert.equal(assignment.message.includes(root), false);
   assert.equal(assignment.message.includes(TOKEN), false);
+  const reissueResponse = await post(
+    service,
+    `/api/v1/projects/${project.projectId}/assignments/reissue`,
+    { clientRequestId: 'reissue-assignment-1', mode: 'init' },
+  );
+  assert.equal(reissueResponse.status, 200, await reissueResponse.clone().text());
+  const reissued = await reissueResponse.json();
+  const reissuedInitCode = reissued.message.match(/initCode: "([^"]+)"/)?.[1];
+  assert.equal(reissued.reissued, true);
+  assert.equal(reissued.assignmentId, assignment.assignmentId);
+  assert.ok(reissuedInitCode);
+  assert.notEqual(reissuedInitCode, initCode);
   const pendingDashboard = await (await fetch(
     `http://${service.host}:${service.port}/api/v1/dashboard`,
     { headers: { authorization: `Bearer ${TOKEN}` } },
   )).json();
   assert.equal(pendingDashboard.projects[0].statusReason, 'assignment_waiting');
   assert.equal(pendingDashboard.projects[0].activeRun, null);
+  assert.equal(pendingDashboard.projects[0].pendingAssignment.mode, 'adopt');
 
   const initResponse = await post(service, '/api/v1/mcp/work/init', {
-    initCode,
+    initCode: reissuedInitCode,
     clientRequestId: 'init-1',
     currentTask: '验证 MCP init 闭环',
     currentState: '核心功能完成一半，继续开发',

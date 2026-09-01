@@ -174,6 +174,32 @@ function App() {
     setHandoffGoal('');
     setDispatch(null);
     setNotice(null);
+    if (initialMode === 'init' && project.pendingAssignment?.mode === 'adopt') {
+      reissueInit(project);
+    }
+  }
+
+  async function reissueInit(project) {
+    setBusy(true);
+    try {
+      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/assignments/reissue`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId: crypto.randomUUID(),
+          mode: 'init',
+        }),
+      });
+      setDispatch(result);
+    } catch (error) {
+      setNotice({
+        title: error.message || '还没有重新生成接入指令。',
+        detail: error.required_action || error.impact || '请刷新状态后重试。',
+        actionLabel: '重试生成',
+        retry: () => reissueInit(project),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function createHandoff() {
@@ -429,7 +455,11 @@ function ProjectCard({ project, onAssign }) {
         <button
           className="text-button"
           onClick={() => onAssign(project, 'init')}
-          disabled={['active_work', 'agent_waiting', 'assignment_waiting'].includes(project.statusReason)}
+          disabled={[
+            'active_work',
+            'agent_waiting',
+          ].includes(project.statusReason)
+            || (project.statusReason === 'assignment_waiting' && project.pendingAssignment?.mode !== 'adopt')}
         >
           接入正在工作的 AI
         </button>

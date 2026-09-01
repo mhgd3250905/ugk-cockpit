@@ -8,6 +8,7 @@ import {
   beginAssignmentWork,
   completeAssignment,
   createAssignment,
+  issueDispatchGrant,
   readDispatchContext,
   readSessionContext,
   recordProgress,
@@ -257,6 +258,33 @@ const PUBLIC_ERRORS = {
 
 function id(prefix, value) {
   return `${prefix}_${createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
+}
+
+function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
+  if (mode === 'init') {
+    return [
+      '请使用 UGK Cockpit MCP 把当前正在进行的开发接入工作台。',
+      `调用 ugk_work_init(initCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号, currentTask: 你正在完成的目标, currentState: 当前进展摘要)。`,
+      '成功返回 sessionId 和 revision 后继续开发；不要清理、覆盖或重置已有改动。',
+      '后续用 ugk_work_progress 报告进展，结束时用 ugk_work_handoff 生成标准交接手册。',
+      '如果工具报告项目不匹配或已有写入会话，请停止并告诉用户，不要强行接管。',
+    ].join('\n');
+  }
+  if (mode === 'handoff') {
+    return [
+      '请使用 UGK Cockpit MCP 接上这个项目的上下文。',
+      `调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)。`,
+      '读取工具返回的 latestHandoff，简要告诉用户你理解的现状，然后等待后续安排。',
+      '此时不要修改代码；收到明确任务后先调用 ugk_work_begin，再开始工作。',
+      '如果 MCP 工具不可用或接手失败，不要声称已经读取交接或开始工作。',
+    ].join('\n');
+  }
+  return [
+    `请使用 UGK Cockpit MCP 接手这项任务：${task}`,
+    `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
+    '工作中调用 ugk_work_progress；结束时优先调用 ugk_work_handoff 生成标准交接手册。',
+    '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
+  ].join('\n');
 }
 
 function sendJson(response, statusCode, body) {
@@ -856,28 +884,12 @@ export async function createCockpitHttpServer({
           sendError(response, result.code, { extra: { assignment_id: result.assignmentId ?? null } });
           return;
         }
-        const message = body.mode === 'init'
-          ? [
-            `请使用 UGK Cockpit MCP 把当前正在进行的开发接入工作台。`,
-            `调用 ugk_work_init(initCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号, currentTask: 你正在完成的目标, currentState: 当前进展摘要)。`,
-            '成功返回 sessionId 和 revision 后继续开发；不要清理、覆盖或重置已有改动。',
-            '后续用 ugk_work_progress 报告进展，结束时用 ugk_work_handoff 生成标准交接手册。',
-            '如果工具报告项目不匹配或已有写入会话，请停止并告诉用户，不要强行接管。',
-          ].join('\n')
-          : body.mode === 'handoff'
-          ? [
-            '请使用 UGK Cockpit MCP 接上这个项目的上下文。',
-            `调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)。`,
-            '读取工具返回的 latestHandoff，简要告诉用户你理解的现状，然后等待后续安排。',
-            '此时不要修改代码；收到明确任务后先调用 ugk_work_begin，再开始工作。',
-            '如果 MCP 工具不可用或接手失败，不要声称已经读取交接或开始工作。',
-          ].join('\n')
-          : [
-            `请使用 UGK Cockpit MCP 接手这项任务：${task}`,
-            `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
-            '工作中调用 ugk_work_progress；结束时优先调用 ugk_work_handoff 生成标准交接手册。',
-            '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
-          ].join('\n');
+        const message = assignmentDispatchMessage({
+          mode: body.mode,
+          dispatchCode,
+          agent: body.agent,
+          task,
+        });
         sendJson(response, 201, {
           ok: true,
           assignmentId,
@@ -886,6 +898,62 @@ export async function createCockpitHttpServer({
           task,
           expiresAt: result.expiresAt,
           message,
+        });
+        return;
+      }
+
+      const reissueMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/assignments\/reissue$/);
+      if (request.method === 'POST' && reissueMatch) {
+        const projectId = decodeURIComponent(reissueMatch[1]);
+        const body = await readJson(request);
+        requireString(body, 'clientRequestId');
+        if (body.mode !== undefined && body.mode !== 'init') {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        await observeRegisteredProject(projectId);
+        const pendingAssignments = db.prepare(`
+          SELECT * FROM assignments
+          WHERE project_id = ? AND status = 'pending'
+          ORDER BY created_at DESC, id DESC
+        `).all(projectId);
+        const assignment = pendingAssignments.find((row) => {
+          try {
+            return JSON.parse(row.scope_json).mode === 'adopt';
+          } catch {
+            return false;
+          }
+        });
+        if (!assignment) {
+          sendError(response, 'NOT_FOUND');
+          return;
+        }
+        const dispatchCode = createHmac('sha256', token)
+          .update(`dispatch:reissue:${assignment.id}:${body.clientRequestId}`)
+          .digest('base64url');
+        const grant = issueDispatchGrant(db, {
+          assignmentId: assignment.id,
+          grantId: id('dispatch_reissue', `${assignment.id}:${body.clientRequestId}`),
+          dispatchCode,
+        });
+        if (!grant.ok) {
+          sendError(response, grant.code, { extra: { assignment_id: assignment.id } });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          reissued: true,
+          assignmentId: assignment.id,
+          agent: assignment.agent_id,
+          mode: 'init',
+          task: '接入当前正在进行的开发',
+          expiresAt: grant.expiresAt,
+          message: assignmentDispatchMessage({
+            mode: 'init',
+            dispatchCode,
+            agent: assignment.agent_id,
+            task: '接入当前正在进行的开发',
+          }),
         });
         return;
       }
