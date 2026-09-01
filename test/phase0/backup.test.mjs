@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createConsistentBackup } from '../../src/core/backup.mjs';
+import { backupBeforeMigration, createConsistentBackup } from '../../src/core/backup.mjs';
 import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../../src/core/database.mjs';
 import { startWriteRun } from '../../src/core/runs.mjs';
 
@@ -36,4 +36,28 @@ test('consistent backup opens independently and preserves integrity', async (t) 
     SUPPORTED_SCHEMA_VERSION,
   );
   restored.close();
+});
+
+test('a verified backup is created before a schema upgrade and skipped otherwise', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-pre-migration-backup-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'cockpit.db');
+  openCockpitDatabase(sourcePath).close();
+
+  const backupPath = await backupBeforeMigration({
+    sourcePath,
+    backupDirectory: path.join(root, 'backups'),
+    targetVersion: SUPPORTED_SCHEMA_VERSION + 1,
+  });
+  assert.ok(backupPath);
+  const restored = openCockpitDatabase(backupPath, { migrate: false });
+  assert.equal(restored.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(restored.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
+  restored.close();
+
+  assert.equal(await backupBeforeMigration({
+    sourcePath,
+    backupDirectory: path.join(root, 'backups'),
+    targetVersion: SUPPORTED_SCHEMA_VERSION,
+  }), null);
 });

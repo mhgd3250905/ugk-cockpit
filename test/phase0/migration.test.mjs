@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6],
+    [1, 2, 3, 4, 5, 6, 7, 8],
   );
   db.close();
 });
@@ -66,7 +66,7 @@ test('version 1 database upgrades missing identity columns without losing rows',
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 6);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 8);
   assert.equal(upgraded.prepare(`
     SELECT identity_fingerprint FROM worktrees WHERE id = 'worktree-1'
   `).get().identity_fingerprint, '');
@@ -114,7 +114,7 @@ test('legacy version 2 marker is repaired when identity columns are absent', (t)
   legacy.close();
 
   const repaired = openCockpitDatabase(dbPath);
-  assert.equal(repaired.prepare('PRAGMA user_version').get().user_version, 6);
+  assert.equal(repaired.prepare('PRAGMA user_version').get().user_version, 8);
   const worktreeColumns = repaired.prepare('PRAGMA table_info(worktrees)').all()
     .map((row) => row.name);
   const snapshotColumns = repaired.prepare('PRAGMA table_info(snapshots)').all()

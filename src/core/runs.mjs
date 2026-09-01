@@ -245,6 +245,7 @@ export function finalizeFinish(db, request, { faultInjector } = {}) {
       leaseGeneration,
       outcome,
       summary = '',
+      nextStep = '',
       commitRefs = [],
       acknowledgeUnattributed = false,
     } = frozen;
@@ -374,6 +375,7 @@ export function finalizeFinish(db, request, { faultInjector } = {}) {
       runId,
       outcome,
       summary,
+      nextStep,
       commitRefs,
       changeAttribution: hasUnattributedChanges
         ? 'unattributed_acknowledged'
@@ -383,8 +385,8 @@ export function finalizeFinish(db, request, { faultInjector } = {}) {
     db.prepare(`
       INSERT INTO handoff_receipts (
         id, run_id, finish_command_id, final_snapshot_id,
-        outcome, summary, payload_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        outcome, summary, next_step, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       receiptId,
       runId,
@@ -392,6 +394,7 @@ export function finalizeFinish(db, request, { faultInjector } = {}) {
       snapshotId,
       outcome,
       summary,
+      nextStep,
       canonicalJson(payload),
       finishedAt,
     );

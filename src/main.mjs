@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { backupBeforeMigration } from './core/backup.mjs';
+import { SUPPORTED_SCHEMA_VERSION } from './core/database.mjs';
 import { acquireInstanceLock } from './core/single-instance.mjs';
 import { createCockpitHttpServer } from './service/http-server.mjs';
 
@@ -31,8 +33,14 @@ mkdirSync(dataDir, { recursive: true });
 const lock = acquireInstanceLock(path.join(dataDir, 'service.lock'));
 try {
   const token = loadOrCreateToken(path.join(dataDir, 'api-token'));
+  const dbPath = path.join(dataDir, 'cockpit.db');
+  await backupBeforeMigration({
+    sourcePath: dbPath,
+    backupDirectory: path.join(dataDir, 'backups'),
+    targetVersion: SUPPORTED_SCHEMA_VERSION,
+  });
   const service = await createCockpitHttpServer({
-    dbPath: path.join(dataDir, 'cockpit.db'),
+    dbPath,
     token,
     host: '127.0.0.1',
     port: 41737,
@@ -49,4 +57,3 @@ try {
   lock.release();
   throw error;
 }
-

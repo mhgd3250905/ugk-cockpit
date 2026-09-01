@@ -4,11 +4,11 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.4` — Project onboarding、晨间简报预览与逐个手动选择项目。
+`0.1.0-alpha.5` — MCP-first AI 接手、进度回传、结束交接与首页状态闭环。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
-Run Lite 的开始、继续和结束工作仍在下一小步，因此页面上的对应按钮会明确显示“即将开放”，不会伪装成已经可用。
+项目卡片现在可以“交给 AI”：Cockpit 生成不含本地路径和 API token 的短期接手消息；AI 通过本机 stdio MCP 成功接手后才显示正在工作，并可回传进度、摘要和下一步。接管、撤销和最终确认仍由网页中的用户控制。
 
 Phase 0 已验证的基础能力继续保留：
 
@@ -32,6 +32,16 @@ npm run serve
 
 然后打开 `http://127.0.0.1:41737`。数据保存在 `%LOCALAPPDATA%\UGK Cockpit`，项目代码不会被 Cockpit 自动清理、提交、上传或删除。
 
+## 本机 MCP
+
+MCP server 通过 loopback service 使用同一数据库事实源，不直接接触业务项目文件。可先手工验证：
+
+```powershell
+npm run mcp
+```
+
+Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit\src\mcp\main.mjs`。本仓库只提供配置片段，不会自动修改用户级 Agent 配置。
+
 ## 本地验证
 
 要求 Node.js 24.15：
@@ -41,7 +51,7 @@ npm test
 npm run test:phase0
 ```
 
-当前不需要安装任何第三方依赖。
+MCP 后端未新增生产依赖。
 
 ## 面向用户的首版目标
 

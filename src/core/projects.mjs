@@ -19,6 +19,17 @@ export function worktreeIdFor(worktreeIdentity) {
   return `worktree_${createHash('sha256').update(worktreeIdentity).digest('hex').slice(0, 24)}`;
 }
 
+export function readProjectContext(db, projectId) {
+  return db.prepare(`
+    SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
+           projects.worktree_id, worktrees.canonical_path,
+           worktrees.repository_identity, worktrees.identity_fingerprint
+    FROM projects
+    JOIN worktrees ON worktrees.id = projects.worktree_id
+    WHERE projects.id = ?
+  `).get(projectId) ?? null;
+}
+
 function failCommand(db, commandId, response) {
   db.prepare(`
     UPDATE commands SET state = 'failed', response_json = ?, updated_at = ?
@@ -157,14 +168,109 @@ export function registerProject(db, request) {
   });
 }
 
+export function refreshProject(db, request) {
+  const { commandId, projectId, observation } = request;
+  const frozenRequest = {
+    commandId,
+    projectId,
+    canonicalPath: observation.canonicalPath,
+    repositoryIdentity: observation.repositoryIdentity,
+    worktreeIdentity: observation.worktreeIdentity,
+  };
+  const begun = beginCommand(db, {
+    commandId,
+    kind: 'project.refresh',
+    request: frozenRequest,
+  });
+  if (begun.command.state === 'committed' || begun.command.state === 'failed') {
+    return parseCommandResponse(begun.command);
+  }
+
+  return withImmediateTransaction(db, () => {
+    const command = readCommand(db, commandId);
+    if (command.state === 'committed' || command.state === 'failed') {
+      return parseCommandResponse(command);
+    }
+    const project = readProjectContext(db, projectId);
+    if (!project) {
+      return failCommand(db, commandId, { ok: false, code: 'PROJECT_NOT_FOUND' });
+    }
+    if (
+      project.canonical_path !== observation.canonicalPath
+      || project.repository_identity !== observation.repositoryIdentity
+      || project.identity_fingerprint !== observation.worktreeIdentity
+    ) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'WORKTREE_IDENTITY_CHANGED',
+        projectId,
+      });
+    }
+
+    const hasChanges = observation.after.hasChanges ? 1 : 0;
+    const status = project.stage === 'paused'
+      ? 'paused'
+      : (observation.coherence !== 'coherent' || hasChanges ? 'attention' : 'ready');
+    const statusReason = project.stage === 'paused'
+      ? 'user_paused'
+      : (observation.coherence !== 'coherent'
+        ? 'status_check_incomplete'
+        : (hasChanges ? 'preexisting_changes' : 'ready_to_start'));
+    const timestamp = now();
+    db.prepare(`
+      INSERT INTO project_observations (
+        id, project_id, head, branch, index_fingerprint, worktree_fingerprint,
+        has_changes, coherence, observed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      `project_observation_${commandId.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+      projectId,
+      observation.after.head ?? null,
+      observation.after.branch ?? null,
+      observation.after.indexFingerprint ?? null,
+      observation.after.worktreeFingerprint ?? null,
+      hasChanges,
+      observation.coherence ?? 'unknown',
+      observation.observedAt,
+    );
+    db.prepare(`
+      UPDATE projects
+      SET status = ?, status_reason = ?, last_observed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(status, statusReason, observation.observedAt, timestamp, projectId);
+    const response = {
+      ok: true,
+      commandId,
+      projectId,
+      status,
+      statusReason,
+      observedAt: observation.observedAt,
+    };
+    db.prepare(`
+      UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?
+      WHERE id = ? AND state = 'received'
+    `).run(canonicalJson(response), timestamp, commandId);
+    return response;
+  });
+}
+
 export function readDashboard(db) {
-  return db.prepare(`
+  const rows = db.prepare(`
     SELECT projects.id, projects.name, projects.stage,
            projects.last_observed_at, observations.has_changes,
            observations.coherence,
            worktrees.canonical_path,
            runs.id AS active_run_id, runs.agent_claim, runs.goal,
-           runs.health AS run_health, runs.last_heartbeat_at
+           runs.health AS run_health, runs.last_heartbeat_at,
+           runs.revision AS run_revision, runs.lease_generation,
+           runs.created_at AS run_started_at,
+           last_runs.id AS last_run_id,
+           last_runs.agent_claim AS last_agent_claim,
+           last_runs.goal AS last_goal,
+           last_runs.lifecycle AS last_outcome,
+           last_runs.finished_at,
+           receipts.summary AS last_summary,
+           receipts.next_step AS last_next_step
     FROM projects
     JOIN worktrees ON worktrees.id = projects.worktree_id
     LEFT JOIN project_observations AS observations
@@ -174,6 +280,13 @@ export function readDashboard(db) {
         ORDER BY observed_at DESC LIMIT 1
       )
     LEFT JOIN runs ON runs.worktree_id = worktrees.id AND runs.lifecycle = 'active'
+    LEFT JOIN runs AS last_runs ON last_runs.id = (
+      SELECT id FROM runs AS history
+      WHERE history.worktree_id = worktrees.id
+        AND history.lifecycle IN ('completed', 'blocked', 'abandoned')
+      ORDER BY history.finished_at DESC LIMIT 1
+    )
+    LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
     ORDER BY
       CASE
         WHEN runs.id IS NOT NULL AND runs.health = 'recovery_uncertain' THEN 0
@@ -182,28 +295,83 @@ export function readDashboard(db) {
         WHEN projects.stage != 'paused' THEN 2 ELSE 3
       END,
       projects.updated_at DESC
-  `).all().map((row) => ({
-    id: row.id,
-    name: row.name,
-    stage: row.stage,
-    status: row.active_run_id
-      ? 'active'
-      : (row.stage === 'paused'
-        ? 'paused'
-        : (row.coherence !== 'coherent' || row.has_changes ? 'attention' : 'ready')),
-    statusReason: row.active_run_id && row.run_health === 'recovery_uncertain'
-      ? 'run_may_be_interrupted'
-      : (row.coherence !== 'coherent'
-        ? 'status_check_incomplete'
-        : (row.has_changes ? 'preexisting_changes' : 'ready_to_start')),
-    lastObservedAt: row.last_observed_at,
-    path: row.canonical_path,
-    activeRun: row.active_run_id ? {
-      id: row.active_run_id,
-      agentClaim: row.agent_claim,
-      goal: row.goal,
-      health: row.run_health,
-      lastActivityAt: row.last_heartbeat_at,
-    } : null,
-  }));
+  `).all();
+  const activeAssignmentQuery = db.prepare(`
+    SELECT * FROM assignments
+    WHERE project_id = ? AND status IN ('pending', 'accepted', 'active')
+    ORDER BY updated_at DESC LIMIT 1
+  `);
+  const lastProgressQuery = db.prepare(`
+    SELECT status, note, revision, created_at FROM progress_events
+    WHERE assignment_id = ? ORDER BY revision DESC LIMIT 1
+  `);
+  return rows.map((row) => {
+    const assignment = activeAssignmentQuery.get(row.id) ?? null;
+    const lastProgress = assignment ? lastProgressQuery.get(assignment.id) ?? null : null;
+    const isAccepted = assignment && assignment.status !== 'pending';
+    const lastWork = row.last_run_id ? {
+      runId: row.last_run_id,
+      agentClaim: row.last_agent_claim,
+      goal: row.last_goal,
+      outcome: row.last_outcome,
+      summary: row.last_summary,
+      nextStep: row.last_next_step,
+      finishedAt: row.finished_at,
+    } : null;
+    return {
+      id: row.id,
+      name: row.name,
+      stage: row.stage,
+      status: row.active_run_id || isAccepted
+        ? 'active'
+        : (row.stage === 'paused'
+          ? 'paused'
+          : (row.coherence !== 'coherent' || row.has_changes ? 'attention' : 'ready')),
+      statusReason: row.active_run_id || isAccepted
+        ? (row.run_health === 'recovery_uncertain' ? 'run_may_be_interrupted' : 'active_work')
+        : (assignment?.status === 'pending'
+          ? 'assignment_waiting'
+          : (row.coherence !== 'coherent'
+            ? 'status_check_incomplete'
+            : (row.has_changes ? 'preexisting_changes' : 'ready_to_start'))),
+      lastObservedAt: row.last_observed_at,
+      path: row.canonical_path,
+      pendingAssignment: assignment?.status === 'pending' ? {
+        id: assignment.id,
+        agent: assignment.agent_id,
+        task: assignment.task_id,
+        expiresAt: db.prepare(`
+          SELECT expires_at FROM dispatch_grants
+          WHERE assignment_id = ? AND state = 'active'
+          ORDER BY created_at DESC LIMIT 1
+        `).get(assignment.id)?.expires_at ?? null,
+      } : null,
+      activeWork: isAccepted ? {
+        assignmentId: assignment.id,
+        sessionId: assignment.session_id,
+        agent: assignment.agent_id,
+        task: assignment.task_id,
+        revision: assignment.revision,
+        lastActivityAt: assignment.last_heartbeat_at ?? assignment.accepted_at,
+        lastProgress: lastProgress ? {
+          status: lastProgress.status,
+          note: lastProgress.note,
+          revision: lastProgress.revision,
+          createdAt: lastProgress.created_at,
+        } : null,
+      } : null,
+      activeRun: row.active_run_id ? {
+        id: row.active_run_id,
+        agentClaim: row.agent_claim,
+        goal: row.goal,
+        health: row.run_health,
+        lastActivityAt: row.last_heartbeat_at,
+        revision: row.run_revision,
+        leaseGeneration: row.lease_generation,
+        startedAt: row.run_started_at,
+      } : null,
+      lastHandoff: lastWork,
+      lastWork,
+    };
+  });
 }

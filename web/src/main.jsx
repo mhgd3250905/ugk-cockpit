@@ -28,6 +28,18 @@ const STATUS = {
     detail: '开始时会先记录当前状态，已有文件不会被清理。',
     action: '开始工作',
   },
+  assignment_waiting: {
+    eyebrow: '等待接手',
+    title: '任务已经准备好，等待 AI 接手',
+    detail: '只有 AI 成功接手后，这里才会显示正在工作。',
+    action: '查看接手消息',
+  },
+  active_work: {
+    eyebrow: '正在推进',
+    title: 'AI 已经接手这项任务',
+    detail: '最近进展和结束交接会自动回到这里。',
+    action: '查看进展',
+  },
 };
 
 const STAGES = {
@@ -57,6 +69,10 @@ function App() {
   const [stage, setStage] = useState('development');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [handoffProject, setHandoffProject] = useState(null);
+  const [handoffAgent, setHandoffAgent] = useState('Codex');
+  const [handoffGoal, setHandoffGoal] = useState('');
+  const [dispatch, setDispatch] = useState(null);
 
   async function refresh({ successNotice = null } = {}) {
     try {
@@ -138,6 +154,49 @@ function App() {
     }
   }
 
+  function openHandoff(project) {
+    setHandoffProject(project);
+    setHandoffAgent('Codex');
+    setHandoffGoal('');
+    setDispatch(null);
+    setNotice(null);
+  }
+
+  async function createHandoff() {
+    setBusy(true);
+    try {
+      const result = await api(`/api/v1/projects/${encodeURIComponent(handoffProject.id)}/assignments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId: crypto.randomUUID(),
+          agent: handoffAgent,
+          task: handoffGoal.trim(),
+        }),
+      });
+      setDispatch(result);
+      await refresh();
+    } catch (error) {
+      setNotice({
+        title: error.message || '还没有创建接手任务。',
+        detail: error.required_action || error.impact || '请检查任务目标后重试。',
+        actionLabel: '重试创建',
+        retry: () => createHandoff(),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyDispatchMessage() {
+    await navigator.clipboard.writeText(dispatch.message);
+    setNotice({
+      title: '接手消息已复制。',
+      detail: `把它发送给 ${handoffAgent}；成功接手前页面会保持“等待接手”。`,
+      actionLabel: '知道了',
+      retry: () => setNotice(null),
+    });
+  }
+
   const projects = dashboard?.projects ?? [];
   const priority = useMemo(
     () => projects.find((item) => item.status === 'attention' || item.statusReason === 'run_may_be_interrupted')
@@ -180,14 +239,16 @@ function App() {
         </section>
       ) : (
         <>
-          {priority && <PriorityCard project={priority} />}
+          {priority && <PriorityCard project={priority} onAssign={openHandoff} />}
           <section className="project-section">
             <div className="section-heading">
               <div><p className="kicker">全部项目</p><h2>接下来可以做什么</h2></div>
               <button className="text-button" onClick={() => refresh()}>重新加载简报</button>
             </div>
             <div className="project-grid">
-              {projects.map((project) => <ProjectCard key={project.id} project={project} />)}
+              {projects.map((project) => (
+                <ProjectCard key={project.id} project={project} onAssign={openHandoff} />
+              ))}
             </div>
           </section>
         </>
@@ -219,6 +280,54 @@ function App() {
           </section>
         </div>
       )}
+
+      {handoffProject && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="handoff-title">
+            <p className="kicker">交给 AI</p>
+            <h2 id="handoff-title">{handoffProject.name}</h2>
+            {!dispatch ? (
+              <>
+                <label>交给谁
+                  <select value={handoffAgent} onChange={(event) => setHandoffAgent(event.target.value)}>
+                    <option>Codex</option>
+                    <option>ZCode</option>
+                    <option>Antigravity</option>
+                  </select>
+                </label>
+                <label>这次要完成什么
+                  <textarea
+                    value={handoffGoal}
+                    onChange={(event) => setHandoffGoal(event.target.value)}
+                    rows="4"
+                    maxLength="1000"
+                    placeholder="一句话说明目标，例如：接通 MCP 接手和进度回传"
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                <p className="safety-copy">任务已创建。复制下面的消息给 {handoffAgent}，AI 成功接手后首页会自动更新。</p>
+                <label>接手消息
+                  <textarea className="dispatch-message" value={dispatch.message} readOnly rows="9" />
+                </label>
+                <small>接手码将在 {formatTime(dispatch.expiresAt)} 前有效；消息里不包含项目路径或本地 API token。</small>
+              </>
+            )}
+            {notice && <Notice notice={notice} busy={busy} />}
+            <div className="sheet-actions">
+              <button className="text-button" onClick={() => { setHandoffProject(null); setNotice(null); }} disabled={busy}>关闭</button>
+              {!dispatch ? (
+                <button className="primary-button" onClick={createHandoff} disabled={busy || !handoffGoal.trim()}>
+                  {busy ? '正在创建…' : '生成接手消息'}
+                </button>
+              ) : (
+                <button className="primary-button" onClick={copyDispatchMessage}>复制接手消息</button>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
@@ -233,7 +342,7 @@ function Notice({ notice, busy }) {
   );
 }
 
-function PriorityCard({ project }) {
+function PriorityCard({ project, onAssign }) {
   const copy = STATUS[project.statusReason] ?? STATUS.ready_to_start;
   return (
     <section className="priority-card">
@@ -244,12 +353,18 @@ function PriorityCard({ project }) {
         <h3>{copy.title}</h3>
         <p>{copy.detail}</p>
       </div>
-      <p className="coming-soon">项目已添加 · 工作接手功能即将开放</p>
+      <button
+        className="primary-button"
+        onClick={() => onAssign(project)}
+        disabled={project.statusReason === 'active_work'}
+      >
+        {project.statusReason === 'active_work' ? 'AI 正在工作' : '交给 AI'}
+      </button>
     </section>
   );
 }
 
-function ProjectCard({ project }) {
+function ProjectCard({ project, onAssign }) {
   const copy = STATUS[project.statusReason] ?? STATUS.ready_to_start;
   return (
     <article className={`project-card status-${project.status}`}>
@@ -258,7 +373,9 @@ function ProjectCard({ project }) {
       <p className="status-title">{copy.title}</p>
       <p>{copy.detail}</p>
       <div className="card-actions">
-        <span className="coming-soon">项目已添加 · 工作接手功能即将开放</span>
+        <button onClick={() => onAssign(project)} disabled={project.statusReason === 'active_work'}>
+          {project.statusReason === 'active_work' ? 'AI 正在工作' : '交给 AI'}
+        </button>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>
     </article>

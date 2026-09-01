@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 6;
+export const SUPPORTED_SCHEMA_VERSION = 8;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -180,6 +180,80 @@ CREATE TABLE folder_grants (
   created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX idx_folder_grants_expiry ON folder_grants(expires_at);
+`,
+  },
+  {
+    version: 7,
+    name: 'handoff-next-step',
+    apply(db) {
+      const table = db.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'handoff_receipts'
+      `).get();
+      if (!table) return;
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(handoff_receipts)').all().map((row) => row.name),
+      );
+      if (!columns.has('next_step')) {
+        db.exec("ALTER TABLE handoff_receipts ADD COLUMN next_step TEXT NOT NULL DEFAULT '';");
+      }
+    },
+  },
+  {
+    version: 8,
+    name: 'mcp-first-assignments',
+    sql: `
+CREATE TABLE assignments (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  agent_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'pending', 'accepted', 'active', 'completed', 'blocked',
+    'abandoned', 'failed', 'cancelled'
+  )),
+  revision INTEGER NOT NULL,
+  session_id TEXT UNIQUE,
+  accepted_grant_id TEXT,
+  accepted_at TEXT,
+  last_heartbeat_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE dispatch_grants (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES assignments(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  agent_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  code_hash TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('active', 'accepted', 'revoked', 'expired')),
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  accepted_at TEXT,
+  accepted_session_id TEXT,
+  accepted_client_request_id TEXT,
+  revoked_at TEXT
+) STRICT;
+CREATE TABLE progress_events (
+  id TEXT PRIMARY KEY,
+  assignment_id TEXT NOT NULL REFERENCES assignments(id),
+  session_id TEXT NOT NULL,
+  client_request_id TEXT NOT NULL,
+  expected_revision INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  note TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(assignment_id, session_id, client_request_id)
+) STRICT;
+CREATE INDEX idx_assignments_project_status ON assignments(project_id, status, updated_at DESC);
+CREATE INDEX idx_dispatch_grants_assignment_state ON dispatch_grants(assignment_id, state);
+CREATE INDEX idx_dispatch_grants_expiry ON dispatch_grants(state, expires_at);
+CREATE INDEX idx_progress_events_assignment_revision ON progress_events(assignment_id, revision DESC);
 `,
   },
 ];

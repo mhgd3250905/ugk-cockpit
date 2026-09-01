@@ -1,12 +1,20 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openCockpitDatabase } from '../core/database.mjs';
+import {
+  acceptAssignment,
+  completeAssignment,
+  createAssignment,
+  readDispatchContext,
+  readSessionContext,
+  recordProgress,
+} from '../core/assignments.mjs';
 import { FolderGrantStore } from '../core/folder-grants.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
-import { readDashboard, registerProject } from '../core/projects.mjs';
+import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
@@ -185,6 +193,48 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 没有自动改变绑定，也没有修改代码。',
     requiredAction: '请从原项目卡片进入“重新选择位置”并确认。',
   },
+  PROJECT_NOT_FOUND: {
+    status: 404,
+    message: '找不到这个项目。',
+    impact: '没有创建任务，也没有修改代码。',
+    requiredAction: '请刷新首页后从现有项目重新发起。',
+  },
+  DISPATCH_CODE_INVALID: {
+    status: 404,
+    message: '这个接手码无效。',
+    impact: '没有接手任务，也没有修改代码。',
+    requiredAction: '请从 Cockpit 页面重新复制接手消息。',
+  },
+  DISPATCH_GRANT_EXPIRED: {
+    status: 409,
+    message: '这次接手码已经过期。',
+    impact: '任务仍未被接手，代码没有受到影响。',
+    requiredAction: '请在 Cockpit 页面重新分配并复制新消息。',
+  },
+  DISPATCH_GRANT_REVOKED: {
+    status: 409,
+    message: '这次接手已经被撤销。',
+    impact: '旧接手码不能再更新任务，代码没有受到影响。',
+    requiredAction: '请使用 Cockpit 页面最新生成的接手消息。',
+  },
+  DISPATCH_GRANT_ALREADY_ACCEPTED: {
+    status: 409,
+    message: '这项任务已经被另一条 AI 会话接手。',
+    impact: '没有启动第二条写入会话，已有工作记录保持不变。',
+    requiredAction: '请回到 Cockpit 查看当前接手者；接管必须由你确认。',
+  },
+  ASSIGNMENT_REVISION_CONFLICT: {
+    status: 409,
+    message: '这项任务已经有更新的进展。',
+    impact: '旧进度没有覆盖新记录，代码没有被 Cockpit 修改。',
+    requiredAction: '请使用工具返回的最新 revision 后重试。',
+  },
+  SESSION_NOT_FOUND: {
+    status: 404,
+    message: '找不到这次 AI 工作会话。',
+    impact: '没有写入进展，也没有修改代码。',
+    requiredAction: '请先使用接手消息成功接手任务。',
+  },
 };
 
 function id(prefix, value) {
@@ -266,6 +316,45 @@ function validateFinishBody(body) {
     && typeof body.acknowledgeUnattributed !== 'boolean'
   ) {
     const error = new Error('Invalid acknowledgeUnattributed');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateAssignmentBody(body) {
+  requireString(body, 'clientRequestId');
+  requireString(body, 'agent');
+  requireString(body, 'task');
+  if (!['Codex', 'ZCode', 'Antigravity'].includes(body.agent) || body.task.length > 1000) {
+    const error = new Error('Invalid assignment request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpProgressBody(body) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'status');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
+    || typeof body.note !== 'string' || body.note.length > 4000) {
+    const error = new Error('Invalid progress request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpFinishBody(body) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
+    || !['completed', 'blocked', 'abandoned'].includes(body.outcome)
+    || typeof body.summary !== 'string' || body.summary.length > 4000
+    || typeof body.nextStep !== 'string' || body.nextStep.length > 2000
+    || (body.acknowledgements !== undefined
+      && (!Array.isArray(body.acknowledgements)
+        || body.acknowledgements.some((value) => typeof value !== 'string')))) {
+    const error = new Error('Invalid finish request.');
     error.code = 'INVALID_REQUEST';
     throw error;
   }
@@ -420,6 +509,38 @@ export async function createCockpitHttpServer({
     };
   }
 
+  async function observeRegisteredProject(projectId, expected = null) {
+    const project = readProjectContext(db, projectId);
+    if (!project) {
+      const error = new Error('Project not found.');
+      error.code = 'PROJECT_NOT_FOUND';
+      throw error;
+    }
+    const binding = authorizeExistingPath(project.canonical_path, project.authorized_root);
+    const observation = await probe(
+      binding.candidateReal,
+      expected?.baselineHead ? { expectedBaselineHead: expected.baselineHead } : undefined,
+    );
+    revalidateAuthorizedPath(binding);
+    authorizeObservation(observation, [project.authorized_root]);
+    if (
+      observation.canonicalPath !== project.canonical_path
+      || observation.repositoryIdentity !== project.repository_identity
+      || observation.worktreeIdentity !== project.identity_fingerprint
+      || (expected && (
+        expected.projectId !== project.id
+        || expected.worktreeId !== project.worktree_id
+        || expected.repositoryIdentity !== project.repository_identity
+        || expected.worktreeIdentity !== project.identity_fingerprint
+      ))
+    ) {
+      const error = new Error('Registered project identity changed.');
+      error.code = 'WORKTREE_IDENTITY_CHANGED';
+      throw error;
+    }
+    return { project, observation };
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const currentPort = server.address().port;
@@ -471,6 +592,10 @@ export async function createCockpitHttpServer({
         authentication.principalHash = createHash('sha256')
           .update(`browser:${clientId}`)
           .digest('hex');
+      }
+      if (url.pathname.startsWith('/api/v1/mcp/') && authentication.kind !== 'bearer') {
+        sendError(response, 'AUTH_REQUIRED');
+        return;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/folders/select') {
@@ -546,11 +671,166 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      const assignmentMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/assignments$/);
+      if (request.method === 'POST' && assignmentMatch) {
+        const projectId = decodeURIComponent(assignmentMatch[1]);
+        const body = await readJson(request);
+        validateAssignmentBody(body);
+        await observeRegisteredProject(projectId);
+        const assignmentId = id('assignment', `${projectId}:${body.clientRequestId}`);
+        const grantId = id('dispatch', `${projectId}:${body.clientRequestId}`);
+        const dispatchCode = createHmac('sha256', token)
+          .update(`dispatch:${projectId}:${body.clientRequestId}`)
+          .digest('base64url');
+        const result = createAssignment(db, {
+          commandId: id('assignment_create', `${projectId}:${body.clientRequestId}`),
+          assignmentId,
+          grantId,
+          projectId,
+          agentId: body.agent,
+          taskId: body.task.trim(),
+          scope: { mode: 'write' },
+          dispatchCode,
+        });
+        if (!result.ok) {
+          sendError(response, result.code, { extra: { assignment_id: result.assignmentId ?? null } });
+          return;
+        }
+        const message = [
+          `请使用 UGK Cockpit MCP 接手这项任务：${body.task.trim()}`,
+          `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
+          '工作中调用 ugk_work_progress；结束时调用 ugk_work_finish，并填写 summary 与 nextStep。',
+          '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
+        ].join('\n');
+        sendJson(response, 201, {
+          ok: true,
+          assignmentId,
+          agent: body.agent,
+          task: body.task.trim(),
+          expiresAt: result.expiresAt,
+          message,
+        });
+        return;
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/v1/dashboard') {
         sendJson(response, 200, {
           ok: true,
           refreshedAt: new Date().toISOString(),
           projects: readDashboard(db),
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/accept') {
+        const body = await readJson(request);
+        requireString(body, 'dispatchCode');
+        requireString(body, 'clientRequestId');
+        const context = readDispatchContext(db, body);
+        if (!context.ok) {
+          sendError(response, context.code);
+          return;
+        }
+        const { observation } = await observeRegisteredProject(context.projectId, context);
+        const accepted = acceptAssignment(db, body);
+        if (!accepted.ok) {
+          sendError(response, accepted.code);
+          return;
+        }
+        const started = startWriteRun(db, {
+          commandId: id('mcp_start', `${accepted.grantId}:${body.clientRequestId}`),
+          runId: accepted.sessionId,
+          worktreeId: accepted.worktreeId,
+          canonicalPath: observation.canonicalPath,
+          repositoryIdentity: observation.repositoryIdentity,
+          worktreeIdentity: observation.worktreeIdentity,
+          agentClaim: accepted.agentId,
+          goal: accepted.taskId,
+          baseline: toSnapshot(observation),
+        }, { faultInjector });
+        if (!started.ok) {
+          sendError(response, started.code, {
+            extra: { session_id: accepted.sessionId, active_run_id: started.activeRunId ?? null },
+          });
+          return;
+        }
+        const current = readSessionContext(db, accepted.sessionId);
+        sendJson(response, 200, {
+          ok: true,
+          assignmentId: accepted.assignmentId,
+          sessionId: accepted.sessionId,
+          agent: accepted.agentId,
+          task: accepted.taskId,
+          status: 'active',
+          revision: current.revision,
+          leaseGeneration: started.leaseGeneration,
+          acceptedAt: accepted.acceptedAt,
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/progress') {
+        const body = await readJson(request);
+        validateMcpProgressBody(body);
+        const result = recordProgress(db, body);
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: { session_id: body.sessionId, revision: result.revision ?? null },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/finish') {
+        const body = await readJson(request);
+        validateMcpFinishBody(body);
+        const context = readSessionContext(db, body.sessionId);
+        if (!context.ok || !context.run) {
+          sendError(response, context.code ?? 'SESSION_NOT_FOUND');
+          return;
+        }
+        const baseline = db.prepare(`
+          SELECT head FROM snapshots WHERE run_id = ? AND phase = 'baseline'
+        `).get(body.sessionId);
+        const { observation } = await observeRegisteredProject(context.projectId, {
+          ...context,
+          baselineHead: baseline?.head ?? null,
+        });
+        const acknowledgements = body.acknowledgements ?? [];
+        const result = finishRun(db, {
+          commandId: id('mcp_finish', `${body.sessionId}:${body.clientRequestId}`),
+          runId: body.sessionId,
+          expectedRevision: body.expectedRevision,
+          leaseGeneration: context.run.leaseGeneration,
+          outcome: body.outcome,
+          summary: body.summary,
+          nextStep: body.nextStep,
+          commitRefs: acknowledgements
+            .filter((value) => value.startsWith('commit:'))
+            .map((value) => value.slice('commit:'.length)),
+          acknowledgeUnattributed: acknowledgements.includes('unattributed_changes'),
+          finalSnapshot: toSnapshot(observation),
+        }, { faultInjector });
+        if (!result.ok) {
+          sendError(response, result.code, {
+            extra: { session_id: body.sessionId, receipt_id: result.receiptId ?? null },
+          });
+          return;
+        }
+        const completed = completeAssignment(db, body);
+        if (!completed.ok) {
+          sendError(response, completed.code, { extra: { session_id: body.sessionId } });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          assignmentId: completed.assignmentId,
+          sessionId: body.sessionId,
+          status: completed.status,
+          revision: completed.revision,
+          receiptId: result.receiptId,
+          cockpitVerified: true,
+          summary: body.summary,
+          nextStep: body.nextStep,
         });
         return;
       }
