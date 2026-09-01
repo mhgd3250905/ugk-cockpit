@@ -9,15 +9,20 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 5 tools and no path/projectId/worktreeId', () => {
+test('TOOLS definition contains the required 6 tools and no path/projectId/worktreeId', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
     'ugk_work_accept',
     'ugk_work_progress',
     'ugk_work_finish',
     'ugk_work_handoff',
-    'ugk_work_begin'
+    'ugk_work_begin',
+    'ugk_work_init'
   ]);
+  assert.deepEqual(
+    TOOLS.find((tool) => tool.name === 'ugk_work_handoff').inputSchema.properties.outcome.enum,
+    ['completed', 'blocked', 'abandoned']
+  );
 
   for (const tool of TOOLS) {
     const props = Object.keys(tool.inputSchema.properties || {});
@@ -93,7 +98,7 @@ test('dispatchMessage handles initialize, ping, tools/list, and notifications', 
 });
 
 test('dispatchMessage accurately forwards tool calls to handlers once with exact arguments', async () => {
-  const callCounts = { accept: 0, progress: 0, finish: 0, handoff: 0, begin: 0 };
+  const callCounts = { accept: 0, progress: 0, finish: 0, handoff: 0, begin: 0, init: 0 };
   const receivedArgs = {};
 
   const handlers = {
@@ -121,6 +126,11 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
       callCounts.begin += 1;
       receivedArgs.begin = args;
       return { started: true, sessionId: 'sess-100' };
+    },
+    ugk_work_init: async (args) => {
+      callCounts.init += 1;
+      receivedArgs.init = args;
+      return { started: true, sessionId: 'sess-init', revision: 2 };
     }
   };
 
@@ -255,6 +265,22 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.strictEqual(callCounts.handoff, 1);
   assert.deepEqual(receivedArgs.handoff, handoffPayload);
   assert.deepEqual(JSON.parse(handoffRes.result.content[0].text), { recorded: true, outcome: 'completed' });
+
+  const initPayload = {
+    initCode: 'INIT-100',
+    clientRequestId: 'req-init-1',
+    currentTask: 'Continue the existing implementation',
+    currentState: 'Core flow is half complete'
+  };
+  const initRes = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 15,
+    method: 'tools/call',
+    params: { name: 'ugk_work_init', arguments: initPayload }
+  }, { handlers });
+  assert.strictEqual(initRes.id, 15);
+  assert.strictEqual(callCounts.init, 1);
+  assert.deepEqual(receivedArgs.init, initPayload);
 });
 
 test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId) and invalid inputs', async () => {
@@ -269,6 +295,10 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
       return { ok: true };
     },
     ugk_work_handoff: async () => {
+      called = true;
+      return { ok: true };
+    },
+    ugk_work_init: async () => {
       called = true;
       return { ok: true };
     }

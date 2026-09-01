@@ -7,4 +7,6 @@ const dataRoot = process.env.LOCALAPPDATA;
 if (!dataRoot) throw new Error('LOCALAPPDATA is required on Windows.');
 const token = readFileSync(path.join(dataRoot, 'UGK Cockpit', 'api-token'), 'utf8').trim();
 
-createMcpStdioServer({ handlers: createServiceHandlers({ token }) });
+createMcpStdioServer({
+  handlers: createServiceHandlers({ token, workingDirectory: process.cwd() }),
+});

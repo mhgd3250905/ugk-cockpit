@@ -1,6 +1,11 @@
 const DEFAULT_SERVICE_URL = 'http://127.0.0.1:41737';
 
-export function createServiceHandlers({ token, baseUrl = DEFAULT_SERVICE_URL, fetchImpl = fetch }) {
+export function createServiceHandlers({
+  token,
+  baseUrl = DEFAULT_SERVICE_URL,
+  fetchImpl = fetch,
+  workingDirectory = process.cwd(),
+}) {
   if (typeof token !== 'string' || token.length < 32) {
     throw new Error('UGK Cockpit local API token is unavailable.');
   }
@@ -35,6 +40,10 @@ export function createServiceHandlers({ token, baseUrl = DEFAULT_SERVICE_URL, fe
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
     ugk_work_finish: (arguments_) => call('/api/v1/mcp/work/finish', arguments_),
     ugk_work_handoff: (arguments_) => call('/api/v1/mcp/work/handoff', arguments_),
+    ugk_work_init: (arguments_) => call('/api/v1/mcp/work/init', {
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
+    }),
     ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
   };
 }

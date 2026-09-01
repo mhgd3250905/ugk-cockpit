@@ -10,7 +10,7 @@
 - `0.1.0-alpha.2`：本地服务重启后自动恢复浏览器会话；写操作先续期且只发送一次，避免用户处理“身份已失效”或重复写入。
 - `0.1.0-alpha.3`：以“文件资源管理器当前唯一打开的文件夹”为可靠主路径；原生选择器失联时 30 秒内安全返回，不再无限卡住。
 - `0.1.0-alpha.4`：恢复真正的逐项目手动选择；选择器使用置顶的独立交互 helper，不扫描工作区、不自动导入项目。
-- 当前小步：handoff-first 工作闭环。默认先让 AI 读取最后一次交接并等待安排，此时不显示“正在工作”且不创建写入会话；只有明确任务触发 `ugk_work_begin` 后才进入工作态。
+- 当前小步：Agent-first 工作闭环。已经在开发的 Agent 用 `ugk_work_init` 接入当前项目并继续；新 Agent 默认先读取最后一次交接并等待安排，只有明确任务触发 `ugk_work_begin` 后才进入工作态。
 
 ## 产品方向：晨间工作简报
 
@@ -89,7 +89,7 @@ AI 通过 `ugk_work_handoff` 选择：`已完成`、`卡住了`、`稍后继续`
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 提供 `ugk_work_accept`、`ugk_work_begin`、`ugk_work_progress`、`ugk_work_finish`、`ugk_work_handoff`，服务端从接手码或 session 解析项目和代码位置；
+- 本机 stdio MCP 提供 `ugk_work_init`、`ugk_work_accept`、`ugk_work_begin`、`ugk_work_progress`、`ugk_work_finish`、`ugk_work_handoff`，服务端从一次性代码或 session 解析项目和代码位置；
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

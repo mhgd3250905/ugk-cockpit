@@ -167,10 +167,10 @@ function App() {
     }
   }
 
-  function openHandoff(project) {
+  function openHandoff(project, initialMode = 'handoff') {
     setHandoffProject(project);
     setHandoffAgent('Codex');
-    setHandoffMode('handoff');
+    setHandoffMode(initialMode);
     setHandoffGoal('');
     setDispatch(null);
     setNotice(null);
@@ -206,7 +206,9 @@ function App() {
     await navigator.clipboard.writeText(dispatch.message);
     setNotice({
       title: '接手消息已复制。',
-      detail: `把它发送给 ${handoffAgent}；成功接手前页面会保持“等待接手”。`,
+      detail: handoffMode === 'init'
+        ? `把它发送给正在开发这个项目的 ${handoffAgent}；成功 init 后页面会显示正在工作。`
+        : `把它发送给 ${handoffAgent}；成功接手前页面会保持“等待接手”。`,
       actionLabel: '知道了',
       retry: () => setNotice(null),
     });
@@ -315,6 +317,7 @@ function App() {
                   <select value={handoffMode} onChange={(event) => setHandoffMode(event.target.value)}>
                     <option value="handoff">读取上次交接，等待我的安排</option>
                     <option value="task">带着明确任务开始工作</option>
+                    <option value="init">接入当前正在进行的开发</option>
                   </select>
                 </label>
                 {handoffMode === 'task' && (
@@ -331,7 +334,10 @@ function App() {
               </>
             ) : (
               <>
-                <p className="safety-copy">任务已创建。复制下面的消息给 {handoffAgent}，AI 成功接手后首页会自动更新。</p>
+                <p className="safety-copy">
+                  {handoffMode === 'init' ? '接入指令已创建。' : '任务已创建。'}
+                  复制下面的消息给 {handoffAgent}，MCP 成功后首页会自动更新。
+                </p>
                 <label>接手消息
                   <textarea className="dispatch-message" value={dispatch.message} readOnly rows="9" />
                 </label>
@@ -347,7 +353,7 @@ function App() {
                   onClick={createHandoff}
                   disabled={busy || (handoffMode === 'task' && !handoffGoal.trim())}
                 >
-                  {busy ? '正在创建…' : '生成接手消息'}
+                  {busy ? '正在创建…' : (handoffMode === 'init' ? '生成 init 指令' : '生成接手消息')}
                 </button>
               ) : (
                 <button className="primary-button" onClick={copyDispatchMessage}>复制接手消息</button>
@@ -419,6 +425,13 @@ function ProjectCard({ project, onAssign }) {
           {project.statusReason === 'active_work'
             ? 'AI 正在工作'
             : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
+        </button>
+        <button
+          className="text-button"
+          onClick={() => onAssign(project, 'init')}
+          disabled={['active_work', 'agent_waiting', 'assignment_waiting'].includes(project.statusReason)}
+        >
+          接入正在工作的 AI
         </button>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>

@@ -19,7 +19,7 @@ async function post(service, pathname, body) {
   });
 }
 
-test('task handoff -> standby accept reads latest manual -> explicit begin', async (t) => {
+test('existing Agent initializes the registered project, continues, and hands off', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-mcp-first-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# fixture\n');
@@ -41,15 +41,16 @@ test('task handoff -> standby accept reads latest manual -> explicit begin', asy
     await service.close();
     rmSync(root, { recursive: true, force: true });
   });
+  writeFileSync(path.join(root, 'WIP.md'), 'half-finished work\n');
   const assignmentResponse = await post(
     service,
     `/api/v1/projects/${project.projectId}/assignments`,
-    { clientRequestId: 'create-assignment-1', agent: 'Codex', mode: 'task', task: '验证 MCP 闭环' },
+    { clientRequestId: 'create-assignment-1', agent: 'Codex', mode: 'init', task: '' },
   );
   assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
   const assignment = await assignmentResponse.json();
-  const dispatchCode = assignment.message.match(/dispatchCode: "([^"]+)"/)?.[1];
-  assert.ok(dispatchCode);
+  const initCode = assignment.message.match(/initCode: "([^"]+)"/)?.[1];
+  assert.ok(initCode);
   assert.equal(assignment.message.includes(root), false);
   assert.equal(assignment.message.includes(TOKEN), false);
   const pendingDashboard = await (await fetch(
@@ -59,29 +60,34 @@ test('task handoff -> standby accept reads latest manual -> explicit begin', asy
   assert.equal(pendingDashboard.projects[0].statusReason, 'assignment_waiting');
   assert.equal(pendingDashboard.projects[0].activeRun, null);
 
-  const acceptResponse = await post(service, '/api/v1/mcp/work/accept', {
-    dispatchCode,
-    clientRequestId: 'accept-1',
+  const initResponse = await post(service, '/api/v1/mcp/work/init', {
+    initCode,
+    clientRequestId: 'init-1',
+    currentTask: '验证 MCP init 闭环',
+    currentState: '核心功能完成一半，继续开发',
+    mcpWorkingDirectory: root,
   });
-  assert.equal(acceptResponse.status, 200, await acceptResponse.clone().text());
-  const accepted = await acceptResponse.json();
-  assert.equal(accepted.revision, 1);
+  assert.equal(initResponse.status, 200, await initResponse.clone().text());
+  const initialized = await initResponse.json();
+  assert.equal(initialized.status, 'active');
+  assert.equal(initialized.revision, 2);
+  assert.equal(initialized.preexistingChangesPreserved, true);
 
   const progressResponse = await post(service, '/api/v1/mcp/work/progress', {
-    sessionId: accepted.sessionId,
+    sessionId: initialized.sessionId,
     clientRequestId: 'progress-1',
-    expectedRevision: 1,
+    expectedRevision: 2,
     status: 'working',
     note: '协议与状态机已经接通',
   });
   assert.equal(progressResponse.status, 200, await progressResponse.clone().text());
   const progress = await progressResponse.json();
-  assert.equal(progress.revision, 2);
+  assert.equal(progress.revision, 3);
 
   const finishResponse = await post(service, '/api/v1/mcp/work/handoff', {
-    sessionId: accepted.sessionId,
+    sessionId: initialized.sessionId,
     clientRequestId: 'handoff-1',
-    expectedRevision: 2,
+    expectedRevision: 3,
     outcome: 'completed',
     nextSessionFocus: '等待用户安排下一项开发任务',
     summary: 'MCP 闭环通过',
@@ -97,7 +103,7 @@ test('task handoff -> standby accept reads latest manual -> explicit begin', asy
   assert.equal(finishResponse.status, 200, await finishResponse.clone().text());
   const finished = await finishResponse.json();
   assert.equal(finished.cockpitVerified, true);
-  assert.equal(finished.revision, 3);
+  assert.equal(finished.revision, 4);
 
   const dashboardResponse = await fetch(
     `http://${service.host}:${service.port}/api/v1/dashboard`,
@@ -150,8 +156,8 @@ test('task handoff -> standby accept reads latest manual -> explicit begin', asy
 
   const verified = openCockpitDatabase(dbPath, { migrate: false });
   const storedHash = verified.prepare('SELECT code_hash FROM dispatch_grants').get().code_hash;
-  assert.equal(storedHash.includes(dispatchCode), false);
-  assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM progress_events').get().count, 2);
+  assert.equal(storedHash.includes(initCode), false);
+  assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM progress_events').get().count, 3);
   assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM handoffs').get().count, 1);
   verified.close();
 });

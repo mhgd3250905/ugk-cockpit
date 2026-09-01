@@ -6,6 +6,7 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
   const calls = [];
   const handlers = createServiceHandlers({
     token: 'x'.repeat(32),
+    workingDirectory: 'E:\\fixture\\active-project',
     fetchImpl: async (url, options) => {
       calls.push({ url: url.toString(), options });
       return new Response(JSON.stringify({ ok: true, sessionId: 'session-1' }), {
@@ -32,6 +33,19 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
     artifactRefs: [], risks: [], suggestedSkills: [],
   });
   assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/work/handoff');
+
+  await handlers.ugk_work_init({
+    initCode: 'init-code', clientRequestId: 'request-4',
+    currentTask: '继续现有开发', currentState: '功能完成一半',
+  });
+  assert.equal(calls[3].url, 'http://127.0.0.1:41737/api/v1/mcp/work/init');
+  assert.deepEqual(JSON.parse(calls[3].options.body), {
+    initCode: 'init-code',
+    clientRequestId: 'request-4',
+    currentTask: '继续现有开发',
+    currentState: '功能完成一半',
+    mcpWorkingDirectory: 'E:\\fixture\\active-project',
+  });
 });
 
 test('MCP service errors expose the public service message without leaking response details', async () => {

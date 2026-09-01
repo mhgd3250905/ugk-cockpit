@@ -335,7 +335,7 @@ function validateAssignmentBody(body) {
   requireString(body, 'mode');
   if (body.mode === 'task') requireString(body, 'task');
   if (!['Codex', 'ZCode', 'Antigravity'].includes(body.agent)
-    || !['handoff', 'task'].includes(body.mode)
+    || !['handoff', 'task', 'init'].includes(body.mode)
     || (body.task !== undefined && (typeof body.task !== 'string' || body.task.length > 1000))) {
     const error = new Error('Invalid assignment request.');
     error.code = 'INVALID_REQUEST';
@@ -388,6 +388,18 @@ function validateMcpHandoffBody(body) {
       && (!Array.isArray(body.acknowledgements)
         || body.acknowledgements.some((value) => typeof value !== 'string')))) {
     const error = new Error('Invalid handoff request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpInitBody(body) {
+  requireString(body, 'initCode');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'currentTask');
+  requireString(body, 'currentState');
+  if (body.currentTask.length > 1000 || body.currentState.length > 4000) {
+    const error = new Error('Invalid init request.');
     error.code = 'INVALID_REQUEST';
     throw error;
   }
@@ -590,6 +602,33 @@ export async function createCockpitHttpServer({
     return { project, observation };
   }
 
+  async function resolveMcpWorkingProject(workingDirectory) {
+    if (typeof workingDirectory !== 'string' || !workingDirectory.trim()) {
+      const error = new Error('MCP working directory is unavailable.');
+      error.code = 'PROJECT_NOT_FOUND';
+      throw error;
+    }
+    const candidates = db.prepare(`
+      SELECT projects.id, worktrees.canonical_path
+      FROM projects
+      JOIN worktrees ON worktrees.id = projects.worktree_id
+      ORDER BY length(worktrees.canonical_path) DESC
+    `).all();
+    for (const candidate of candidates) {
+      try {
+        const binding = authorizeExistingPath(workingDirectory, candidate.canonical_path);
+        revalidateAuthorizedPath(binding);
+        return observeRegisteredProject(candidate.id);
+      } catch (error) {
+        if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(error?.code)) continue;
+        throw error;
+      }
+    }
+    const error = new Error('The MCP working project is not registered.');
+    error.code = 'PROJECT_NOT_FOUND';
+    throw error;
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const currentPort = server.address().port;
@@ -733,7 +772,7 @@ export async function createCockpitHttpServer({
           .digest('base64url');
         const task = body.mode === 'handoff'
           ? '读取最后一次交接并等待用户安排'
-          : body.task.trim();
+          : (body.mode === 'init' ? '接入当前正在进行的开发' : body.task.trim());
         const result = createAssignment(db, {
           commandId: id('assignment_create', `${projectId}:${body.clientRequestId}`),
           assignmentId,
@@ -741,14 +780,26 @@ export async function createCockpitHttpServer({
           projectId,
           agentId: body.agent,
           taskId: task,
-          scope: { mode: body.mode === 'handoff' ? 'standby' : 'write' },
+          scope: {
+            mode: body.mode === 'handoff'
+              ? 'standby'
+              : (body.mode === 'init' ? 'adopt' : 'write'),
+          },
           dispatchCode,
         });
         if (!result.ok) {
           sendError(response, result.code, { extra: { assignment_id: result.assignmentId ?? null } });
           return;
         }
-        const message = body.mode === 'handoff'
+        const message = body.mode === 'init'
+          ? [
+            `请使用 UGK Cockpit MCP 把当前正在进行的开发接入工作台。`,
+            `调用 ugk_work_init(initCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号, currentTask: 你正在完成的目标, currentState: 当前进展摘要)。`,
+            '成功返回 sessionId 和 revision 后继续开发；不要清理、覆盖或重置已有改动。',
+            '后续用 ugk_work_progress 报告进展，结束时用 ugk_work_handoff 生成标准交接手册。',
+            '如果工具报告项目不匹配或已有写入会话，请停止并告诉用户，不要强行接管。',
+          ].join('\n')
+          : body.mode === 'handoff'
           ? [
             '请使用 UGK Cockpit MCP 接上这个项目的上下文。',
             `调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)。`,
@@ -796,6 +847,10 @@ export async function createCockpitHttpServer({
         const accepted = acceptAssignment(db, body);
         if (!accepted.ok) {
           sendError(response, accepted.code);
+          return;
+        }
+        if (accepted.scope?.mode === 'adopt') {
+          sendError(response, 'INVALID_REQUEST');
           return;
         }
         const latestHandoff = readLatestHandoff(db, accepted.projectId);
@@ -893,6 +948,89 @@ export async function createCockpitHttpServer({
           ...begun,
           leaseGeneration: started.leaseGeneration,
           message: '已开始工作；现在可以修改代码并报告进展。',
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/init') {
+        const body = await readJson(request);
+        validateMcpInitBody(body);
+        const dispatchRequest = {
+          dispatchCode: body.initCode,
+          clientRequestId: body.clientRequestId,
+        };
+        const context = readDispatchContext(db, dispatchRequest);
+        if (!context.ok) {
+          sendError(response, context.code);
+          return;
+        }
+        if (context.scope?.mode !== 'adopt') {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        if (working.project.id !== context.projectId
+          || working.project.worktree_id !== context.worktreeId) {
+          sendError(response, 'DISPATCH_GRANT_BINDING_MISMATCH');
+          return;
+        }
+        const { observation } = await observeRegisteredProject(context.projectId, context);
+        const accepted = acceptAssignment(db, dispatchRequest);
+        if (!accepted.ok) {
+          sendError(response, accepted.code);
+          return;
+        }
+        const started = startWriteRun(db, {
+          commandId: id('mcp_init_run', `${accepted.grantId}:${body.clientRequestId}`),
+          runId: accepted.sessionId,
+          worktreeId: accepted.worktreeId,
+          canonicalPath: observation.canonicalPath,
+          repositoryIdentity: observation.repositoryIdentity,
+          worktreeIdentity: observation.worktreeIdentity,
+          agentClaim: accepted.agentId,
+          goal: body.currentTask.trim(),
+          baseline: toSnapshot(observation),
+        }, { faultInjector });
+        if (!started.ok) {
+          sendError(response, started.code, {
+            extra: { session_id: accepted.sessionId, active_run_id: started.activeRunId ?? null },
+          });
+          return;
+        }
+        const begun = beginAssignmentWork(db, {
+          sessionId: accepted.sessionId,
+          clientRequestId: `${body.clientRequestId}:begin`,
+          expectedRevision: 1,
+          task: body.currentTask,
+          commandId: id('mcp_init_assignment', `${accepted.sessionId}:${body.clientRequestId}`),
+        });
+        if (!begun.ok) {
+          sendError(response, begun.code, { extra: { session_id: accepted.sessionId } });
+          return;
+        }
+        const initialized = recordProgress(db, {
+          sessionId: accepted.sessionId,
+          clientRequestId: `${body.clientRequestId}:state`,
+          expectedRevision: 1,
+          status: 'adopted',
+          note: body.currentState,
+        });
+        if (!initialized.ok) {
+          sendError(response, initialized.code, { extra: { session_id: accepted.sessionId } });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          assignmentId: accepted.assignmentId,
+          sessionId: accepted.sessionId,
+          agent: accepted.agentId,
+          task: body.currentTask.trim(),
+          status: 'active',
+          revision: initialized.revision,
+          leaseGeneration: started.leaseGeneration,
+          baselineAt: started.startedAt,
+          preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
+          message: '当前开发已接入 Cockpit；已有改动已作为接入基线保留。',
         });
         return;
       }
