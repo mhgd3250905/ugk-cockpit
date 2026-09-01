@@ -33,12 +33,18 @@ export function readCommand(db, commandId) {
   return db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
 }
 
-export function beginCommand(db, { commandId, kind, request, runId = null }) {
+export function beginCommand(db, {
+  commandId,
+  kind,
+  request,
+  runId = null,
+  inTransaction = false,
+}) {
   const digest = requestDigest(request);
   const requestJson = canonicalJson(request);
   const now = new Date().toISOString();
 
-  return withImmediateTransaction(db, () => {
+  const operation = () => {
     const existing = readCommand(db, commandId);
     if (existing) {
       if (existing.request_digest !== digest || existing.kind !== kind) {
@@ -56,10 +62,10 @@ export function beginCommand(db, { commandId, kind, request, runId = null }) {
     `).run(commandId, kind, digest, requestJson, runId, now, now);
 
     return { command: readCommand(db, commandId), fresh: true };
-  });
+  };
+  return inTransaction ? operation() : withImmediateTransaction(db, operation);
 }
 
 export function parseCommandResponse(command) {
   return command?.response_json ? JSON.parse(command.response_json) : null;
 }
-

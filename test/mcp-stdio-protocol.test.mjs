@@ -23,6 +23,10 @@ test('TOOLS definition contains the required 6 tools and no path/projectId/workt
     TOOLS.find((tool) => tool.name === 'ugk_work_handoff').inputSchema.properties.outcome.enum,
     ['completed', 'blocked', 'abandoned']
   );
+  assert.deepEqual(
+    TOOLS.find((tool) => tool.name === 'ugk_work_progress').inputSchema.properties.status.enum,
+    ['working', 'in_progress']
+  );
 
   for (const tool of TOOLS) {
     const props = Object.keys(tool.inputSchema.properties || {});
@@ -294,6 +298,10 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
       called = true;
       return { ok: true };
     },
+    ugk_work_progress: async () => {
+      called = true;
+      return { ok: true };
+    },
     ugk_work_handoff: async () => {
       called = true;
       return { ok: true };
@@ -364,6 +372,25 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
   assert.strictEqual(called, false);
   assert.strictEqual(resMissing.result.isError, true);
   assert.match(resMissing.result.content[0].text, /required field/);
+
+  const terminalProgress = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_work_progress',
+      arguments: {
+        sessionId: 's1',
+        clientRequestId: 'progress-terminal',
+        expectedRevision: 2,
+        status: 'completed',
+        note: '任务完成',
+      },
+    },
+  }, { handlers });
+  assert.strictEqual(called, false);
+  assert.strictEqual(terminalProgress.result.isError, true);
+  assert.match(terminalProgress.result.content[0].text, /finish or handoff/);
 
   // ugk_work_begin with forbidden path
   const beginForbiddenPath = await dispatchMessage(

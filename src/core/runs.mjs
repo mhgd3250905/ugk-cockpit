@@ -192,7 +192,7 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
   return result;
 }
 
-export function prepareFinish(db, request) {
+export function prepareFinish(db, request, options = {}) {
   const { commandId, runId } = request;
   const commandRequest = finishIntent(request);
   const begun = beginCommand(db, {
@@ -200,11 +200,12 @@ export function prepareFinish(db, request) {
     kind: 'run.finish',
     request: commandRequest,
     runId,
+    inTransaction: options.inTransaction === true,
   });
   const terminal = terminalCommandResult(begun.command);
   if (terminal) return { terminal: true, response: terminal };
 
-  return withImmediateTransaction(db, () => {
+  const operation = () => {
     const current = readCommand(db, commandId);
     const replay = terminalCommandResult(current);
     if (replay) return { terminal: true, response: replay };
@@ -215,15 +216,17 @@ export function prepareFinish(db, request) {
       `).run(now(), commandId);
     }
     return { terminal: false, state: 'observing' };
-  });
+  };
+  return options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
 }
 
-export function finalizeFinish(db, request, { faultInjector } = {}) {
+export function finalizeFinish(db, request, options = {}) {
+  const { faultInjector } = options;
   const { commandId, runId, finalSnapshot } = request;
   const receiptId = deterministicId('receipt', runId);
   const snapshotId = deterministicId('snapshot_final', runId);
 
-  const result = withImmediateTransaction(db, () => {
+  const operation = () => {
     const command = readCommand(db, commandId);
     const replay = terminalCommandResult(command);
     if (replay) return replay;
@@ -428,13 +431,16 @@ export function finalizeFinish(db, request, { faultInjector } = {}) {
     `).run(canonicalJson(response), receiptId, finishedAt, commandId);
     faultInjector?.('finish.after_command_commit_before_transaction_commit');
     return response;
-  });
-  if (result.ok) faultInjector?.('finish.after_transaction_commit_before_response');
+  };
+  const result = options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
+  if (result.ok && options.inTransaction !== true) {
+    faultInjector?.('finish.after_transaction_commit_before_response');
+  }
   return result;
 }
 
-export function finishRun(db, request, options) {
-  const prepared = prepareFinish(db, request);
+export function finishRun(db, request, options = {}) {
+  const prepared = prepareFinish(db, request, options);
   if (prepared.terminal) return prepared.response;
   return finalizeFinish(db, request, options);
 }

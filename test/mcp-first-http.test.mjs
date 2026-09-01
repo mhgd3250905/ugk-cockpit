@@ -161,3 +161,149 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM handoffs').get().count, 1);
   verified.close();
 });
+
+test('handoff is atomic across manual, run, and assignment and retries idempotently', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-mcp-handoff-atomic-'));
+  execFileSync('git', ['init', '--quiet'], { cwd: root });
+  writeFileSync(path.join(root, 'README.md'), '# fixture\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: root });
+  execFileSync('git', [
+    '-c', 'user.name=UGK Test',
+    '-c', 'user.email=ugk@example.invalid',
+    'commit', '--quiet', '-m', 'fixture',
+  ], { cwd: root });
+  const dbPath = path.join(root, 'cockpit.db');
+  const observation = await probeGitWorktree(root);
+  const db = openCockpitDatabase(dbPath);
+  const project = registerProject(db, {
+    commandId: 'register-mcp-atomic-fixture',
+    name: 'MCP atomic fixture',
+    authorizedRoot: root,
+    observation,
+  });
+  db.close();
+
+  let injectFailure = true;
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    faultInjector(point) {
+      if (injectFailure && point === 'finish.after_snapshot_insert') {
+        injectFailure = false;
+        throw new Error('injected handoff failure');
+      }
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const assignmentResponse = await post(
+    service,
+    `/api/v1/projects/${project.projectId}/assignments`,
+    { clientRequestId: 'create-atomic-assignment', agent: 'ZCode', mode: 'init', task: '' },
+  );
+  assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
+  const assignment = await assignmentResponse.json();
+  const initCode = assignment.message.match(/initCode: "([^"]+)"/)?.[1];
+  assert.ok(initCode);
+
+  const initResponse = await post(service, '/api/v1/mcp/work/init', {
+    initCode,
+    clientRequestId: 'init-atomic',
+    currentTask: '验证 handoff 原子性',
+    currentState: '已接入，准备结束',
+    mcpWorkingDirectory: root,
+  });
+  assert.equal(initResponse.status, 200, await initResponse.clone().text());
+  const initialized = await initResponse.json();
+  const progressResponse = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initialized.sessionId,
+    clientRequestId: 'progress-atomic',
+    expectedRevision: initialized.revision,
+    status: 'working',
+    note: '准备生成交接手册',
+  });
+  assert.equal(progressResponse.status, 200, await progressResponse.clone().text());
+  const progress = await progressResponse.json();
+
+  const handoffBody = {
+    sessionId: initialized.sessionId,
+    clientRequestId: 'handoff-atomic',
+    expectedRevision: progress.revision,
+    outcome: 'completed',
+    nextSessionFocus: '等待下一项任务',
+    summary: '原子性回归测试',
+    currentState: '已完成',
+    completedItems: ['验证事务边界'],
+    pendingItems: [],
+    decisions: [],
+    artifactRefs: ['test/mcp-first-http.test.mjs'],
+    risks: [],
+    suggestedSkills: [],
+    acknowledgements: [],
+  };
+  const invalidTerminalProgress = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initialized.sessionId,
+    clientRequestId: 'progress-terminal-rejected',
+    expectedRevision: progress.revision,
+    status: 'completed',
+    note: '结束应使用 handoff',
+  });
+  assert.equal(invalidTerminalProgress.status, 400, await invalidTerminalProgress.clone().text());
+  // Simulate an older client that incorrectly used progress(status=completed)
+  // before the handoff request arrived.  Handoff must reconcile this exact
+  // terminal state, while preserving the revision fence.
+  const legacyState = openCockpitDatabase(dbPath, { migrate: false });
+  legacyState.prepare(`
+    UPDATE assignments SET status = 'completed'
+    WHERE session_id = ? AND revision = ?
+  `).run(initialized.sessionId, progress.revision);
+  legacyState.close();
+  const failedResponse = await post(service, '/api/v1/mcp/work/handoff', handoffBody);
+  assert.equal(failedResponse.status, 400, await failedResponse.clone().text());
+
+  const afterFailure = openCockpitDatabase(dbPath, { migrate: false });
+  assert.equal(afterFailure.prepare('SELECT count(*) AS count FROM handoffs').get().count, 0);
+  assert.equal(afterFailure.prepare('SELECT count(*) AS count FROM handoff_receipts').get().count, 0);
+  assert.equal(afterFailure.prepare('SELECT count(*) AS count FROM snapshots WHERE phase = \'final\'').get().count, 0);
+  const failedRun = afterFailure
+    .prepare('SELECT lifecycle, revision FROM runs WHERE id = ?')
+    .get(initialized.sessionId);
+  assert.equal(failedRun.lifecycle, 'active');
+  assert.equal(failedRun.revision, progress.revision);
+  const failedAssignment = afterFailure
+    .prepare('SELECT status, revision FROM assignments WHERE session_id = ?')
+    .get(initialized.sessionId);
+  assert.equal(failedAssignment.status, 'completed');
+  assert.equal(failedAssignment.revision, progress.revision);
+  afterFailure.close();
+
+  const firstSuccessResponse = await post(service, '/api/v1/mcp/work/handoff', handoffBody);
+  assert.equal(firstSuccessResponse.status, 200, await firstSuccessResponse.clone().text());
+  const firstSuccess = await firstSuccessResponse.json();
+  assert.equal(firstSuccess.revision, progress.revision + 1);
+  assert.equal(firstSuccess.cockpitVerified, true);
+
+  const replayResponse = await post(service, '/api/v1/mcp/work/handoff', handoffBody);
+  assert.equal(replayResponse.status, 200, await replayResponse.clone().text());
+  assert.deepEqual(await replayResponse.json(), firstSuccess);
+
+  const finalDb = openCockpitDatabase(dbPath, { migrate: false });
+  assert.equal(finalDb.prepare('SELECT count(*) AS count FROM handoffs').get().count, 1);
+  assert.equal(finalDb.prepare('SELECT count(*) AS count FROM handoff_receipts').get().count, 1);
+  assert.equal(finalDb.prepare('SELECT count(*) AS count FROM snapshots WHERE phase = \'final\'').get().count, 1);
+  assert.equal(finalDb.prepare('SELECT count(*) AS count FROM write_leases').get().count, 0);
+  const finishedRun = finalDb
+    .prepare('SELECT lifecycle, revision FROM runs WHERE id = ?')
+    .get(initialized.sessionId);
+  assert.equal(finishedRun.lifecycle, 'completed');
+  assert.equal(finishedRun.revision, progress.revision + 1);
+  const finishedAssignment = finalDb
+    .prepare('SELECT status, revision FROM assignments WHERE session_id = ?')
+    .get(initialized.sessionId);
+  assert.equal(finishedAssignment.status, 'completed');
+  assert.equal(finishedAssignment.revision, progress.revision + 1);
+  finalDb.close();
+});

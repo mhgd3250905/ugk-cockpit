@@ -188,3 +188,67 @@ test('expired and revoked dispatch codes cannot be accepted', (t) => {
   assert.equal(revokedResult.code, 'DISPATCH_GRANT_REVOKED');
   db.close();
 });
+
+test('progress rejects terminal statuses while handoff can reconcile a matching legacy terminal assignment', (t) => {
+  const db = fixture(t);
+  const created = createAssignment(db, {
+    commandId: 'assignment-create-terminal-progress',
+    assignmentId: 'assignment-terminal-progress',
+    projectId: 'project-assignment',
+    agentId: 'agent-one',
+    taskId: 'task-one',
+    scope: { mode: 'write' },
+    dispatchCode: 'terminal-progress-code',
+  }, { clock });
+  const accepted = acceptAssignment(db, {
+    dispatchCode: created.dispatchCode,
+    clientRequestId: 'terminal-progress-accept',
+    sessionId: 'terminal-progress-session',
+  }, { clock });
+  assert.equal(accepted.ok, true, JSON.stringify(accepted));
+
+  const terminalProgress = recordProgress(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'terminal-progress-event',
+    expectedRevision: accepted.revision,
+    status: 'completed',
+    note: '旧客户端错误地用 progress 结束工作',
+  }, { clock });
+  assert.equal(terminalProgress.ok, false);
+  assert.equal(terminalProgress.code, 'INVALID_REQUEST');
+  assert.equal(readSessionContext(db, accepted.sessionId).status, 'accepted');
+  assert.equal(readSessionContext(db, accepted.sessionId).revision, accepted.revision);
+
+  db.prepare(`
+    UPDATE assignments SET status = 'completed'
+    WHERE id = ? AND revision = ?
+  `).run(accepted.assignmentId, accepted.revision);
+  const reconciled = completeAssignment(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'terminal-progress-handoff',
+    expectedRevision: accepted.revision,
+    outcome: 'completed',
+    summary: '通过 handoff 收束旧状态',
+  }, {
+    allowTerminalReconciliation: true,
+    clock,
+  });
+  assert.equal(reconciled.ok, true, JSON.stringify(reconciled));
+  assert.equal(reconciled.revision, accepted.revision + 1);
+  assert.equal(readSessionContext(db, accepted.sessionId).status, 'completed');
+  assert.equal(readSessionContext(db, accepted.sessionId).revision, accepted.revision + 1);
+
+  const mismatched = completeAssignment(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'terminal-progress-mismatched',
+    expectedRevision: reconciled.revision,
+    outcome: 'blocked',
+    summary: '不应覆盖旧 terminal 状态',
+  }, {
+    allowTerminalReconciliation: true,
+    clock,
+  });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.code, 'ASSIGNMENT_NOT_ACTIVE');
+  db.close();
+});

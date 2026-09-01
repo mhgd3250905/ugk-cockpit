@@ -123,8 +123,20 @@ function commitCommand(db, commandId, response, timestamp, runId = null) {
   return response;
 }
 
-function beginCoreCommand(db, { commandId, kind, request, runId = null }) {
-  const begun = beginCommand(db, { commandId, kind, request, runId });
+function beginCoreCommand(db, {
+  commandId,
+  kind,
+  request,
+  runId = null,
+  inTransaction = false,
+}) {
+  const begun = beginCommand(db, {
+    commandId,
+    kind,
+    request,
+    runId,
+    inTransaction,
+  });
   return {
     commandId,
     command: begun.command,
@@ -831,6 +843,9 @@ export function appendProgressEvent(db, request = {}, options = {}) {
     || typeof note !== 'string') {
     return invalid('sessionId, clientRequestId, expectedRevision and status are required.');
   }
+  if (TERMINAL_ASSIGNMENT_STATES.has(status)) {
+    return invalid('Terminal statuses must use ugk_work_finish or ugk_work_handoff.');
+  }
   const assignmentId = request.assignmentId
     ?? db.prepare('SELECT id FROM assignments WHERE session_id = ?').get(sessionId)?.id;
   if (!isNonEmptyString(assignmentId)) return { ok: false, code: 'ASSIGNMENT_NOT_FOUND', sessionId };
@@ -1032,10 +1047,11 @@ export function completeAssignment(db, request = {}, options = {}) {
     kind: 'assignment.complete',
     request: intent,
     runId: sessionId,
+    inTransaction: options.inTransaction === true,
   });
   if (begun.replay) return begun.replay;
   const timestamp = iso(nowMillis(options));
-  return withImmediateTransaction(db, () => {
+  const operation = () => {
     const command = readCommand(db, commandId);
     const replay = terminalResult(command);
     if (replay) return replay;
@@ -1061,7 +1077,8 @@ export function completeAssignment(db, request = {}, options = {}) {
     if (assignment.session_id !== sessionId) {
       return failCommand(db, commandId, { ok: false, code: 'SESSION_MISMATCH', assignmentId });
     }
-    if (TERMINAL_ASSIGNMENT_STATES.has(assignment.status)) {
+    if (TERMINAL_ASSIGNMENT_STATES.has(assignment.status)
+      && (options.allowTerminalReconciliation !== true || assignment.status !== status)) {
       return failCommand(db, commandId, {
         ok: false,
         code: 'ASSIGNMENT_NOT_ACTIVE',
@@ -1117,7 +1134,8 @@ export function completeAssignment(db, request = {}, options = {}) {
       createdAt: timestamp,
     };
     return commitCommand(db, commandId, response, timestamp, sessionId);
-  });
+  };
+  return options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
 }
 
 /** Promote an accepted standby assignment into active work after a Run exists. */

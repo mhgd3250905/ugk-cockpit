@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openCockpitDatabase } from '../core/database.mjs';
+import { openCockpitDatabase, withImmediateTransaction } from '../core/database.mjs';
 import {
   acceptAssignment,
   beginAssignmentWork,
@@ -27,6 +27,14 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MCP_SESSION_LIMIT = 64;
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../dist/web', import.meta.url));
+
+class AtomicHandoffAbort extends Error {
+  constructor(result) {
+    super(result?.code ?? 'REQUEST_FAILED');
+    this.name = 'AtomicHandoffAbort';
+    this.result = result;
+  }
+}
 
 const PUBLIC_ERRORS = {
   AUTH_REQUIRED: {
@@ -1173,47 +1181,53 @@ export async function createCockpitHttpServer({
           ...context,
           baselineHead: baseline?.head ?? null,
         });
-        const handoff = createHandoff(db, body);
-        if (!handoff.ok) {
-          sendError(response, handoff.code, {
-            extra: { session_id: body.sessionId, revision: handoff.revision ?? null },
+        let result;
+        try {
+          result = withImmediateTransaction(db, () => {
+            const handoff = createHandoff(db, body, { inTransaction: true });
+            if (!handoff.ok) throw new AtomicHandoffAbort(handoff);
+
+            const finished = finishRun(db, {
+              commandId: id('mcp_handoff_finish', `${body.sessionId}:${body.clientRequestId}`),
+              runId: body.sessionId,
+              expectedRevision: body.expectedRevision,
+              leaseGeneration: context.run.leaseGeneration,
+              outcome: body.outcome,
+              summary: body.summary,
+              nextStep: body.nextSessionFocus,
+              commitRefs: (body.acknowledgements ?? [])
+                .filter((value) => value.startsWith('commit:'))
+                .map((value) => value.slice('commit:'.length)),
+              acknowledgeUnattributed: (body.acknowledgements ?? []).includes('unattributed_changes'),
+              finalSnapshot: toSnapshot(observation),
+            }, { faultInjector, inTransaction: true });
+            if (!finished.ok) throw new AtomicHandoffAbort(finished);
+
+            const completed = completeAssignment(db, {
+              ...body,
+              commandId: id('mcp_handoff_assignment', `${body.sessionId}:${body.clientRequestId}`),
+              nextStep: body.nextSessionFocus,
+            }, {
+              allowTerminalReconciliation: true,
+              inTransaction: true,
+            });
+            if (!completed.ok) throw new AtomicHandoffAbort(completed);
+
+            return { handoff, finished, completed };
           });
-          return;
-        }
-        const finished = finishRun(db, {
-          commandId: id('mcp_handoff_finish', `${body.sessionId}:${body.clientRequestId}`),
-          runId: body.sessionId,
-          expectedRevision: body.expectedRevision,
-          leaseGeneration: context.run.leaseGeneration,
-          outcome: body.outcome,
-          summary: body.summary,
-          nextStep: body.nextSessionFocus,
-          commitRefs: (body.acknowledgements ?? [])
-            .filter((value) => value.startsWith('commit:'))
-            .map((value) => value.slice('commit:'.length)),
-          acknowledgeUnattributed: (body.acknowledgements ?? []).includes('unattributed_changes'),
-          finalSnapshot: toSnapshot(observation),
-        }, { faultInjector });
-        if (!finished.ok) {
-          sendError(response, finished.code, {
+        } catch (error) {
+          if (!(error instanceof AtomicHandoffAbort)) throw error;
+          sendError(response, error.result.code, {
             extra: {
               session_id: body.sessionId,
-              handoff_id: handoff.handoffId,
-              receipt_id: finished.receiptId ?? null,
+              revision: error.result.revision ?? null,
             },
           });
           return;
         }
-        const completed = completeAssignment(db, {
-          ...body,
-          nextStep: body.nextSessionFocus,
-        });
-        if (!completed.ok) {
-          sendError(response, completed.code, {
-            extra: { session_id: body.sessionId, handoff_id: handoff.handoffId },
-          });
-          return;
-        }
+        faultInjector?.('finish.after_transaction_commit_before_response');
+        faultInjector?.('handoff.after_transaction_commit_before_response');
+        const { handoff, finished, completed } = result;
         sendJson(response, 200, {
           ok: true,
           assignmentId: completed.assignmentId,

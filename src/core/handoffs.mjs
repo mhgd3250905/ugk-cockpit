@@ -333,12 +333,18 @@ export function createHandoff(db, request = {}, options = {}) {
     expectedRevision,
     ...fields,
   };
-  const begun = beginCommand(db, { commandId, kind: 'handoff.create', request: intent, runId: context.run?.id ?? null });
+  const begun = beginCommand(db, {
+    commandId,
+    kind: 'handoff.create',
+    request: intent,
+    runId: context.run?.id ?? null,
+    inTransaction: options.inTransaction === true,
+  });
   const replay = terminalResult(begun.command);
   if (replay) return replay;
 
   const at = timestamp(options);
-  return withImmediateTransaction(db, () => {
+  const operation = () => {
     const command = readCommand(db, commandId);
     const commandReplay = terminalResult(command);
     if (commandReplay) return commandReplay;
@@ -428,7 +434,8 @@ export function createHandoff(db, request = {}, options = {}) {
     );
     const response = mapHandoff(readHandoffRow(db, handoffId));
     return commitCommand(db, commandId, response, at);
-  });
+  };
+  return options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
 }
 
 export function readHandoff(db, id) {

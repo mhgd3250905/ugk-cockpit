@@ -2,6 +2,7 @@ import readline from 'node:readline';
 import { VERSION } from '../version.mjs';
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
+const PROGRESS_STATUSES = ['working', 'in_progress'];
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   DEFAULT_PROTOCOL_VERSION,
   '2025-06-18',
@@ -50,7 +51,8 @@ export const TOOLS = [
         },
         status: {
           type: 'string',
-          description: 'Current status of the work execution'
+          enum: PROGRESS_STATUSES,
+          description: 'Non-terminal progress only. Use finish or handoff to end the session.'
         },
         note: {
           type: 'string',
@@ -350,8 +352,8 @@ function validateProgressArgs(args) {
   if (typeof args.expectedRevision !== 'number' || !Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
     return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
   }
-  if (typeof args.status !== 'string' || args.status.trim() === '') {
-    return 'Missing or invalid required field: status (must be non-empty string)';
+  if (!PROGRESS_STATUSES.includes(args.status)) {
+    return 'Invalid status: progress is non-terminal; use finish or handoff to end the session';
   }
   if (typeof args.note !== 'string') {
     return 'Missing or invalid required field: note (must be string)';
