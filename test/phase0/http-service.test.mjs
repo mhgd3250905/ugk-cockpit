@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -281,6 +281,101 @@ test('folder selection grants one registration and dashboard returns human proje
       name: '不能重复消费',
     }),
   }), 409, 'FOLDER_GRANT_IN_USE');
+});
+
+test('an explicitly open Explorer folder can enter the same confirmation flow', async (t) => {
+  const root = createRepository();
+  let openFolderCalls = 0;
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    openFolderPicker: async () => {
+      openFolderCalls += 1;
+      return root;
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const shell = await request(service, '/');
+  const cookie = shell.headers.get('set-cookie');
+  const selected = await request(service, '/api/v1/folders/select-open', {
+    method: 'POST',
+    headers: {
+      cookie,
+      origin: `http://127.0.0.1:${service.port}`,
+      'sec-fetch-site': 'same-origin',
+      'content-type': 'application/json',
+      'x-ugk-client-id': 'browser-open-folder-0001',
+    },
+    body: '{}',
+  });
+
+  assert.equal(selected.status, 200);
+  assert.equal(openFolderCalls, 1);
+  const body = await selected.json();
+  assert.equal(body.cancelled, false);
+  assert.equal(body.folderPath, root);
+  assert.equal(typeof body.grantId, 'string');
+});
+
+test('an open folder without a Git project returns a human recovery action', async (t) => {
+  const root = createRepository();
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    openFolderPicker: async () => root,
+    probe: async () => {
+      throw Object.assign(new Error('git failed'), {
+        code: 128,
+        stderr: 'fatal: not a git repository',
+      });
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+
+  await assertUserError(await request(service, '/api/v1/folders/select-open', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    body: '{}',
+  }), 422, 'FOLDER_NOT_CODE_PROJECT');
+});
+
+test('an Explorer folder below a junction ancestor cannot receive a grant', async (t) => {
+  const root = createRepository();
+  const linkContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-http-link-'));
+  const ancestorLink = path.join(linkContainer, 'opened-link');
+  symlinkSync(path.dirname(root), ancestorLink, process.platform === 'win32' ? 'junction' : 'dir');
+  const selectedThroughLink = path.join(ancestorLink, path.basename(root));
+  let probeCalls = 0;
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [],
+    openFolderPicker: async () => selectedThroughLink,
+    probe: async () => {
+      probeCalls += 1;
+      return fakeObservation(root);
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+    rmSync(linkContainer, { recursive: true, force: true });
+  });
+
+  await assertUserError(await request(service, '/api/v1/folders/select-open', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    body: '{}',
+  }), 400, 'REPARSE_POINT');
+  assert.equal(probeCalls, 0);
 });
 
 test('folder grant binds repository identity and survives a transient probe failure', async (t) => {

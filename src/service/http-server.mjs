@@ -10,6 +10,7 @@ import { readDashboard, registerProject } from '../core/projects.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
+import { selectOpenExplorerFolder } from '../platform/select-open-folder.mjs';
 import { serveWebAsset } from './web-assets.mjs';
 import { VERSION } from '../version.mjs';
 
@@ -135,13 +136,49 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '这次文件夹选择已经过期。',
     impact: '没有添加项目，也没有修改文件。',
-    requiredAction: '请重新点击“选择项目文件夹”。',
+    requiredAction: '请重新在文件资源管理器中打开要添加的文件夹，再返回页面重试。',
   },
   FOLDER_PICKER_UNAVAILABLE: {
     status: 503,
     message: '暂时无法打开系统文件夹选择器。',
     impact: '没有添加项目，也没有修改文件。',
     requiredAction: '请稍后重试；当前不需要手动填写路径。',
+  },
+  FOLDER_PICKER_TIMEOUT: {
+    status: 504,
+    message: '系统选择器没有正常返回。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请在文件资源管理器中打开项目文件夹，再使用页面中的“使用当前打开的项目文件夹”。',
+  },
+  OPEN_FOLDER_NOT_FOUND: {
+    status: 409,
+    message: '没有找到已打开的项目文件夹。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请先用文件资源管理器打开项目文件夹，然后只保留这个文件夹窗口再试。',
+  },
+  OPEN_FOLDER_AMBIGUOUS: {
+    status: 409,
+    message: '现在打开了多个文件夹，暂时无法确定你要添加哪一个。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请只保留要添加的文件夹窗口，然后再点击“使用当前打开的项目文件夹”。',
+  },
+  OPEN_FOLDER_UNAVAILABLE: {
+    status: 503,
+    message: '暂时无法读取文件资源管理器中的文件夹。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请确认项目文件夹仍在文件资源管理器中打开，然后重试。',
+  },
+  FOLDER_NOT_CODE_PROJECT: {
+    status: 422,
+    message: '这个文件夹里没有找到可识别的代码项目。',
+    impact: '没有添加项目，也没有修改文件。',
+    requiredAction: '请在文件资源管理器中打开包含项目代码的文件夹，然后重试。',
+  },
+  REPARSE_POINT: {
+    status: 400,
+    message: '这个文件夹经过了 Windows 链接，无法安全确认实际位置。',
+    impact: 'Cockpit 已停止读取，没有添加项目，也没有修改文件。',
+    requiredAction: '请在文件资源管理器中直接打开项目的真实文件夹，然后重试。',
   },
   FOLDER_GRANT_IN_USE: {
     status: 409,
@@ -356,6 +393,7 @@ export async function createCockpitHttpServer({
   port = 0,
   probe = probeGitWorktree,
   folderPicker = selectFolder,
+  openFolderPicker = selectOpenExplorerFolder,
   folderGrants = null,
   webRoot = DEFAULT_WEB_ROOT,
   faultInjector,
@@ -368,6 +406,39 @@ export async function createCockpitHttpServer({
     UPDATE runs SET health = 'recovery_uncertain'
     WHERE lifecycle = 'active'
   `).run();
+
+  async function prepareFolderSelection(selectedPath, principalHash) {
+    if (!selectedPath) return { ok: true, cancelled: true };
+    const binding = authorizeExistingPath(selectedPath, selectedPath);
+    let observation;
+    try {
+      observation = await probe(binding.candidateReal);
+    } catch (error) {
+      if (error?.code === 128 && /not a git repository/i.test(error?.stderr ?? '')) {
+        const publicError = new Error('Selected folder is not a Git repository.', { cause: error });
+        publicError.code = 'FOLDER_NOT_CODE_PROJECT';
+        throw publicError;
+      }
+      throw error;
+    }
+    revalidateAuthorizedPath(binding);
+    authorizeObservation(observation, [binding.rootReal]);
+    const grant = activeFolderGrants.issue({
+      folderPath: binding.candidateReal,
+      canonicalPath: observation.canonicalPath,
+      repositoryIdentity: observation.repositoryIdentity,
+      worktreeIdentity: observation.worktreeIdentity,
+    }, principalHash);
+    return {
+      ok: true,
+      cancelled: false,
+      grantId: grant.grantId,
+      folderName: path.basename(binding.candidateReal),
+      folderPath: binding.candidateReal,
+      expiresAt: grant.expiresAt,
+      promise: '只读取必要的代码状态；不会清理、覆盖、提交、上传或删除文件。',
+    };
+  }
 
   const server = createServer(async (request, response) => {
     try {
@@ -424,29 +495,13 @@ export async function createCockpitHttpServer({
 
       if (request.method === 'POST' && url.pathname === '/api/v1/folders/select') {
         const selectedPath = await folderPicker();
-        if (!selectedPath) {
-          sendJson(response, 200, { ok: true, cancelled: true });
-          return;
-        }
-        const binding = authorizeExistingPath(selectedPath, selectedPath);
-        const observation = await probe(binding.candidateReal);
-        revalidateAuthorizedPath(binding);
-        authorizeObservation(observation, [binding.rootReal]);
-        const grant = activeFolderGrants.issue({
-          folderPath: binding.candidateReal,
-          canonicalPath: observation.canonicalPath,
-          repositoryIdentity: observation.repositoryIdentity,
-          worktreeIdentity: observation.worktreeIdentity,
-        }, authentication.principalHash);
-        sendJson(response, 200, {
-          ok: true,
-          cancelled: false,
-          grantId: grant.grantId,
-          folderName: path.basename(binding.candidateReal),
-          folderPath: binding.candidateReal,
-          expiresAt: grant.expiresAt,
-          promise: '只读取必要的代码状态；不会清理、覆盖、提交、上传或删除文件。',
-        });
+        sendJson(response, 200, await prepareFolderSelection(selectedPath, authentication.principalHash));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/folders/select-open') {
+        const selectedPath = await openFolderPicker();
+        sendJson(response, 200, await prepareFolderSelection(selectedPath, authentication.principalHash));
         return;
       }
 

@@ -58,14 +58,16 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
 
-  async function refresh() {
+  async function refresh({ successNotice = null } = {}) {
     try {
       setDashboard(await api('/api/v1/dashboard'));
-      setNotice(null);
+      setNotice(successNotice);
     } catch (error) {
       setNotice({
         title: error.message || '控制台暂时离线',
         detail: error.impact || '代码不受影响；没有确认保存的操作不会显示为成功。',
+        actionLabel: '重新加载简报',
+        retry: () => refresh(),
       });
     }
   }
@@ -76,35 +78,61 @@ function App() {
     setBusy(true);
     setNotice(null);
     try {
-      const result = await api('/api/v1/folders/select', { method: 'POST', body: '{}' });
+      const result = await api('/api/v1/folders/select-open', { method: 'POST', body: '{}' });
       if (!result.cancelled) {
-        setSelection(result);
+        setSelection({ ...result, commandId: crypto.randomUUID() });
         setName(result.folderName);
       }
     } catch (error) {
-      setNotice({ title: error.message, detail: error.required_action });
+      setNotice({
+        title: error.message || '没有读取到当前文件夹。',
+        detail: error.required_action || error.impact || '请保留目标文件夹窗口后重试。',
+        actionLabel: '重新读取当前文件夹',
+        retry: () => chooseFolder(),
+      });
     } finally {
       setBusy(false);
     }
   }
 
   async function register() {
+    if (!selection) {
+      await chooseFolder();
+      return;
+    }
     setBusy(true);
     try {
-      await api('/api/v1/projects', {
+      const project = await api('/api/v1/projects', {
         method: 'POST',
         body: JSON.stringify({
-          commandId: crypto.randomUUID(),
+          commandId: selection.commandId,
           grantId: selection.grantId,
           name,
           stage,
         }),
       });
       setSelection(null);
-      await refresh();
+      await refresh({
+        successNotice: {
+          title: project.alreadyExists
+            ? `${project.name} 已经在工作简报中。`
+            : `已添加 ${project.name}。`,
+          detail: project.alreadyExists
+            ? '没有创建重复项目，原有记录保持不变。'
+            : '它现在已经出现在你的工作简报中；项目代码没有被修改。',
+          actionLabel: '知道了',
+          retry: () => setNotice(null),
+        },
+      });
     } catch (error) {
-      setNotice({ title: error.message, detail: error.required_action });
-      setSelection(null);
+      const needsReselection = ['FOLDER_GRANT_EXPIRED', 'FOLDER_SELECTION_CHANGED'].includes(error.code);
+      if (needsReselection) setSelection(null);
+      setNotice({
+        title: error.message || '项目还没有确认添加。',
+        detail: error.required_action || error.impact || '当前确认内容已保留，请重试。',
+        actionLabel: needsReselection ? '重新读取当前文件夹' : '重试确认添加',
+        retry: needsReselection ? () => chooseFolder() : () => register(),
+      });
     } finally {
       setBusy(false);
     }
@@ -125,32 +153,30 @@ function App() {
           <p className="edition">UGK COCKPIT · 本地工作简报</p>
           <h1>今天，从一件明确的事开始。</h1>
         </div>
-        <button className="quiet-button" onClick={chooseFolder} disabled={busy}>
-          <span aria-hidden="true">＋</span> 添加项目
+        <button className="quiet-button" onClick={() => chooseFolder()} disabled={busy}>
+          <span aria-hidden="true">＋</span> 从文件资源管理器添加
         </button>
       </header>
 
       <div className="rule"><span>{formatTime(dashboard?.refreshedAt)}</span></div>
 
-      {notice && (
-        <section className="notice" role="alert">
-          <strong>{notice.title}</strong>
-          <span>{notice.detail}</span>
-          <button onClick={refresh}>再试一次</button>
-        </section>
-      )}
+      {notice && !selection && <Notice notice={notice} busy={busy} />}
 
       {!dashboard ? (
-        <section className="loading-state"><span className="spinner" />正在整理你的今日简报…</section>
+        notice
+          ? <section className="loading-state">今日简报尚未加载；代码不受影响。</section>
+          : <section className="loading-state"><span className="spinner" />正在整理你的今日简报…</section>
       ) : projects.length === 0 ? (
         <section className="empty-state">
           <p className="kicker">第一步 · 约一分钟</p>
           <h2>先把一个项目放到这里</h2>
-          <p>选择项目文件夹后，我们只读取必要的代码状态。不会清理、覆盖、提交、上传或删除文件。</p>
-          <button className="primary-button" onClick={chooseFolder} disabled={busy}>
-            {busy ? '正在打开选择器…' : '选择项目文件夹'}
-          </button>
-          <small>不需要填写路径，不需要理解 Git。</small>
+          <p>先在文件资源管理器中打开项目文件夹，然后回来添加。我们只读取必要的代码状态，不会清理、覆盖、提交、上传或删除文件。</p>
+          <div className="folder-actions">
+            <button className="primary-button" onClick={() => chooseFolder()} disabled={busy}>
+              {busy ? '正在读取当前文件夹…' : '使用当前打开的项目文件夹'}
+            </button>
+          </div>
+          <small>点击后会先读取必要状态；确认后才登记到工作简报。</small>
         </section>
       ) : (
         <>
@@ -158,7 +184,7 @@ function App() {
           <section className="project-section">
             <div className="section-heading">
               <div><p className="kicker">全部项目</p><h2>接下来可以做什么</h2></div>
-              <button className="text-button" onClick={refresh}>刷新状态</button>
+              <button className="text-button" onClick={() => refresh()}>重新加载简报</button>
             </div>
             <div className="project-grid">
               {projects.map((project) => <ProjectCard key={project.id} project={project} />)}
@@ -172,11 +198,7 @@ function App() {
           <section className="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
             <p className="kicker">确认添加范围</p>
             <h2 id="confirm-title">我们只会添加这一份代码</h2>
-            <div className="scope-counts">
-              <span><strong>1</strong> 个项目</span>
-              <span><strong>1</strong> 个代码位置</span>
-              <span><strong>1</strong> 个工作副本</span>
-            </div>
+            <div className="scope-counts"><span>已选择文件夹</span><strong>{selection.folderName}</strong></div>
             <p className="safety-copy">{selection.promise}</p>
             <label>项目名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
             <label>目前阶段
@@ -187,8 +209,9 @@ function App() {
               </select>
             </label>
             <details><summary>查看技术位置</summary><code>{selection.folderPath}</code></details>
+            {notice && <Notice notice={notice} busy={busy} />}
             <div className="sheet-actions">
-              <button className="text-button" onClick={() => setSelection(null)} disabled={busy}>取消</button>
+              <button className="text-button" onClick={() => { setSelection(null); setNotice(null); }} disabled={busy}>取消</button>
               <button className="primary-button" onClick={register} disabled={busy || !name.trim()}>
                 {busy ? '正在安全检查…' : '确认添加'}
               </button>
@@ -197,6 +220,16 @@ function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function Notice({ notice, busy }) {
+  return (
+    <section className="notice" role="alert">
+      <strong>{notice.title}</strong>
+      <span>{notice.detail}</span>
+      <button onClick={notice.retry} disabled={busy}>{notice.actionLabel}</button>
+    </section>
   );
 }
 
@@ -211,9 +244,7 @@ function PriorityCard({ project }) {
         <h3>{copy.title}</h3>
         <p>{copy.detail}</p>
       </div>
-      <button className="primary-button" disabled title="Run Lite 将在下一步接入">
-        {copy.action} · 即将开放
-      </button>
+      <p className="coming-soon">项目已添加 · 工作接手功能即将开放</p>
     </section>
   );
 }
@@ -227,7 +258,7 @@ function ProjectCard({ project }) {
       <p className="status-title">{copy.title}</p>
       <p>{copy.detail}</p>
       <div className="card-actions">
-        <button disabled title="Run Lite 将在下一步接入">{copy.action} · 即将开放</button>
+        <span className="coming-soon">项目已添加 · 工作接手功能即将开放</span>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>
     </article>

@@ -103,3 +103,25 @@ test('a worktree known before Project registration is safely adopted', (t) => {
   assert.equal(readDashboard(db).length, 1);
   db.close();
 });
+
+test('registering the same project again reports that it already exists', (t) => {
+  const db = fixture(t);
+  const observed = observation();
+  registerProject(db, {
+    commandId: 'register-original',
+    name: '已经存在',
+    observation: observed,
+  });
+
+  const duplicate = registerProject(db, {
+    commandId: 'register-duplicate',
+    name: '不会覆盖原名称',
+    observation: observed,
+  });
+
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.alreadyExists, true);
+  assert.equal(duplicate.name, '已经存在');
+  assert.equal(readDashboard(db).length, 1);
+  db.close();
+});

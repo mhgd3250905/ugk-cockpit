@@ -13,6 +13,14 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     });
   }
 
+  function connectionError(cause) {
+    return Object.assign(new Error('暂时无法连接本地控制台。', { cause }), {
+      code: 'SERVICE_UNAVAILABLE',
+      impact: '页面还没有收到操作结果；项目代码不会被 Cockpit 修改。',
+      required_action: '请确认 Cockpit 正在运行，然后重新加载简报；如果刚才在添加项目，请先确认首页是否已有记录。',
+    });
+  }
+
   function clientId() {
     let value = storage.getItem(CLIENT_ID_KEY);
     if (!CLIENT_ID_PATTERN.test(value ?? '')) {
@@ -54,15 +62,20 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     const isRead = method === 'GET' || method === 'HEAD';
     if (!isRead) await ensureSession();
 
-    const response = await fetchImpl(path, {
-      ...options,
-      credentials: 'same-origin',
-      headers: {
-        ...(options.headers ?? {}),
-        'content-type': 'application/json',
-        'x-ugk-client-id': clientId(),
-      },
-    });
+    let response;
+    try {
+      response = await fetchImpl(path, {
+        ...options,
+        credentials: 'same-origin',
+        headers: {
+          ...(options.headers ?? {}),
+          'content-type': 'application/json',
+          'x-ugk-client-id': clientId(),
+        },
+      });
+    } catch (error) {
+      throw connectionError(error);
+    }
     const body = await response.json();
 
     if (isRead && mayRenewReadSession && response.status === 401 && body.code === 'AUTH_REQUIRED') {

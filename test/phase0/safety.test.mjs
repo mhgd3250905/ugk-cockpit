@@ -64,6 +64,41 @@ test('path guard rejects a junction or symlink even when its target exists', (t)
   assert.throws(() => authorizeExistingPath(link, root), { code: 'PATH_OUTSIDE_SCOPE' });
 });
 
+test('path guard rejects a selected root that is itself a junction or symlink', (t) => {
+  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-link-container-'));
+  const target = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-link-selected-target-'));
+  t.after(() => {
+    rmSync(container, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  });
+  const selectedLink = path.join(container, 'selected-link');
+  symlinkSync(target, selectedLink, process.platform === 'win32' ? 'junction' : 'dir');
+
+  assert.throws(
+    () => authorizeExistingPath(selectedLink, selectedLink),
+    { code: 'REPARSE_POINT' },
+  );
+});
+
+test('path guard rejects a selected root below a junction or symlink ancestor', (t) => {
+  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-ancestor-link-container-'));
+  const target = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-ancestor-link-target-'));
+  t.after(() => {
+    rmSync(container, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  });
+  const targetChild = path.join(target, 'project');
+  mkdirSync(targetChild);
+  const ancestorLink = path.join(container, 'opened-link');
+  symlinkSync(target, ancestorLink, process.platform === 'win32' ? 'junction' : 'dir');
+  const selectedBelowLink = path.join(ancestorLink, 'project');
+
+  assert.throws(
+    () => authorizeExistingPath(selectedBelowLink, selectedBelowLink),
+    { code: 'REPARSE_POINT' },
+  );
+});
+
 test('only one live instance owns the lock and a stale lock is recoverable', (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-lock-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

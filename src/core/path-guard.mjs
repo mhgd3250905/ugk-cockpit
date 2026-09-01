@@ -25,23 +25,44 @@ function containsSymbolicSegment(rootReal, candidateInput) {
   return false;
 }
 
+function rejectSymbolicPath(inputPath) {
+  const resolved = path.resolve(inputPath);
+  const parsed = path.parse(resolved);
+  let cursor = parsed.root;
+  for (const segment of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    if (lstatSync(cursor).isSymbolicLink()) {
+      throw new PathScopeError('所选文件夹经过了链接或 junction，默认不继续访问。', 'REPARSE_POINT');
+    }
+  }
+}
+
 export function authorizeExistingPath(candidatePath, grantedRoot, { allowInternalLinks = false } = {}) {
-  const rootReal = realpathSync.native(grantedRoot);
-  const candidateReal = realpathSync.native(candidatePath);
+  const rootInput = path.resolve(grantedRoot);
+  const candidateInput = path.resolve(candidatePath);
+  if (!allowInternalLinks) rejectSymbolicPath(rootInput);
+  const rootReal = realpathSync.native(rootInput);
+  const candidateReal = realpathSync.native(candidateInput);
   if (!isWithin(rootReal, candidateReal)) {
     throw new PathScopeError('所选路径跳出了已授权文件夹，已停止访问。');
   }
   if (!allowInternalLinks && containsSymbolicSegment(rootReal, candidatePath)) {
     throw new PathScopeError('所选路径经过了链接或 junction，默认不继续访问。', 'REPARSE_POINT');
   }
-  return Object.freeze({ rootReal, candidateReal });
+  return Object.freeze({ rootInput, candidateInput, rootReal, candidateReal });
 }
 
 export function revalidateAuthorizedPath(binding) {
-  const current = realpathSync.native(binding.candidateReal);
-  if (current !== binding.candidateReal || !isWithin(binding.rootReal, current)) {
+  rejectSymbolicPath(binding.rootInput);
+  if (binding.candidateInput !== binding.rootInput) rejectSymbolicPath(binding.candidateInput);
+  const currentRoot = realpathSync.native(binding.rootInput);
+  const current = realpathSync.native(binding.candidateInput);
+  if (
+    currentRoot !== binding.rootReal
+    || current !== binding.candidateReal
+    || !isWithin(binding.rootReal, current)
+  ) {
     throw new PathScopeError('路径在确认后发生变化，已停止访问。', 'PATH_CHANGED');
   }
   return current;
 }
-

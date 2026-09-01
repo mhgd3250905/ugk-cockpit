@@ -105,7 +105,7 @@ export function registerProject(db, request) {
     const statusReason = stage === 'paused'
       ? 'user_paused'
       : (observation.after.hasChanges ? 'preexisting_changes' : 'ready_to_start');
-    db.prepare(`
+    const projectInsert = db.prepare(`
       INSERT OR IGNORE INTO projects (
         id, name, stage, worktree_id, status, status_reason,
         last_observed_at, created_at, updated_at, authorized_root
@@ -147,6 +147,7 @@ export function registerProject(db, request) {
       stage: project.stage,
       status: project.status,
       statusReason: project.status_reason,
+      alreadyExists: projectInsert.changes === 0,
     };
     db.prepare(`
       UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?

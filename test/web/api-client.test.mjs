@@ -142,3 +142,18 @@ test('API client replaces a malformed stored browser identity', async () => {
   assert.equal(sentClientId, replacement);
   assert.equal(storage.getItem(CLIENT_ID_KEY), replacement);
 });
+
+test('API client translates a lost local connection into a Chinese recovery message', async () => {
+  const api = createClient({
+    fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+
+  await assert.rejects(api('/api/v1/dashboard'), (error) => {
+    assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+    assert.match(error.message, /本地控制台/);
+    assert.match(error.required_action, /确认.*运行|重新加载/);
+    return true;
+  });
+});
