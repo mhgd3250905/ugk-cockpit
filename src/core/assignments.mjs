@@ -523,6 +523,61 @@ export function createAssignment(db, request = {}, options = {}) {
   };
 }
 
+/** Change the target Agent for an unaccepted assignment before issuing a new code. */
+export function reassignPendingAssignment(db, request = {}, options = {}) {
+  const assignmentId = request.assignmentId;
+  const agentId = request.agentId;
+  if (!isNonEmptyString(assignmentId) || !isNonEmptyString(agentId)) {
+    return invalid('assignmentId and agentId are required.');
+  }
+  const commandId = request.commandId ?? commandIdFor('assignment.reassign', assignmentId, agentId);
+  const intent = { assignmentId, agentId };
+  const begun = beginCoreCommand(db, {
+    commandId,
+    kind: 'assignment.reassign',
+    request: intent,
+  });
+  if (begun.replay) return begun.replay;
+
+  const timestamp = new Date(nowMillis(options)).toISOString();
+  return withImmediateTransaction(db, () => {
+    const command = readCommand(db, commandId);
+    const replay = terminalResult(command);
+    if (replay) return replay;
+    const assignment = db.prepare('SELECT * FROM assignments WHERE id = ?').get(assignmentId);
+    if (!assignment) {
+      return failCommand(db, commandId, { ok: false, code: 'ASSIGNMENT_NOT_FOUND', assignmentId });
+    }
+    if (assignment.status !== 'pending') {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'ASSIGNMENT_NOT_PENDING',
+        assignmentId,
+        status: assignment.status,
+      });
+    }
+    const revoked = assignment.agent_id === agentId ? 0 : db.prepare(`
+      UPDATE dispatch_grants
+      SET state = 'revoked', revoked_at = ?
+      WHERE assignment_id = ? AND state = 'active'
+    `).run(timestamp, assignmentId).changes;
+    if (assignment.agent_id !== agentId) {
+      db.prepare(`
+        UPDATE assignments SET agent_id = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(agentId, timestamp, assignmentId);
+    }
+    return commitCommand(db, commandId, {
+      ok: true,
+      assignmentId,
+      agentId,
+      status: 'pending',
+      revision: assignment.revision,
+      revokedGrantCount: revoked,
+    }, timestamp);
+  });
+}
+
 /**
  * Resolve a dispatch code without consuming it.  This is useful for an
  * adapter's “inspect before accept” call; the returned object contains only

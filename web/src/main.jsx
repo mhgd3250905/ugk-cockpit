@@ -169,17 +169,16 @@ function App() {
 
   function openHandoff(project, initialMode = 'handoff') {
     setHandoffProject(project);
-    setHandoffAgent('Codex');
+    setHandoffAgent(initialMode === 'init' && project.pendingAssignment?.agent
+      ? project.pendingAssignment.agent
+      : 'Codex');
     setHandoffMode(initialMode);
     setHandoffGoal('');
     setDispatch(null);
     setNotice(null);
-    if (initialMode === 'init' && project.pendingAssignment?.mode === 'adopt') {
-      reissueInit(project);
-    }
   }
 
-  async function reissueInit(project) {
+  async function reissueInit(project, agent = handoffAgent) {
     setBusy(true);
     try {
       const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/assignments/reissue`, {
@@ -187,6 +186,7 @@ function App() {
         body: JSON.stringify({
           clientRequestId: crypto.randomUUID(),
           mode: 'init',
+          agent,
         }),
       });
       setDispatch(result);
@@ -195,7 +195,7 @@ function App() {
         title: error.message || '还没有重新生成接入指令。',
         detail: error.required_action || error.impact || '请刷新状态后重试。',
         actionLabel: '重试生成',
-        retry: () => reissueInit(project),
+        retry: () => reissueInit(project, agent),
       });
     } finally {
       setBusy(false);
@@ -203,6 +203,10 @@ function App() {
   }
 
   async function createHandoff() {
+    if (handoffMode === 'init' && handoffProject.pendingAssignment?.mode === 'adopt') {
+      await reissueInit(handoffProject, handoffAgent);
+      return;
+    }
     setBusy(true);
     try {
       const result = await api(`/api/v1/projects/${encodeURIComponent(handoffProject.id)}/assignments`, {

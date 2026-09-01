@@ -56,13 +56,14 @@ test('existing Agent initializes the registered project, continues, and hands of
   const reissueResponse = await post(
     service,
     `/api/v1/projects/${project.projectId}/assignments/reissue`,
-    { clientRequestId: 'reissue-assignment-1', mode: 'init' },
+    { clientRequestId: 'reissue-assignment-1', mode: 'init', agent: 'ZCode' },
   );
   assert.equal(reissueResponse.status, 200, await reissueResponse.clone().text());
   const reissued = await reissueResponse.json();
   const reissuedInitCode = reissued.message.match(/initCode: "([^"]+)"/)?.[1];
   assert.equal(reissued.reissued, true);
   assert.equal(reissued.assignmentId, assignment.assignmentId);
+  assert.equal(reissued.agent, 'ZCode');
   assert.ok(reissuedInitCode);
   assert.notEqual(reissuedInitCode, initCode);
   const pendingDashboard = await (await fetch(
@@ -72,6 +73,7 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(pendingDashboard.projects[0].statusReason, 'assignment_waiting');
   assert.equal(pendingDashboard.projects[0].activeRun, null);
   assert.equal(pendingDashboard.projects[0].pendingAssignment.mode, 'adopt');
+  assert.equal(pendingDashboard.projects[0].pendingAssignment.agent, 'ZCode');
 
   const initResponse = await post(service, '/api/v1/mcp/work/init', {
     initCode: reissuedInitCode,

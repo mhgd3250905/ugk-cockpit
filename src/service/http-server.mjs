@@ -11,6 +11,7 @@ import {
   issueDispatchGrant,
   readDispatchContext,
   readSessionContext,
+  reassignPendingAssignment,
   recordProgress,
 } from '../core/assignments.mjs';
 import { FolderGrantStore } from '../core/folder-grants.mjs';
@@ -911,6 +912,11 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
+        if (body.agent !== undefined
+          && !['Codex', 'ZCode', 'Antigravity'].includes(body.agent)) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
         await observeRegisteredProject(projectId);
         const pendingAssignments = db.prepare(`
           SELECT * FROM assignments
@@ -927,6 +933,18 @@ export async function createCockpitHttpServer({
         if (!assignment) {
           sendError(response, 'NOT_FOUND');
           return;
+        }
+        if (body.agent && body.agent !== assignment.agent_id) {
+          const reassigned = reassignPendingAssignment(db, {
+            assignmentId: assignment.id,
+            agentId: body.agent,
+            commandId: id('assignment_reassign', `${assignment.id}:${body.agent}`),
+          });
+          if (!reassigned.ok) {
+            sendError(response, reassigned.code, { extra: { assignment_id: assignment.id } });
+            return;
+          }
+          assignment.agent_id = body.agent;
         }
         const dispatchCode = createHmac('sha256', token)
           .update(`dispatch:reissue:${assignment.id}:${body.clientRequestId}`)
