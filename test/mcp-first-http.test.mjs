@@ -19,7 +19,7 @@ async function post(service, pathname, body) {
   });
 }
 
-test('assignment message -> MCP accept -> progress -> finish -> dashboard', async (t) => {
+test('task handoff -> standby accept reads latest manual -> explicit begin', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-mcp-first-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# fixture\n');
@@ -44,7 +44,7 @@ test('assignment message -> MCP accept -> progress -> finish -> dashboard', asyn
   const assignmentResponse = await post(
     service,
     `/api/v1/projects/${project.projectId}/assignments`,
-    { clientRequestId: 'create-assignment-1', agent: 'Codex', task: '验证 MCP 闭环' },
+    { clientRequestId: 'create-assignment-1', agent: 'Codex', mode: 'task', task: '验证 MCP 闭环' },
   );
   assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
   const assignment = await assignmentResponse.json();
@@ -78,13 +78,21 @@ test('assignment message -> MCP accept -> progress -> finish -> dashboard', asyn
   const progress = await progressResponse.json();
   assert.equal(progress.revision, 2);
 
-  const finishResponse = await post(service, '/api/v1/mcp/work/finish', {
+  const finishResponse = await post(service, '/api/v1/mcp/work/handoff', {
     sessionId: accepted.sessionId,
-    clientRequestId: 'finish-1',
+    clientRequestId: 'handoff-1',
     expectedRevision: 2,
     outcome: 'completed',
+    nextSessionFocus: '等待用户安排下一项开发任务',
     summary: 'MCP 闭环通过',
-    nextStep: '打开网页体验',
+    currentState: '交接工具、等待态和开始工作工具已经接通',
+    completedItems: ['完成标准交接手册生成'],
+    pendingItems: ['由用户体验工作台'],
+    decisions: ['等待态不获取写入权限'],
+    artifactRefs: ['src/core/handoffs.mjs'],
+    risks: [],
+    suggestedSkills: ['handoff'],
+    acknowledgements: [],
   });
   assert.equal(finishResponse.status, 200, await finishResponse.clone().text());
   const finished = await finishResponse.json();
@@ -98,11 +106,52 @@ test('assignment message -> MCP accept -> progress -> finish -> dashboard', asyn
   const dashboard = await dashboardResponse.json();
   assert.equal(dashboard.projects[0].activeWork, null);
   assert.equal(dashboard.projects[0].lastWork.summary, 'MCP 闭环通过');
-  assert.equal(dashboard.projects[0].lastWork.nextStep, '打开网页体验');
+  assert.equal(dashboard.projects[0].lastWork.nextStep, '等待用户安排下一项开发任务');
+  assert.equal(dashboard.projects[0].lastHandoffManual.summary, 'MCP 闭环通过');
+
+  const standbyResponse = await post(
+    service,
+    `/api/v1/projects/${project.projectId}/assignments`,
+    { clientRequestId: 'create-assignment-2', agent: 'Codex', mode: 'handoff', task: '' },
+  );
+  assert.equal(standbyResponse.status, 201, await standbyResponse.clone().text());
+  const standby = await standbyResponse.json();
+  const standbyCode = standby.message.match(/dispatchCode: "([^"]+)"/)?.[1];
+  assert.ok(standbyCode);
+
+  const standbyAcceptResponse = await post(service, '/api/v1/mcp/work/accept', {
+    dispatchCode: standbyCode,
+    clientRequestId: 'accept-2',
+  });
+  assert.equal(standbyAcceptResponse.status, 200, await standbyAcceptResponse.clone().text());
+  const waiting = await standbyAcceptResponse.json();
+  assert.equal(waiting.status, 'waiting_for_instruction');
+  assert.equal(waiting.revision, 1);
+  assert.equal(waiting.latestHandoff.summary, 'MCP 闭环通过');
+  assert.match(waiting.latestHandoff.bodyMarkdown, /# Handoff/);
+
+  const waitingDashboard = await (await fetch(
+    `http://${service.host}:${service.port}/api/v1/dashboard`,
+    { headers: { authorization: `Bearer ${TOKEN}` } },
+  )).json();
+  assert.equal(waitingDashboard.projects[0].statusReason, 'agent_waiting');
+  assert.equal(waitingDashboard.projects[0].activeRun, null);
+
+  const beginResponse = await post(service, '/api/v1/mcp/work/begin', {
+    sessionId: waiting.sessionId,
+    clientRequestId: 'begin-2',
+    expectedRevision: 1,
+    task: '按用户的新安排开始开发',
+  });
+  assert.equal(beginResponse.status, 200, await beginResponse.clone().text());
+  const begun = await beginResponse.json();
+  assert.equal(begun.status, 'active');
+  assert.equal(begun.task, '按用户的新安排开始开发');
 
   const verified = openCockpitDatabase(dbPath, { migrate: false });
   const storedHash = verified.prepare('SELECT code_hash FROM dispatch_grants').get().code_hash;
   assert.equal(storedHash.includes(dispatchCode), false);
   assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM progress_events').get().count, 2);
+  assert.equal(verified.prepare('SELECT COUNT(*) AS count FROM handoffs').get().count, 1);
   verified.close();
 });

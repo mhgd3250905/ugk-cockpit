@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 8;
+export const SUPPORTED_SCHEMA_VERSION = 9;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -254,6 +254,53 @@ CREATE INDEX idx_assignments_project_status ON assignments(project_id, status, u
 CREATE INDEX idx_dispatch_grants_assignment_state ON dispatch_grants(assignment_id, state);
 CREATE INDEX idx_dispatch_grants_expiry ON dispatch_grants(state, expires_at);
 CREATE INDEX idx_progress_events_assignment_revision ON progress_events(assignment_id, revision DESC);
+`,
+  },
+  {
+    version: 9,
+    name: 'append-only-handoff-manuals',
+    sql: `
+CREATE TABLE handoffs (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK (sequence >= 1),
+  assignment_id TEXT NOT NULL REFERENCES assignments(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  session_id TEXT NOT NULL,
+  run_id TEXT REFERENCES runs(id),
+  client_request_id TEXT NOT NULL,
+  expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+  revision INTEGER NOT NULL CHECK (revision >= expected_revision),
+  next_session_focus TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  current_state TEXT NOT NULL,
+  completed_items TEXT NOT NULL,
+  pending_items TEXT NOT NULL,
+  decisions TEXT NOT NULL,
+  artifact_refs TEXT NOT NULL,
+  risks TEXT NOT NULL,
+  suggested_skills TEXT NOT NULL,
+  body_markdown TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(session_id, client_request_id),
+  UNIQUE(session_id, sequence)
+) STRICT;
+CREATE INDEX idx_handoffs_project_created
+  ON handoffs(project_id, created_at DESC, id DESC);
+CREATE INDEX idx_handoffs_session_sequence
+  ON handoffs(session_id, sequence DESC);
+CREATE INDEX idx_handoffs_assignment_created
+  ON handoffs(assignment_id, created_at DESC, id DESC);
+CREATE TRIGGER handoffs_append_only_update
+BEFORE UPDATE ON handoffs
+BEGIN
+  SELECT RAISE(ABORT, 'handoffs are append-only');
+END;
+CREATE TRIGGER handoffs_append_only_delete
+BEFORE DELETE ON handoffs
+BEGIN
+  SELECT RAISE(ABORT, 'handoffs are append-only');
+END;
 `,
   },
 ];

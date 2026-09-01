@@ -9,9 +9,15 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 3 tools and no path/projectId/worktreeId', () => {
+test('TOOLS definition contains the required 5 tools and no path/projectId/worktreeId', () => {
   const toolNames = TOOLS.map((t) => t.name);
-  assert.deepEqual(toolNames, ['ugk_work_accept', 'ugk_work_progress', 'ugk_work_finish']);
+  assert.deepEqual(toolNames, [
+    'ugk_work_accept',
+    'ugk_work_progress',
+    'ugk_work_finish',
+    'ugk_work_handoff',
+    'ugk_work_begin'
+  ]);
 
   for (const tool of TOOLS) {
     const props = Object.keys(tool.inputSchema.properties || {});
@@ -87,7 +93,7 @@ test('dispatchMessage handles initialize, ping, tools/list, and notifications', 
 });
 
 test('dispatchMessage accurately forwards tool calls to handlers once with exact arguments', async () => {
-  const callCounts = { accept: 0, progress: 0, finish: 0 };
+  const callCounts = { accept: 0, progress: 0, finish: 0, handoff: 0, begin: 0 };
   const receivedArgs = {};
 
   const handlers = {
@@ -105,6 +111,16 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
       callCounts.finish += 1;
       receivedArgs.finish = args;
       return { closed: true, outcome: 'completed' };
+    },
+    ugk_work_handoff: async (args) => {
+      callCounts.handoff += 1;
+      receivedArgs.handoff = args;
+      return { recorded: true, outcome: 'completed' };
+    },
+    ugk_work_begin: async (args) => {
+      callCounts.begin += 1;
+      receivedArgs.begin = args;
+      return { started: true, sessionId: 'sess-100' };
     }
   };
 
@@ -129,6 +145,30 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.strictEqual(callCounts.accept, 1);
   assert.deepEqual(receivedArgs.accept, acceptPayload);
   assert.deepEqual(JSON.parse(acceptRes.result.content[0].text), { sessionId: 'sess-100', revision: 1 });
+
+  // Call ugk_work_begin
+  const beginPayload = {
+    sessionId: 'sess-100',
+    clientRequestId: 'req-begin-1',
+    expectedRevision: 1,
+    task: 'Implement MCP protocol handoff tools'
+  };
+  const beginRes = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_begin',
+        arguments: beginPayload
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(beginRes.id, 13);
+  assert.strictEqual(callCounts.begin, 1);
+  assert.deepEqual(receivedArgs.begin, beginPayload);
+  assert.deepEqual(JSON.parse(beginRes.result.content[0].text), { started: true, sessionId: 'sess-100' });
 
   // Call ugk_work_progress
   const progressPayload = {
@@ -181,6 +221,40 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.strictEqual(callCounts.finish, 1);
   assert.deepEqual(receivedArgs.finish, finishPayload);
   assert.deepEqual(JSON.parse(finishRes.result.content[0].text), { closed: true, outcome: 'completed' });
+
+  // Call ugk_work_handoff
+  const handoffPayload = {
+    sessionId: 'sess-100',
+    clientRequestId: 'req-handoff-1',
+    expectedRevision: 3,
+    outcome: 'completed',
+    nextSessionFocus: 'Implement next vertical slice',
+    summary: 'Completed MCP protocol expansion',
+    currentState: 'All tests green',
+    completedItems: ['Added tools', 'Added tests'],
+    pendingItems: ['Deploy to staging'],
+    decisions: ['Use stdio transport'],
+    artifactRefs: ['src/mcp/stdio-protocol.mjs'],
+    risks: ['None identified'],
+    suggestedSkills: ['javascript', 'mcp'],
+    acknowledgements: ['commit:abc123']
+  };
+  const handoffRes = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 14,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_handoff',
+        arguments: handoffPayload
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(handoffRes.id, 14);
+  assert.strictEqual(callCounts.handoff, 1);
+  assert.deepEqual(receivedArgs.handoff, handoffPayload);
+  assert.deepEqual(JSON.parse(handoffRes.result.content[0].text), { recorded: true, outcome: 'completed' });
 });
 
 test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId) and invalid inputs', async () => {
@@ -189,10 +263,18 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
     ugk_work_accept: async () => {
       called = true;
       return { ok: true };
+    },
+    ugk_work_begin: async () => {
+      called = true;
+      return { ok: true };
+    },
+    ugk_work_handoff: async () => {
+      called = true;
+      return { ok: true };
     }
   };
 
-  // Try injecting path
+  // Try injecting path to ugk_work_accept
   const resWithPath = await dispatchMessage(
     {
       jsonrpc: '2.0',
@@ -253,11 +335,181 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
   assert.strictEqual(resMissing.result.isError, true);
   assert.match(resMissing.result.content[0].text, /required field/);
 
+  // ugk_work_begin with forbidden path
+  const beginForbiddenPath = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 25,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_begin',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 1,
+          task: 'do task',
+          path: '/some/path'
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(beginForbiddenPath.result.isError, true);
+  assert.match(beginForbiddenPath.result.content[0].text, /Forbidden property/);
+
+  // ugk_work_begin with invalid revision (0)
+  const beginInvalidRev = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 26,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_begin',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 0,
+          task: 'do task'
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(beginInvalidRev.result.isError, true);
+  assert.match(beginInvalidRev.result.content[0].text, /expectedRevision/);
+
+  // ugk_work_handoff with forbidden worktreeId
+  const handoffForbidden = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 27,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_handoff',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 1,
+          outcome: 'completed',
+          nextSessionFocus: 'focus',
+          summary: 'sum',
+          currentState: 'state',
+          completedItems: [],
+          pendingItems: [],
+          decisions: [],
+          artifactRefs: [],
+          risks: [],
+          suggestedSkills: [],
+          worktreeId: 'wt-123'
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(handoffForbidden.result.isError, true);
+  assert.match(handoffForbidden.result.content[0].text, /Forbidden property/);
+
+  // ugk_work_handoff with invalid outcome
+  const handoffInvalidOutcome = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 28,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_handoff',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 1,
+          outcome: 'unknown_outcome',
+          nextSessionFocus: 'focus',
+          summary: 'sum',
+          currentState: 'state',
+          completedItems: [],
+          pendingItems: [],
+          decisions: [],
+          artifactRefs: [],
+          risks: [],
+          suggestedSkills: []
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(handoffInvalidOutcome.result.isError, true);
+  assert.match(handoffInvalidOutcome.result.content[0].text, /outcome/);
+
+  // ugk_work_handoff with non-string array elements
+  const handoffNonStringArray = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 29,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_handoff',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 1,
+          outcome: 'completed',
+          nextSessionFocus: 'focus',
+          summary: 'sum',
+          currentState: 'state',
+          completedItems: ['valid', 12345],
+          pendingItems: [],
+          decisions: [],
+          artifactRefs: [],
+          risks: [],
+          suggestedSkills: []
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(handoffNonStringArray.result.isError, true);
+  assert.match(handoffNonStringArray.result.content[0].text, /completedItems/);
+
+  // ugk_work_handoff with non-array value for list field
+  const handoffNotArray = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_handoff',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: 'cr1',
+          expectedRevision: 1,
+          outcome: 'completed',
+          nextSessionFocus: 'focus',
+          summary: 'sum',
+          currentState: 'state',
+          completedItems: [],
+          pendingItems: 'not an array',
+          decisions: [],
+          artifactRefs: [],
+          risks: [],
+          suggestedSkills: []
+        }
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(called, false);
+  assert.strictEqual(handoffNotArray.result.isError, true);
+  assert.match(handoffNotArray.result.content[0].text, /pendingItems/);
+
   // Try unknown tool
   const resUnknownTool = await dispatchMessage(
     {
       jsonrpc: '2.0',
-      id: 23,
+      id: 31,
       method: 'tools/call',
       params: {
         name: 'unknown_tool',
@@ -272,7 +524,7 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
   // Try unknown method
   const resUnknownMethod = await dispatchMessage({
     jsonrpc: '2.0',
-    id: 24,
+    id: 32,
     method: 'unknown/method'
   });
   assert.strictEqual(resUnknownMethod.error.code, -32601);

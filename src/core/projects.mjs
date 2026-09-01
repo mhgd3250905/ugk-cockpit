@@ -305,10 +305,19 @@ export function readDashboard(db) {
     SELECT status, note, revision, created_at FROM progress_events
     WHERE assignment_id = ? ORDER BY revision DESC LIMIT 1
   `);
+  const latestHandoffQuery = db.prepare(`
+    SELECT id, summary, next_session_focus, body_markdown, created_at
+    FROM handoffs
+    WHERE project_id = ?
+    ORDER BY created_at DESC, sequence DESC, id DESC
+    LIMIT 1
+  `);
   return rows.map((row) => {
     const assignment = activeAssignmentQuery.get(row.id) ?? null;
     const lastProgress = assignment ? lastProgressQuery.get(assignment.id) ?? null : null;
-    const isAccepted = assignment && assignment.status !== 'pending';
+    const latestHandoff = latestHandoffQuery.get(row.id) ?? null;
+    const isWaiting = assignment?.status === 'accepted' && !row.active_run_id;
+    const isWorking = Boolean(row.active_run_id || assignment?.status === 'active');
     const lastWork = row.last_run_id ? {
       runId: row.last_run_id,
       agentClaim: row.last_agent_claim,
@@ -322,20 +331,29 @@ export function readDashboard(db) {
       id: row.id,
       name: row.name,
       stage: row.stage,
-      status: row.active_run_id || isAccepted
+      status: isWorking
         ? 'active'
         : (row.stage === 'paused'
           ? 'paused'
           : (row.coherence !== 'coherent' || row.has_changes ? 'attention' : 'ready')),
-      statusReason: row.active_run_id || isAccepted
+      statusReason: isWorking
         ? (row.run_health === 'recovery_uncertain' ? 'run_may_be_interrupted' : 'active_work')
-        : (assignment?.status === 'pending'
+        : (isWaiting
+          ? 'agent_waiting'
+          : (assignment?.status === 'pending'
           ? 'assignment_waiting'
           : (row.coherence !== 'coherent'
             ? 'status_check_incomplete'
-            : (row.has_changes ? 'preexisting_changes' : 'ready_to_start'))),
+            : (row.has_changes ? 'preexisting_changes' : 'ready_to_start')))),
       lastObservedAt: row.last_observed_at,
       path: row.canonical_path,
+      lastHandoffManual: latestHandoff ? {
+        id: latestHandoff.id,
+        summary: latestHandoff.summary,
+        nextSessionFocus: latestHandoff.next_session_focus,
+        markdown: latestHandoff.body_markdown,
+        createdAt: latestHandoff.created_at,
+      } : null,
       pendingAssignment: assignment?.status === 'pending' ? {
         id: assignment.id,
         agent: assignment.agent_id,
@@ -346,7 +364,15 @@ export function readDashboard(db) {
           ORDER BY created_at DESC LIMIT 1
         `).get(assignment.id)?.expires_at ?? null,
       } : null,
-      activeWork: isAccepted ? {
+      waitingAgent: isWaiting ? {
+        assignmentId: assignment.id,
+        sessionId: assignment.session_id,
+        agent: assignment.agent_id,
+        task: assignment.task_id,
+        revision: assignment.revision,
+        acceptedAt: assignment.accepted_at,
+      } : null,
+      activeWork: isWorking && assignment ? {
         assignmentId: assignment.id,
         sessionId: assignment.session_id,
         agent: assignment.agent_id,

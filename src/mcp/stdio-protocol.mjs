@@ -104,10 +104,155 @@ export const TOOLS = [
       required: ['sessionId', 'clientRequestId', 'expectedRevision', 'outcome', 'summary', 'nextStep'],
       additionalProperties: false
     }
+  },
+  {
+    name: 'ugk_work_handoff',
+    description: 'Record session handoff details for the next agent session',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The identifier of the active work session'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'Idempotency key / client request identifier'
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Expected optimistic concurrency revision number'
+        },
+        outcome: {
+          type: 'string',
+          enum: ['completed', 'blocked', 'abandoned'],
+          description: 'Outcome of the work (completed, blocked, abandoned)'
+        },
+        nextSessionFocus: {
+          type: 'string',
+          description: 'Recommended focus area for the next session'
+        },
+        summary: {
+          type: 'string',
+          description: 'Summary of what was achieved or encountered'
+        },
+        currentState: {
+          type: 'string',
+          description: 'Current state of the project/task at handoff'
+        },
+        completedItems: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of completed items'
+        },
+        pendingItems: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of pending items'
+        },
+        decisions: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of key decisions made'
+        },
+        artifactRefs: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of artifact references or paths'
+        },
+        risks: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of identified risks or caveats'
+        },
+        suggestedSkills: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'List of suggested skills for next session'
+        },
+        acknowledgements: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'Optional verified commit:<sha> references or unattributed_changes confirmation'
+        }
+      },
+      required: [
+        'sessionId',
+        'clientRequestId',
+        'expectedRevision',
+        'outcome',
+        'nextSessionFocus',
+        'summary',
+        'currentState',
+        'completedItems',
+        'pendingItems',
+        'decisions',
+        'artifactRefs',
+        'risks',
+        'suggestedSkills'
+      ],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_work_begin',
+    description: 'Begin work on an accepted session by specifying task details',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The identifier of the active work session'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'Idempotency key / client request identifier'
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Expected optimistic concurrency revision number'
+        },
+        task: {
+          type: 'string',
+          description: 'The task description or scope for this work session'
+        }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'task'],
+      additionalProperties: false
+    }
   }
 ];
 
 const FORBIDDEN_KEYS = new Set(['path', 'projectId', 'worktreeId']);
+
+const HANDOFF_ARRAY_FIELDS = [
+  'completedItems',
+  'pendingItems',
+  'decisions',
+  'artifactRefs',
+  'risks',
+  'suggestedSkills'
+];
+
+function isStringArray(val) {
+  return Array.isArray(val) && val.every((item) => typeof item === 'string');
+}
 
 function validateAcceptArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
@@ -126,6 +271,33 @@ function validateAcceptArgs(args) {
   }
   if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
     return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  return null;
+}
+
+function validateBeginArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) {
+      return `Forbidden property: ${key}`;
+    }
+    if (!['sessionId', 'clientRequestId', 'expectedRevision', 'task'].includes(key)) {
+      return `Unexpected property: ${key}`;
+    }
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (typeof args.expectedRevision !== 'number' || !Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  if (typeof args.task !== 'string' || args.task.trim() === '') {
+    return 'Missing or invalid required field: task (must be non-empty string)';
   }
   return null;
 }
@@ -192,9 +364,68 @@ function validateFinishArgs(args) {
   }
   if (
     args.acknowledgements !== undefined
-    && (!Array.isArray(args.acknowledgements)
-      || args.acknowledgements.some((value) => typeof value !== 'string'))
+    && !isStringArray(args.acknowledgements)
   ) {
+    return 'Invalid field: acknowledgements (must be a string array if provided)';
+  }
+  return null;
+}
+
+function validateHandoffArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowedKeys = [
+    'sessionId',
+    'clientRequestId',
+    'expectedRevision',
+    'outcome',
+    'nextSessionFocus',
+    'summary',
+    'currentState',
+    'completedItems',
+    'pendingItems',
+    'decisions',
+    'artifactRefs',
+    'risks',
+    'suggestedSkills',
+    'acknowledgements'
+  ];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) {
+      return `Forbidden property: ${key}`;
+    }
+    if (!allowedKeys.includes(key)) {
+      return `Unexpected property: ${key}`;
+    }
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (typeof args.expectedRevision !== 'number' || !Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  if (!['completed', 'blocked', 'abandoned'].includes(args.outcome)) {
+    return 'Missing or invalid required field: outcome';
+  }
+  if (typeof args.nextSessionFocus !== 'string' || args.nextSessionFocus.trim() === '') {
+    return 'Missing or invalid required field: nextSessionFocus (must be non-empty string)';
+  }
+  if (typeof args.summary !== 'string' || args.summary.trim() === '') {
+    return 'Missing or invalid required field: summary (must be non-empty string)';
+  }
+  if (typeof args.currentState !== 'string' || args.currentState.trim() === '') {
+    return 'Missing or invalid required field: currentState (must be non-empty string)';
+  }
+  for (const field of HANDOFF_ARRAY_FIELDS) {
+    if (!isStringArray(args[field])) {
+      return `Missing or invalid required field: ${field} (must be an array of strings)`;
+    }
+  }
+  if (args.acknowledgements !== undefined && !isStringArray(args.acknowledgements)) {
     return 'Invalid field: acknowledgements (must be a string array if provided)';
   }
   return null;
@@ -295,6 +526,10 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateProgressArgs(toolArgs);
       } else if (toolName === 'ugk_work_finish') {
         validationError = validateFinishArgs(toolArgs);
+      } else if (toolName === 'ugk_work_handoff') {
+        validationError = validateHandoffArgs(toolArgs);
+      } else if (toolName === 'ugk_work_begin') {
+        validationError = validateBeginArgs(toolArgs);
       } else {
         return {
           jsonrpc: '2.0',

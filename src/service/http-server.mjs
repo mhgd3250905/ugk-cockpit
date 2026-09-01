@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { openCockpitDatabase } from '../core/database.mjs';
 import {
   acceptAssignment,
+  beginAssignmentWork,
   completeAssignment,
   createAssignment,
   readDispatchContext,
@@ -12,6 +13,7 @@ import {
   recordProgress,
 } from '../core/assignments.mjs';
 import { FolderGrantStore } from '../core/folder-grants.mjs';
+import { createHandoff, readLatestHandoff } from '../core/handoffs.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
 import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
@@ -229,6 +231,12 @@ const PUBLIC_ERRORS = {
     impact: '旧进度没有覆盖新记录，代码没有被 Cockpit 修改。',
     requiredAction: '请使用工具返回的最新 revision 后重试。',
   },
+  HANDOFF_REVISION_CONFLICT: {
+    status: 409,
+    message: '生成交接时发现这项工作已有更新。',
+    impact: '旧内容没有覆盖新记录，代码没有被 Cockpit 修改。',
+    requiredAction: '请使用工具返回的最新 revision 重新生成交接。',
+  },
   SESSION_NOT_FOUND: {
     status: 404,
     message: '找不到这次 AI 工作会话。',
@@ -324,8 +332,11 @@ function validateFinishBody(body) {
 function validateAssignmentBody(body) {
   requireString(body, 'clientRequestId');
   requireString(body, 'agent');
-  requireString(body, 'task');
-  if (!['Codex', 'ZCode', 'Antigravity'].includes(body.agent) || body.task.length > 1000) {
+  requireString(body, 'mode');
+  if (body.mode === 'task') requireString(body, 'task');
+  if (!['Codex', 'ZCode', 'Antigravity'].includes(body.agent)
+    || !['handoff', 'task'].includes(body.mode)
+    || (body.task !== undefined && (typeof body.task !== 'string' || body.task.length > 1000))) {
     const error = new Error('Invalid assignment request.');
     error.code = 'INVALID_REQUEST';
     throw error;
@@ -339,6 +350,44 @@ function validateMcpProgressBody(body) {
   if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
     || typeof body.note !== 'string' || body.note.length > 4000) {
     const error = new Error('Invalid progress request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpBeginBody(body) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'task');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1 || body.task.length > 1000) {
+    const error = new Error('Invalid begin request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpHandoffBody(body) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  const textFields = ['nextSessionFocus', 'summary', 'currentState'];
+  const listFields = [
+    'completedItems',
+    'pendingItems',
+    'decisions',
+    'artifactRefs',
+    'risks',
+    'suggestedSkills',
+  ];
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
+    || !['completed', 'blocked', 'abandoned'].includes(body.outcome)
+    || textFields.some((field) => typeof body[field] !== 'string' || body[field].length > 20_000)
+    || listFields.some((field) => !Array.isArray(body[field])
+      || body[field].length > 100
+      || body[field].some((value) => typeof value !== 'string' || value.length > 4000))
+    || (body.acknowledgements !== undefined
+      && (!Array.isArray(body.acknowledgements)
+        || body.acknowledgements.some((value) => typeof value !== 'string')))) {
+    const error = new Error('Invalid handoff request.');
     error.code = 'INVALID_REQUEST';
     throw error;
   }
@@ -682,31 +731,43 @@ export async function createCockpitHttpServer({
         const dispatchCode = createHmac('sha256', token)
           .update(`dispatch:${projectId}:${body.clientRequestId}`)
           .digest('base64url');
+        const task = body.mode === 'handoff'
+          ? '读取最后一次交接并等待用户安排'
+          : body.task.trim();
         const result = createAssignment(db, {
           commandId: id('assignment_create', `${projectId}:${body.clientRequestId}`),
           assignmentId,
           grantId,
           projectId,
           agentId: body.agent,
-          taskId: body.task.trim(),
-          scope: { mode: 'write' },
+          taskId: task,
+          scope: { mode: body.mode === 'handoff' ? 'standby' : 'write' },
           dispatchCode,
         });
         if (!result.ok) {
           sendError(response, result.code, { extra: { assignment_id: result.assignmentId ?? null } });
           return;
         }
-        const message = [
-          `请使用 UGK Cockpit MCP 接手这项任务：${body.task.trim()}`,
-          `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
-          '工作中调用 ugk_work_progress；结束时调用 ugk_work_finish，并填写 summary 与 nextStep。',
-          '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
-        ].join('\n');
+        const message = body.mode === 'handoff'
+          ? [
+            '请使用 UGK Cockpit MCP 接上这个项目的上下文。',
+            `调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)。`,
+            '读取工具返回的 latestHandoff，简要告诉用户你理解的现状，然后等待后续安排。',
+            '此时不要修改代码；收到明确任务后先调用 ugk_work_begin，再开始工作。',
+            '如果 MCP 工具不可用或接手失败，不要声称已经读取交接或开始工作。',
+          ].join('\n')
+          : [
+            `请使用 UGK Cockpit MCP 接手这项任务：${task}`,
+            `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
+            '工作中调用 ugk_work_progress；结束时优先调用 ugk_work_handoff 生成标准交接手册。',
+            '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
+          ].join('\n');
         sendJson(response, 201, {
           ok: true,
           assignmentId,
           agent: body.agent,
-          task: body.task.trim(),
+          mode: body.mode,
+          task,
           expiresAt: result.expiresAt,
           message,
         });
@@ -737,6 +798,24 @@ export async function createCockpitHttpServer({
           sendError(response, accepted.code);
           return;
         }
+        const latestHandoff = readLatestHandoff(db, accepted.projectId);
+        if (accepted.scope?.mode === 'standby') {
+          sendJson(response, 200, {
+            ok: true,
+            assignmentId: accepted.assignmentId,
+            sessionId: accepted.sessionId,
+            agent: accepted.agentId,
+            task: accepted.taskId,
+            status: 'waiting_for_instruction',
+            revision: accepted.revision,
+            acceptedAt: accepted.acceptedAt,
+            latestHandoff,
+            message: latestHandoff
+              ? '已读取最后一次交接；当前没有写入权限，请向用户复述现状并等待安排。'
+              : '这个项目还没有交接手册；当前没有写入权限，请告知用户并等待安排。',
+          });
+          return;
+        }
         const started = startWriteRun(db, {
           commandId: id('mcp_start', `${accepted.grantId}:${body.clientRequestId}`),
           runId: accepted.sessionId,
@@ -765,6 +844,55 @@ export async function createCockpitHttpServer({
           revision: current.revision,
           leaseGeneration: started.leaseGeneration,
           acceptedAt: accepted.acceptedAt,
+          latestHandoff,
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/begin') {
+        const body = await readJson(request);
+        validateMcpBeginBody(body);
+        const context = readSessionContext(db, body.sessionId);
+        if (!context.ok) {
+          sendError(response, context.code);
+          return;
+        }
+        if (context.scope?.mode !== 'standby') {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const { observation } = await observeRegisteredProject(context.projectId, context);
+        const started = startWriteRun(db, {
+          commandId: id('mcp_begin_run', `${body.sessionId}:${body.clientRequestId}`),
+          runId: body.sessionId,
+          worktreeId: context.worktreeId,
+          canonicalPath: observation.canonicalPath,
+          repositoryIdentity: observation.repositoryIdentity,
+          worktreeIdentity: observation.worktreeIdentity,
+          agentClaim: context.agentId,
+          goal: body.task.trim(),
+          baseline: toSnapshot(observation),
+        }, { faultInjector });
+        if (!started.ok) {
+          sendError(response, started.code, {
+            extra: { session_id: body.sessionId, active_run_id: started.activeRunId ?? null },
+          });
+          return;
+        }
+        const begun = beginAssignmentWork(db, {
+          ...body,
+          commandId: id('mcp_begin_assignment', `${body.sessionId}:${body.clientRequestId}`),
+        });
+        if (!begun.ok) {
+          sendError(response, begun.code, {
+            extra: { session_id: body.sessionId, revision: begun.revision ?? null },
+          });
+          return;
+        }
+        sendJson(response, 200, {
+          ...begun,
+          leaseGeneration: started.leaseGeneration,
+          message: '已开始工作；现在可以修改代码并报告进展。',
         });
         return;
       }
@@ -831,6 +959,78 @@ export async function createCockpitHttpServer({
           cockpitVerified: true,
           summary: body.summary,
           nextStep: body.nextStep,
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/handoff') {
+        const body = await readJson(request);
+        validateMcpHandoffBody(body);
+        const context = readSessionContext(db, body.sessionId);
+        if (!context.ok || !context.run) {
+          sendError(response, context.code ?? 'SESSION_NOT_FOUND');
+          return;
+        }
+        const baseline = db.prepare(`
+          SELECT head FROM snapshots WHERE run_id = ? AND phase = 'baseline'
+        `).get(body.sessionId);
+        const { observation } = await observeRegisteredProject(context.projectId, {
+          ...context,
+          baselineHead: baseline?.head ?? null,
+        });
+        const handoff = createHandoff(db, body);
+        if (!handoff.ok) {
+          sendError(response, handoff.code, {
+            extra: { session_id: body.sessionId, revision: handoff.revision ?? null },
+          });
+          return;
+        }
+        const finished = finishRun(db, {
+          commandId: id('mcp_handoff_finish', `${body.sessionId}:${body.clientRequestId}`),
+          runId: body.sessionId,
+          expectedRevision: body.expectedRevision,
+          leaseGeneration: context.run.leaseGeneration,
+          outcome: body.outcome,
+          summary: body.summary,
+          nextStep: body.nextSessionFocus,
+          commitRefs: (body.acknowledgements ?? [])
+            .filter((value) => value.startsWith('commit:'))
+            .map((value) => value.slice('commit:'.length)),
+          acknowledgeUnattributed: (body.acknowledgements ?? []).includes('unattributed_changes'),
+          finalSnapshot: toSnapshot(observation),
+        }, { faultInjector });
+        if (!finished.ok) {
+          sendError(response, finished.code, {
+            extra: {
+              session_id: body.sessionId,
+              handoff_id: handoff.handoffId,
+              receipt_id: finished.receiptId ?? null,
+            },
+          });
+          return;
+        }
+        const completed = completeAssignment(db, {
+          ...body,
+          nextStep: body.nextSessionFocus,
+        });
+        if (!completed.ok) {
+          sendError(response, completed.code, {
+            extra: { session_id: body.sessionId, handoff_id: handoff.handoffId },
+          });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          assignmentId: completed.assignmentId,
+          sessionId: body.sessionId,
+          status: completed.status,
+          revision: completed.revision,
+          handoffId: handoff.handoffId,
+          handoffMarkdown: handoff.bodyMarkdown,
+          receiptId: finished.receiptId,
+          cockpitVerified: true,
+          summary: body.summary,
+          nextSessionFocus: body.nextSessionFocus,
         });
         return;
       }

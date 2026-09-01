@@ -19,6 +19,19 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
   assert.equal(calls[0].url, 'http://127.0.0.1:41737/api/v1/mcp/work/accept');
   assert.equal(calls[0].options.headers.authorization, `Bearer ${'x'.repeat(32)}`);
   assert.deepEqual(JSON.parse(calls[0].options.body), arguments_);
+
+  await handlers.ugk_work_begin({
+    sessionId: 'session-1', clientRequestId: 'request-2', expectedRevision: 1, task: '开始工作',
+  });
+  assert.equal(calls[1].url, 'http://127.0.0.1:41737/api/v1/mcp/work/begin');
+
+  await handlers.ugk_work_handoff({
+    sessionId: 'session-1', clientRequestId: 'request-3', expectedRevision: 1,
+    outcome: 'completed', nextSessionFocus: '等待安排', summary: 'done',
+    currentState: 'clean', completedItems: [], pendingItems: [], decisions: [],
+    artifactRefs: [], risks: [], suggestedSkills: [],
+  });
+  assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/work/handoff');
 });
 
 test('MCP service errors expose the public service message without leaking response details', async () => {

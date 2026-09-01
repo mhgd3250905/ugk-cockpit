@@ -1120,6 +1120,80 @@ export function completeAssignment(db, request = {}, options = {}) {
   });
 }
 
+/** Promote an accepted standby assignment into active work after a Run exists. */
+export function beginAssignmentWork(db, request = {}, options = {}) {
+  const { sessionId, clientRequestId, task } = request;
+  const expectedRevision = Number(request.expectedRevision);
+  if (!isNonEmptyString(sessionId)
+    || !isNonEmptyString(clientRequestId)
+    || !isNonEmptyString(task)
+    || !Number.isInteger(expectedRevision)
+    || expectedRevision < 1) {
+    return invalid('sessionId, clientRequestId, expectedRevision and task are required.');
+  }
+  const commandId = request.commandId
+    ?? commandIdFor('assignment.begin', sessionId, clientRequestId);
+  const intent = { sessionId, clientRequestId, expectedRevision, task: task.trim() };
+  const begun = beginCoreCommand(db, {
+    commandId,
+    kind: 'assignment.begin',
+    request: intent,
+    runId: sessionId,
+  });
+  if (begun.replay) return begun.replay;
+  const timestamp = iso(nowMillis(options));
+  return withImmediateTransaction(db, () => {
+    const command = readCommand(db, commandId);
+    const replay = terminalResult(command);
+    if (replay) return replay;
+    const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);
+    const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(sessionId);
+    if (!assignment || !run) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: assignment ? 'SESSION_NOT_ACTIVE' : 'SESSION_NOT_FOUND',
+        sessionId,
+      });
+    }
+    if (assignment.revision !== expectedRevision || run.revision !== expectedRevision) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'ASSIGNMENT_REVISION_CONFLICT',
+        sessionId,
+        revision: assignment.revision,
+      });
+    }
+    if (run.lifecycle !== 'active' || run.worktree_id !== assignment.worktree_id) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'SESSION_BINDING_MISMATCH',
+        sessionId,
+      });
+    }
+    if (assignment.status !== 'accepted' && assignment.status !== 'active') {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'ASSIGNMENT_NOT_ACTIVE',
+        sessionId,
+        status: assignment.status,
+      });
+    }
+    db.prepare(`
+      UPDATE assignments SET status = 'active', task_id = ?, updated_at = ?
+      WHERE id = ? AND revision = ? AND status IN ('accepted', 'active')
+    `).run(task.trim(), timestamp, assignment.id, expectedRevision);
+    return commitCommand(db, commandId, {
+      ok: true,
+      assignmentId: assignment.id,
+      sessionId,
+      status: 'active',
+      task: task.trim(),
+      revision: expectedRevision,
+      startedAt: run.created_at,
+    }, timestamp, sessionId);
+  });
+}
+
 /** Read all immutable binding and run context needed by a finish adapter. */
 export function readSessionContext(db, sessionId) {
   if (!isNonEmptyString(sessionId)) return { ok: false, code: 'INVALID_REQUEST' };

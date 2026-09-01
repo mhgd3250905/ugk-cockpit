@@ -40,6 +40,12 @@ const STATUS = {
     detail: '最近进展和结束交接会自动回到这里。',
     action: '查看进展',
   },
+  agent_waiting: {
+    eyebrow: '已经接上上下文',
+    title: 'AI 已读取上次交接，等待你的安排',
+    detail: '现在还没有占用写入会话；你给出任务后，AI 才会开始修改代码。',
+    action: '继续对话',
+  },
 };
 
 const STAGES = {
@@ -71,6 +77,7 @@ function App() {
   const [notice, setNotice] = useState(null);
   const [handoffProject, setHandoffProject] = useState(null);
   const [handoffAgent, setHandoffAgent] = useState('Codex');
+  const [handoffMode, setHandoffMode] = useState('handoff');
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
 
@@ -88,7 +95,13 @@ function App() {
     }
   }
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(async () => {
+      try { setDashboard(await api('/api/v1/dashboard')); } catch { /* Keep the last good brief. */ }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, []);
 
   async function chooseFolder() {
     setBusy(true);
@@ -157,6 +170,7 @@ function App() {
   function openHandoff(project) {
     setHandoffProject(project);
     setHandoffAgent('Codex');
+    setHandoffMode('handoff');
     setHandoffGoal('');
     setDispatch(null);
     setNotice(null);
@@ -170,7 +184,8 @@ function App() {
         body: JSON.stringify({
           clientRequestId: crypto.randomUUID(),
           agent: handoffAgent,
-          task: handoffGoal.trim(),
+          mode: handoffMode,
+          task: handoffMode === 'task' ? handoffGoal.trim() : '',
         }),
       });
       setDispatch(result);
@@ -201,6 +216,7 @@ function App() {
   const priority = useMemo(
     () => projects.find((item) => item.status === 'attention' || item.statusReason === 'run_may_be_interrupted')
       ?? projects.find((item) => item.status === 'active')
+      ?? projects.find((item) => item.statusReason === 'agent_waiting')
       ?? projects[0],
     [projects],
   );
@@ -295,15 +311,23 @@ function App() {
                     <option>Antigravity</option>
                   </select>
                 </label>
-                <label>这次要完成什么
-                  <textarea
-                    value={handoffGoal}
-                    onChange={(event) => setHandoffGoal(event.target.value)}
-                    rows="4"
-                    maxLength="1000"
-                    placeholder="一句话说明目标，例如：接通 MCP 接手和进度回传"
-                  />
+                <label>先让 AI 做什么
+                  <select value={handoffMode} onChange={(event) => setHandoffMode(event.target.value)}>
+                    <option value="handoff">读取上次交接，等待我的安排</option>
+                    <option value="task">带着明确任务开始工作</option>
+                  </select>
                 </label>
+                {handoffMode === 'task' && (
+                  <label>这次要完成什么
+                    <textarea
+                      value={handoffGoal}
+                      onChange={(event) => setHandoffGoal(event.target.value)}
+                      rows="4"
+                      maxLength="1000"
+                      placeholder="一句话说明目标，例如：接通交接读取与等待状态"
+                    />
+                  </label>
+                )}
               </>
             ) : (
               <>
@@ -318,7 +342,11 @@ function App() {
             <div className="sheet-actions">
               <button className="text-button" onClick={() => { setHandoffProject(null); setNotice(null); }} disabled={busy}>关闭</button>
               {!dispatch ? (
-                <button className="primary-button" onClick={createHandoff} disabled={busy || !handoffGoal.trim()}>
+                <button
+                  className="primary-button"
+                  onClick={createHandoff}
+                  disabled={busy || (handoffMode === 'task' && !handoffGoal.trim())}
+                >
                   {busy ? '正在创建…' : '生成接手消息'}
                 </button>
               ) : (
@@ -356,9 +384,11 @@ function PriorityCard({ project, onAssign }) {
       <button
         className="primary-button"
         onClick={() => onAssign(project)}
-        disabled={project.statusReason === 'active_work'}
+        disabled={['active_work', 'agent_waiting'].includes(project.statusReason)}
       >
-        {project.statusReason === 'active_work' ? 'AI 正在工作' : '交给 AI'}
+        {project.statusReason === 'active_work'
+          ? 'AI 正在工作'
+          : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
       </button>
     </section>
   );
@@ -372,9 +402,23 @@ function ProjectCard({ project, onAssign }) {
       <h3>{project.name}</h3>
       <p className="status-title">{copy.title}</p>
       <p>{copy.detail}</p>
+      {project.lastHandoffManual && (
+        <details className="handoff-summary">
+          <summary>上次交接</summary>
+          <p>{project.lastHandoffManual.summary || '已保存标准交接手册'}</p>
+          {project.lastHandoffManual.nextSessionFocus && (
+            <small>建议下一步：{project.lastHandoffManual.nextSessionFocus}</small>
+          )}
+        </details>
+      )}
       <div className="card-actions">
-        <button onClick={() => onAssign(project)} disabled={project.statusReason === 'active_work'}>
-          {project.statusReason === 'active_work' ? 'AI 正在工作' : '交给 AI'}
+        <button
+          onClick={() => onAssign(project)}
+          disabled={['active_work', 'agent_waiting'].includes(project.statusReason)}
+        >
+          {project.statusReason === 'active_work'
+            ? 'AI 正在工作'
+            : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
         </button>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>

@@ -34,5 +34,7 @@ export function createServiceHandlers({ token, baseUrl = DEFAULT_SERVICE_URL, fe
     ugk_work_accept: (arguments_) => call('/api/v1/mcp/work/accept', arguments_),
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
     ugk_work_finish: (arguments_) => call('/api/v1/mcp/work/finish', arguments_),
+    ugk_work_handoff: (arguments_) => call('/api/v1/mcp/work/handoff', arguments_),
+    ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
   };
 }
