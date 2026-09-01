@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 3;
+export const SUPPORTED_SCHEMA_VERSION = 4;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -124,6 +124,24 @@ ALTER TABLE snapshots ADD COLUMN head_relation TEXT NOT NULL DEFAULT 'unknown'
         `);
       }
     },
+  },
+  {
+    version: 4,
+    name: 'project-registry',
+    sql: `
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('development', 'maintenance', 'paused')),
+  worktree_id TEXT NOT NULL UNIQUE REFERENCES worktrees(id),
+  status TEXT NOT NULL CHECK (status IN ('ready', 'attention', 'active', 'paused')),
+  status_reason TEXT NOT NULL,
+  last_observed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_projects_status_updated ON projects(status, updated_at DESC);
+`,
   },
 ];
 

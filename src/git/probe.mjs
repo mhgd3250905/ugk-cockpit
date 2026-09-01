@@ -102,11 +102,12 @@ async function resolveObjectDirectories(primaryObjectDirectory) {
 }
 
 async function observe(cwd, options) {
-  const [head, branch, indexState, worktreeState] = await Promise.all([
+  const [head, branch, indexState, worktreeState, dirtyState] = await Promise.all([
     gitText(cwd, ['rev-parse', '--verify', 'HEAD'], options),
     gitText(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], options).catch(() => ''),
     gitText(cwd, ['ls-files', '--stage', '-z'], options),
     gitText(cwd, ['status', '--porcelain=v2', '-z', '--branch', '--untracked-files=normal'], options),
+    gitText(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=normal'], options),
   ]);
   return {
     head,
@@ -114,6 +115,7 @@ async function observe(cwd, options) {
     indexFingerprint: digest(indexState),
     worktreeFingerprint: digest(worktreeState),
     statusBytes: Buffer.byteLength(worktreeState),
+    hasChanges: dirtyState.length > 0,
   };
 }
 

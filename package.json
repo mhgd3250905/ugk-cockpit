@@ -10,5 +10,12 @@
     "serve": "node src/main.mjs",
     "test": "node --test --test-concurrency=1",
     "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2"
   }
 }
