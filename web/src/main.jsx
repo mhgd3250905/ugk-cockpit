@@ -78,16 +78,16 @@ function App() {
     setBusy(true);
     setNotice(null);
     try {
-      const result = await api('/api/v1/folders/select-open', { method: 'POST', body: '{}' });
+      const result = await api('/api/v1/folders/select', { method: 'POST', body: '{}' });
       if (!result.cancelled) {
         setSelection({ ...result, commandId: crypto.randomUUID() });
         setName(result.folderName);
       }
     } catch (error) {
       setNotice({
-        title: error.message || '没有读取到当前文件夹。',
-        detail: error.required_action || error.impact || '请保留目标文件夹窗口后重试。',
-        actionLabel: '重新读取当前文件夹',
+        title: error.message || '没有完成文件夹选择。',
+        detail: error.required_action || error.impact || '请重新打开选择窗口后再试。',
+        actionLabel: '重新选择项目文件夹',
         retry: () => chooseFolder(),
       });
     } finally {
@@ -130,7 +130,7 @@ function App() {
       setNotice({
         title: error.message || '项目还没有确认添加。',
         detail: error.required_action || error.impact || '当前确认内容已保留，请重试。',
-        actionLabel: needsReselection ? '重新读取当前文件夹' : '重试确认添加',
+        actionLabel: needsReselection ? '重新选择项目文件夹' : '重试确认添加',
         retry: needsReselection ? () => chooseFolder() : () => register(),
       });
     } finally {
@@ -154,7 +154,7 @@ function App() {
           <h1>今天，从一件明确的事开始。</h1>
         </div>
         <button className="quiet-button" onClick={() => chooseFolder()} disabled={busy}>
-          <span aria-hidden="true">＋</span> 从文件资源管理器添加
+          <span aria-hidden="true">＋</span> 选择项目文件夹
         </button>
       </header>
 
@@ -170,13 +170,13 @@ function App() {
         <section className="empty-state">
           <p className="kicker">第一步 · 约一分钟</p>
           <h2>先把一个项目放到这里</h2>
-          <p>先在文件资源管理器中打开项目文件夹，然后回来添加。我们只读取必要的代码状态，不会清理、覆盖、提交、上传或删除文件。</p>
+          <p>从电脑中手动选择一个项目文件夹。我们只读取必要的代码状态，不会清理、覆盖、提交、上传或删除文件。</p>
           <div className="folder-actions">
             <button className="primary-button" onClick={() => chooseFolder()} disabled={busy}>
-              {busy ? '正在读取当前文件夹…' : '使用当前打开的项目文件夹'}
+              {busy ? '正在等待你选择…' : '选择项目文件夹'}
             </button>
           </div>
-          <small>点击后会先读取必要状态；确认后才登记到工作简报。</small>
+          <small>一次只添加你亲自选择的一个项目；取消不会保存任何内容。</small>
         </section>
       ) : (
         <>

@@ -283,14 +283,14 @@ test('folder selection grants one registration and dashboard returns human proje
   }), 409, 'FOLDER_GRANT_IN_USE');
 });
 
-test('an explicitly open Explorer folder can enter the same confirmation flow', async (t) => {
+test('a manually selected folder can enter the confirmation flow', async (t) => {
   const root = createRepository();
   let openFolderCalls = 0;
   const service = await createCockpitHttpServer({
     dbPath: dataPath(root),
     token: TOKEN,
     authorizedRoots: [],
-    openFolderPicker: async () => {
+    folderPicker: async () => {
       openFolderCalls += 1;
       return root;
     },
@@ -301,7 +301,7 @@ test('an explicitly open Explorer folder can enter the same confirmation flow', 
   });
   const shell = await request(service, '/');
   const cookie = shell.headers.get('set-cookie');
-  const selected = await request(service, '/api/v1/folders/select-open', {
+  const selected = await request(service, '/api/v1/folders/select', {
     method: 'POST',
     headers: {
       cookie,
@@ -321,13 +321,13 @@ test('an explicitly open Explorer folder can enter the same confirmation flow', 
   assert.equal(typeof body.grantId, 'string');
 });
 
-test('an open folder without a Git project returns a human recovery action', async (t) => {
+test('a selected folder without a Git project returns a human recovery action', async (t) => {
   const root = createRepository();
   const service = await createCockpitHttpServer({
     dbPath: dataPath(root),
     token: TOKEN,
     authorizedRoots: [],
-    openFolderPicker: async () => root,
+    folderPicker: async () => root,
     probe: async () => {
       throw Object.assign(new Error('git failed'), {
         code: 128,
@@ -340,14 +340,14 @@ test('an open folder without a Git project returns a human recovery action', asy
     cleanup(root);
   });
 
-  await assertUserError(await request(service, '/api/v1/folders/select-open', {
+  await assertUserError(await request(service, '/api/v1/folders/select', {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     body: '{}',
   }), 422, 'FOLDER_NOT_CODE_PROJECT');
 });
 
-test('an Explorer folder below a junction ancestor cannot receive a grant', async (t) => {
+test('a manually selected folder below a junction ancestor cannot receive a grant', async (t) => {
   const root = createRepository();
   const linkContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-http-link-'));
   const ancestorLink = path.join(linkContainer, 'opened-link');
@@ -358,7 +358,7 @@ test('an Explorer folder below a junction ancestor cannot receive a grant', asyn
     dbPath: dataPath(root),
     token: TOKEN,
     authorizedRoots: [],
-    openFolderPicker: async () => selectedThroughLink,
+    folderPicker: async () => selectedThroughLink,
     probe: async () => {
       probeCalls += 1;
       return fakeObservation(root);
@@ -370,7 +370,7 @@ test('an Explorer folder below a junction ancestor cannot receive a grant', asyn
     rmSync(linkContainer, { recursive: true, force: true });
   });
 
-  await assertUserError(await request(service, '/api/v1/folders/select-open', {
+  await assertUserError(await request(service, '/api/v1/folders/select', {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     body: '{}',

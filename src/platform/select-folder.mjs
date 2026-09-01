@@ -1,18 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileAsync = promisify(execFile);
-
-const WINDOWS_PICKER = `
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '选择一个项目文件夹'
-$dialog.ShowNewFolderButton = $false
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  Write-Output $dialog.SelectedPath
-}
-`;
+const WINDOWS_PICKER_SCRIPT = fileURLToPath(new URL('./windows-folder-picker.ps1', import.meta.url));
 
 function pickerError(code, message, cause) {
   const error = new Error(message, { cause });
@@ -33,8 +24,8 @@ export async function selectFolder({
   try {
     ({ stdout } = await run(
       'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-Command', WINDOWS_PICKER],
-      { windowsHide: true, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 },
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-File', WINDOWS_PICKER_SCRIPT],
+      { windowsHide: true, encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 },
     ));
   } catch (error) {
     if (error?.killed || error?.code === 'ETIMEDOUT') {
