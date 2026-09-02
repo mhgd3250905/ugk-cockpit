@@ -19,6 +19,7 @@
 - `0.1.0-alpha.18`：主界面项目卡片只保留必要概览；新增按需加载的大尺寸项目运行详情和最新在上的 `init / progress / relay / handoff` 节点时间线，结合可证明的 Git 分支/提交上下文、响应式布局、键盘焦点管理与减少动态效果降级。
 - `0.1.0-alpha.19`：Windows 原生文件夹选择器升级为 COM `IFileOpenDialog` 文件夹选择模式，支持资源管理器导航与 Client GUID 位置记忆，根除 Windows PowerShell 5.1 下的中文乱码，保留置顶交互与非错误取消语义。
 - `0.1.0-alpha.20`：项目详情弹窗按 4 秒节奏自动刷新并保留已加载历史；relay 节点增加等待/已接手状态和实际接手时间，同一 Cockpit session 的新会话恢复不再表现为缺失，也不生成虚假的新 INIT。
+- `0.1.0-alpha.21`：progress 改为一句摘要加结构化详情，服务端在事件发生时采集并固化分支/HEAD；旧 note 原文保留并折叠展示，不对历史 Git 状态作事后推断。
 - 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；relay 与 handoff 分别只在用户显式要求换聊天或结束阶段时调用。
 
 ## 产品方向：晨间工作简报

@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 10;
+export const SUPPORTED_SCHEMA_VERSION = 11;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -342,6 +342,33 @@ CREATE INDEX idx_relays_project_state ON relays(project_id, state, created_at DE
 CREATE INDEX idx_relays_expiry ON relays(state, expires_at);
 CREATE INDEX idx_relays_assignment_created ON relays(assignment_id, created_at DESC, id DESC);
 `,
+  },
+  {
+    version: 11,
+    name: 'progress-structured-git-evidence',
+    apply(db) {
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(progress_events)').all().map((row) => row.name),
+      );
+      if (!columns.has('summary')) {
+        db.exec('ALTER TABLE progress_events ADD COLUMN summary TEXT;');
+      }
+      if (!columns.has('details_json')) {
+        db.exec("ALTER TABLE progress_events ADD COLUMN details_json TEXT NOT NULL DEFAULT '[]';");
+      }
+      if (!columns.has('git_head')) {
+        db.exec('ALTER TABLE progress_events ADD COLUMN git_head TEXT;');
+      }
+      if (!columns.has('git_branch')) {
+        db.exec('ALTER TABLE progress_events ADD COLUMN git_branch TEXT;');
+      }
+      if (!columns.has('git_coherence')) {
+        db.exec("ALTER TABLE progress_events ADD COLUMN git_coherence TEXT CHECK (git_coherence IN ('coherent', 'incoherent', 'unknown'));");
+      }
+      if (!columns.has('git_observed_at')) {
+        db.exec('ALTER TABLE progress_events ADD COLUMN git_observed_at TEXT;');
+      }
+    },
   },
 ];
 

@@ -640,7 +640,7 @@ function App() {
             <div className="brand-title-wrap">
               <span className="brand-mark" aria-hidden="true">■</span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha.20</span>
+              <span className="badge badge-version">v0.1.0-alpha.21</span>
             </div>
             <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
           </div>
@@ -1107,12 +1107,25 @@ function TimelineNode({ item, index }) {
         <div className="timeline-context-row">
           <span className="timeline-agent">AI · {item.agent || '未记录'}</span>
           {item.git ? (
-            <>
-              {item.git.branch && <span className="git-chip git-branch">{item.git.branch}</span>}
-              {item.git.shortHead && <span className="git-chip git-commit">{item.git.shortHead}</span>}
-            </>
+            item.git.coherence === 'coherent' ? (
+              <>
+                {item.git.branch && <span className="git-chip git-branch">{item.git.branch}</span>}
+                {item.git.shortHead && <span className="git-chip git-commit">{item.git.shortHead}</span>}
+                {!item.git.branch && !item.git.shortHead && (
+                  <span className="git-unrecorded">Git 未采集</span>
+                )}
+              </>
+            ) : (
+              (item.git.branch || item.git.shortHead) ? (
+                <span className="git-chip git-unverified" title="代码状态未确认">
+                  未确认 {item.git.branch || ''} {item.git.shortHead || ''}
+                </span>
+              ) : (
+                <span className="git-unrecorded">Git 未采集</span>
+              )
+            )
           ) : (
-            <span className="git-unrecorded">当时分支未记录</span>
+            <span className="git-unrecorded">{item.kind === 'progress' ? 'Git 未采集' : '当时分支未记录'}</span>
           )}
           {relayInfo && (
             <span className={`relay-status-chip relay-status-${relayInfo.statusTheme}`}>
@@ -1130,6 +1143,26 @@ function TimelineNode({ item, index }) {
         <h4>{item.summary || item.note || kind.label}</h4>
         {item.currentState && item.currentState !== item.summary && (
           <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
+        )}
+
+        {item.details && item.details.length > 0 && (
+          <div className="timeline-progress-details-wrap">
+            <ul className="timeline-progress-details">
+              {item.details.slice(0, 3).map((detail, dIdx) => (
+                <li key={`detail-${dIdx}`}>{detail}</li>
+              ))}
+            </ul>
+            {item.details.length > 3 && (
+              <details className="timeline-details-expand">
+                <summary>查看更多详情（共 {item.details.length} 条）</summary>
+                <ul className="timeline-progress-details">
+                  {item.details.slice(3).map((detail, dIdx) => (
+                    <li key={`detail-more-${dIdx}`}>{detail}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
         )}
 
         {detailGroups.length > 0 && (
@@ -1151,6 +1184,13 @@ function TimelineNode({ item, index }) {
           <details className="timeline-full-record">
             <summary>查看完整交接记录</summary>
             <pre>{item.bodyMarkdown}</pre>
+          </details>
+        )}
+
+        {item.kind === 'progress' && item.note && (item.isLegacyNote || (item.note !== item.summary && (!item.details || item.details.length === 0))) && (
+          <details className="timeline-full-record">
+            <summary>查看完整进展</summary>
+            <pre>{item.note}</pre>
           </details>
         )}
       </article>

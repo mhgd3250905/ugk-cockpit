@@ -92,11 +92,72 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
     sessionId: initJson.sessionId,
     clientRequestId: 'req-progress-1',
     expectedRevision: initJson.revision,
-    status: 'progress',
-    note: '已完成数据聚合层设计',
+    status: 'working',
+    summary: '已完成数据聚合层设计',
+    details: ['设计 timeline 模块接口', '支持 Git chips 证据'],
   });
   assert.equal(progressRes.status, 200);
   const progressJson = await progressRes.json();
+  assert.equal(progressJson.ok, true);
+  assert.equal(progressJson.summary, '已完成数据聚合层设计');
+  assert.deepEqual(progressJson.details, ['设计 timeline 模块接口', '支持 Git chips 证据']);
+  assert.equal(progressJson.git.branch, 'main');
+  assert.ok(progressJson.git.head);
+
+  // Verify client-forged fields and empty payload rejection on HTTP seam
+  const forgedGitRes = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initJson.sessionId,
+    clientRequestId: 'req-progress-forged-git',
+    expectedRevision: progressJson.revision,
+    status: 'working',
+    summary: 'Attempt forging git branch',
+    gitBranch: 'main-forged',
+  });
+  assert.equal(forgedGitRes.status, 400);
+
+  const forgedPathRes = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initJson.sessionId,
+    clientRequestId: 'req-progress-forged-path',
+    expectedRevision: progressJson.revision,
+    status: 'working',
+    summary: 'Attempt forging path',
+    path: root,
+  });
+  assert.equal(forgedPathRes.status, 400);
+
+  const forgedProjectRes = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initJson.sessionId,
+    clientRequestId: 'req-progress-forged-proj',
+    expectedRevision: progressJson.revision,
+    status: 'working',
+    summary: 'Attempt forging projectId',
+    projectId: registered.projectId,
+  });
+  assert.equal(forgedProjectRes.status, 400);
+
+  const emptyProgressRes = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initJson.sessionId,
+    clientRequestId: 'req-progress-empty',
+    expectedRevision: progressJson.revision,
+    status: 'working',
+  });
+  assert.equal(emptyProgressRes.status, 400);
+
+  // Insert a historical long legacy note-only progress event
+  const legacyLongNote = '这是一个非常非常长的历史遗留进度记录，用来测试时间线聚合时是否能够正确地截断为带有省略号的有界短摘要，并且完整保留原始长文本，同时确保历史遗留记录没有伪造的 Git 证据。';
+  const legacyDb = openCockpitDatabase(dbPath);
+  legacyDb.prepare(`
+    INSERT INTO progress_events (
+      id, assignment_id, session_id, client_request_id,
+      expected_revision, revision, status, note, summary, details_json,
+      git_head, git_branch, git_coherence, git_observed_at, created_at
+    ) VALUES (
+      'pe_legacy_long_1', (SELECT id FROM assignments WHERE session_id = ?), ?, 'req-legacy-long-1',
+      1, 2, 'working', ?, NULL, '[]',
+      NULL, NULL, NULL, NULL, '2026-01-01T00:00:00.000Z'
+    )
+  `).run(initJson.sessionId, initJson.sessionId, legacyLongNote);
+  legacyDb.close();
 
   // Step 4: Record conversation relay
   const relayRes = await post(service, '/api/v1/mcp/work/relay', {
@@ -180,10 +241,10 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
 
   assert.equal(detail.ok, true);
   assert.equal(detail.project.name, 'Detail Fixture Project');
-  assert.equal(detail.timeline.total, 4); // init + progress + relay + handoff
+  assert.equal(detail.timeline.total, 5); // init + legacy progress + structured progress + relay + handoff
 
   const items = detail.timeline.items;
-  // Reverse chronological order: newest first -> handoff, relay, progress, init
+  // Reverse chronological order: newest first -> handoff, relay, structured progress, init, legacy progress
   assert.equal(items[0].kind, 'handoff');
   assert.equal(items[0].typeLabel, '阶段交接');
   assert.equal(items[0].agent, 'Codex');
@@ -203,7 +264,11 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[2].kind, 'progress');
   assert.equal(items[2].typeLabel, '工作进展');
   assert.equal(items[2].summary, '已完成数据聚合层设计');
-  assert.equal(items[2].git, null); // progress does not fabricate git info
+  assert.deepEqual(items[2].details, ['设计 timeline 模块接口', '支持 Git chips 证据']);
+  assert.equal(items[2].isLegacyNote, false);
+  assert.equal(items[2].git.branch, 'main');
+  assert.ok(items[2].git.head);
+  assert.equal(items[2].git.coherence, 'coherent');
 
   assert.equal(items[3].kind, 'init');
   assert.equal(items[3].typeLabel, '接入项目');
@@ -211,11 +276,19 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[3].git.branch, 'main');
   assert.ok(items[3].git.head);
 
+  assert.equal(items[4].kind, 'progress');
+  assert.equal(items[4].typeLabel, '工作进展');
+  assert.ok(items[4].summary.length <= 81);
+  assert.ok(items[4].summary.endsWith('…'));
+  assert.equal(items[4].note, legacyLongNote);
+  assert.equal(items[4].isLegacyNote, true);
+  assert.equal(items[4].git, null);
+
   // Step 8: Test pagination
   const pagedRes = await get(service, `/api/v1/projects/${registered.projectId}/timeline?limit=2&offset=0`);
   assert.equal(pagedRes.status, 200);
   const paged = await pagedRes.json();
-  assert.equal(paged.total, 4);
+  assert.equal(paged.total, 5);
   assert.equal(paged.items.length, 2);
   assert.equal(paged.hasMore, true);
   assert.equal(paged.items[0].kind, 'handoff');
@@ -225,9 +298,18 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(offsetRes.status, 200);
   const offsetJson = await offsetRes.json();
   assert.equal(offsetJson.items.length, 2);
-  assert.equal(offsetJson.hasMore, false);
+  assert.equal(offsetJson.hasMore, true);
   assert.equal(offsetJson.items[0].kind, 'progress');
+  assert.equal(offsetJson.items[0].summary, '已完成数据聚合层设计');
   assert.equal(offsetJson.items[1].kind, 'init');
+
+  const finalPageRes = await get(service, `/api/v1/projects/${registered.projectId}/timeline?limit=2&offset=4`);
+  assert.equal(finalPageRes.status, 200);
+  const finalPageJson = await finalPageRes.json();
+  assert.equal(finalPageJson.items.length, 1);
+  assert.equal(finalPageJson.hasMore, false);
+  assert.equal(finalPageJson.items[0].kind, 'progress');
+  assert.equal(finalPageJson.items[0].isLegacyNote, true);
 
   // Step 9: 404 on non-existent project
   const notFoundRes = await get(service, '/api/v1/projects/non-existent-id');

@@ -6,6 +6,26 @@ function parseJson(encoded, fallback) {
   }
 }
 
+function truncateLegacyNote(note, maxLength = 80) {
+  if (!note || typeof note !== 'string') return '';
+  const trimmed = note.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+
+  const candidate = trimmed.slice(0, maxLength);
+  const punctuationRegex = /[。！？；\n\r.!?;\uff0c,]/g;
+  let lastIndex = -1;
+  let match;
+  while ((match = punctuationRegex.exec(candidate)) !== null) {
+    if (match.index >= 35) {
+      lastIndex = match.index;
+    }
+  }
+  if (lastIndex !== -1) {
+    return candidate.slice(0, lastIndex + 1).trim() + '…';
+  }
+  return candidate.trim() + '…';
+}
+
 /**
  * Read the reverse-chronological timeline of work events for a project.
  * Fixed node semantics:
@@ -60,7 +80,9 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 
   const progressRows = db.prepare(`
     SELECT pe.id, pe.assignment_id, pe.session_id, pe.client_request_id,
-           pe.expected_revision, pe.revision, pe.status, pe.note, pe.created_at,
+           pe.expected_revision, pe.revision, pe.status, pe.summary, pe.details_json,
+           pe.note, pe.git_head, pe.git_branch, pe.git_coherence, pe.git_observed_at,
+           pe.created_at,
            a.agent_id, a.task_id,
            r.agent_claim
     FROM progress_events pe
@@ -108,6 +130,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
     } : null,
     summary: row.summary,
+    details: [],
     note: null,
     nextSessionFocus: row.next_session_focus || null,
     currentState: row.current_state || null,
@@ -134,6 +157,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
     } : null,
     summary: row.summary,
+    details: [],
     note: null,
     nextSessionFocus: row.next_step || null,
     currentState: null,
@@ -158,6 +182,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     state: row.state || 'active',
     acceptedAt: row.accepted_at || null,
     summary: row.summary,
+    details: [],
     note: null,
     nextSessionFocus: row.next_session_focus || null,
     currentState: row.current_state || null,
@@ -170,27 +195,42 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     bodyMarkdown: null,
   }));
 
-  const progressItems = progressRows.map((row) => ({
-    id: row.id,
-    kind: 'progress',
-    typeLabel: '工作进展',
-    timestamp: row.created_at,
-    agent: row.agent_id || row.agent_claim || null,
-    revision: row.revision ?? 1,
-    sequence: row.revision ?? 1,
-    git: null,
-    summary: row.note,
-    note: row.note,
-    nextSessionFocus: null,
-    currentState: null,
-    completedItems: [],
-    pendingItems: [],
-    decisions: [],
-    artifactRefs: [],
-    risks: [],
-    suggestedSkills: [],
-    bodyMarkdown: null,
-  }));
+  const progressItems = progressRows.map((row) => {
+    const details = parseJson(row.details_json, []);
+    const isLegacy = !row.summary;
+    const summary = row.summary || truncateLegacyNote(row.note, 80);
+    const gitEvidence = (row.git_branch || row.git_head || row.git_coherence || row.git_observed_at) ? {
+      branch: row.git_branch ?? null,
+      head: row.git_head ?? null,
+      shortHead: row.git_head ? row.git_head.slice(0, 7) : null,
+      coherence: row.git_coherence ?? 'unknown',
+      observedAt: row.git_observed_at ?? null,
+    } : null;
+
+    return {
+      id: row.id,
+      kind: 'progress',
+      typeLabel: '工作进展',
+      timestamp: row.created_at,
+      agent: row.agent_id || row.agent_claim || null,
+      revision: row.revision ?? 1,
+      sequence: row.revision ?? 1,
+      git: gitEvidence,
+      summary,
+      details: Array.isArray(details) ? details : [],
+      note: row.note,
+      isLegacyNote: isLegacy && row.note !== summary,
+      nextSessionFocus: null,
+      currentState: null,
+      completedItems: [],
+      pendingItems: [],
+      decisions: [],
+      artifactRefs: [],
+      risks: [],
+      suggestedSkills: [],
+      bodyMarkdown: null,
+    };
+  });
 
   const initItems = [
     ...assignmentRows.map((row) => ({

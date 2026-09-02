@@ -54,12 +54,33 @@ export const TOOLS = [
           enum: PROGRESS_STATUSES,
           description: 'Non-terminal progress only; this operation never ends the phase or creates a handoff.'
         },
+        summary: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 160,
+          description: 'Concise, verifiable single-sentence summary of what was accomplished'
+        },
+        details: {
+          type: 'array',
+          items: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 500
+          },
+          maxItems: 8,
+          description: 'Optional supporting details, evidence, or key artifacts'
+        },
         note: {
           type: 'string',
-          description: 'Informational note or progress details'
+          maxLength: 4000,
+          description: 'Legacy informational note or progress details'
         }
       },
-      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'status', 'note'],
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'status'],
+      anyOf: [
+        { required: ['summary'] },
+        { required: ['note'] }
+      ],
       additionalProperties: false
     }
   },
@@ -433,11 +454,12 @@ function validateProgressArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
   }
+  const allowedKeys = ['sessionId', 'clientRequestId', 'expectedRevision', 'status', 'summary', 'details', 'note'];
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) {
       return `Forbidden property: ${key}`;
     }
-    if (!['sessionId', 'clientRequestId', 'expectedRevision', 'status', 'note'].includes(key)) {
+    if (!allowedKeys.includes(key)) {
       return `Unexpected property: ${key}`;
     }
   }
@@ -453,9 +475,37 @@ function validateProgressArgs(args) {
   if (!PROGRESS_STATUSES.includes(args.status)) {
     return 'Invalid status: progress is non-terminal; use finish or handoff to end the session';
   }
-  if (typeof args.note !== 'string') {
-    return 'Missing or invalid required field: note (must be string)';
+
+  let hasSummary = false;
+  if (args.summary !== undefined) {
+    if (typeof args.summary !== 'string' || args.summary.trim() === '' || args.summary.length > 160) {
+      return 'Invalid field: summary (must be non-empty string up to 160 characters)';
+    }
+    hasSummary = true;
   }
+
+  if (args.details !== undefined) {
+    if (!Array.isArray(args.details)
+      || args.details.length > 8
+      || args.details.some((item) => typeof item !== 'string' || item.trim() === '' || item.length > 500)) {
+      return 'Invalid field: details (must be an array of up to 8 non-empty strings each up to 500 characters)';
+    }
+  }
+
+  let hasNote = false;
+  if (args.note !== undefined) {
+    if (typeof args.note !== 'string' || args.note.length > 4000) {
+      return 'Invalid field: note (must be string up to 4000 characters)';
+    }
+    if (args.note.trim() !== '') {
+      hasNote = true;
+    }
+  }
+
+  if (!hasSummary && !hasNote) {
+    return 'Missing required field: at least one of summary or note is required';
+  }
+
   return null;
 }
 

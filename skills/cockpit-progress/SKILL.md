@@ -28,9 +28,15 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
   "clientRequestId": "<本次请求生成的唯一 ID>",
   "expectedRevision": <最近一次 MCP 返回的 revision>,
   "status": "working",
-  "note": "<一句简洁、可核实的中文事实；可包含 commit SHA 或 tag 名称>"
+  "summary": "<一句简洁、可核实的事实，最长 160 字符；可包含 commit SHA 或 tag 名称>",
+  "details": [
+    "<可选的关键结果、测试输出或证据，每项最长 500 字符，最多 8 项>",
+    "<可选的风险或下一步说明>"
+  ]
 }
 ```
+
+优先提交一句可核实的 `summary`，`details` 只列必要证据/结果/风险短列表；不把多个段落塞入 `summary`。legacy `note`（最长 4000 字符）保留用于向后兼容，结构化调用不要求重复传 `note`。
 
 `status` 只能使用非终态的 `working` 或 `in_progress`，不要用 progress 伪造终态。只有用户明确要求结束当前 Cockpit 阶段时，才改用 `$cockpit-handoff`（`ugk_work_handoff`）；功能完成、commit、测试通过或上下文堆积都不能由 AI 自行推断为结束。只有用户明确要求换聊天继续时，才改用 `$cockpit-relay`，不要因上下文长度自动接力。
 

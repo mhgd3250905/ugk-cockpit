@@ -235,6 +235,12 @@ function mapGrant(row) {
 
 function mapProgress(row) {
   if (!row) return null;
+  let details = [];
+  try {
+    details = row.details_json ? JSON.parse(row.details_json) : [];
+  } catch {
+    details = [];
+  }
   return {
     eventId: row.id,
     assignmentId: row.assignment_id,
@@ -243,7 +249,16 @@ function mapProgress(row) {
     expectedRevision: row.expected_revision,
     revision: row.revision,
     status: row.status,
+    summary: row.summary ?? null,
+    details: Array.isArray(details) ? details : [],
     note: row.note,
+    git: (row.git_branch || row.git_head || row.git_coherence || row.git_observed_at) ? {
+      branch: row.git_branch ?? null,
+      head: row.git_head ?? null,
+      shortHead: row.git_head ? row.git_head.slice(0, 7) : null,
+      coherence: row.git_coherence ?? 'unknown',
+      observedAt: row.git_observed_at ?? null,
+    } : null,
     createdAt: row.created_at,
   };
 }
@@ -875,6 +890,8 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
 function progressRequestMatches(row, request) {
   return row.expected_revision === request.expectedRevision
     && row.status === request.status
+    && (row.summary ?? null) === (request.summary ?? null)
+    && (row.details_json ?? '[]') === (request.detailsJson ?? '[]')
     && row.note === request.note;
 }
 
@@ -889,18 +906,61 @@ export function appendProgressEvent(db, request = {}, options = {}) {
   const clientRequestId = request.clientRequestId ?? request.clientRequest;
   const expectedRevision = Number(request.expectedRevision);
   const status = request.status;
-  const note = request.note ?? '';
   if (!isNonEmptyString(sessionId)
     || !isNonEmptyString(clientRequestId)
     || !Number.isInteger(expectedRevision)
     || expectedRevision < 0
-    || !isNonEmptyString(status)
-    || typeof note !== 'string') {
+    || !isNonEmptyString(status)) {
     return invalid('sessionId, clientRequestId, expectedRevision and status are required.');
   }
   if (TERMINAL_ASSIGNMENT_STATES.has(status)) {
     return invalid('Terminal statuses must use ugk_work_finish or ugk_work_handoff.');
   }
+
+  let summary = null;
+  if (request.summary !== undefined && request.summary !== null) {
+    if (typeof request.summary !== 'string' || !request.summary.trim() || request.summary.length > 160) {
+      return invalid('summary must be a non-empty string up to 160 characters.');
+    }
+    summary = request.summary.trim();
+  }
+
+  let details = [];
+  if (request.details !== undefined && request.details !== null) {
+    if (!Array.isArray(request.details)
+      || request.details.length > 8
+      || request.details.some((item) => typeof item !== 'string' || !item.trim() || item.length > 500)) {
+      return invalid('details must be an array of up to 8 non-empty strings each up to 500 characters.');
+    }
+    details = request.details.map((item) => item.trim());
+  }
+
+  let note = null;
+  if (request.note !== undefined && request.note !== null) {
+    if (typeof request.note !== 'string' || request.note.length > 4000) {
+      return invalid('note must be a string up to 4000 characters.');
+    }
+    note = request.note;
+  }
+
+  if (summary === null && (note === null || !note.trim())) {
+    return invalid('At least one of summary or note is required.');
+  }
+
+  if (note === null) {
+    if (details.length > 0) {
+      note = `${summary}\n${details.map((d) => `- ${d}`).join('\n')}`;
+    } else {
+      note = summary;
+    }
+  }
+
+  const detailsJson = JSON.stringify(details);
+  const gitHead = request.gitHead ?? request.git?.head ?? null;
+  const gitBranch = request.gitBranch ?? request.git?.branch ?? null;
+  const gitCoherence = request.gitCoherence ?? request.git?.coherence ?? (gitHead || gitBranch ? 'coherent' : null);
+  const gitObservedAt = request.gitObservedAt ?? request.git?.observedAt ?? null;
+
   const assignmentId = request.assignmentId
     ?? db.prepare('SELECT id FROM assignments WHERE session_id = ?').get(sessionId)?.id;
   if (!isNonEmptyString(assignmentId)) return { ok: false, code: 'ASSIGNMENT_NOT_FOUND', sessionId };
@@ -912,6 +972,8 @@ export function appendProgressEvent(db, request = {}, options = {}) {
     clientRequestId,
     expectedRevision,
     status,
+    summary,
+    details,
     note,
   };
   const begun = beginCoreCommand(db, {
@@ -934,7 +996,7 @@ export function appendProgressEvent(db, request = {}, options = {}) {
       WHERE assignment_id = ? AND session_id = ? AND client_request_id = ?
     `).get(assignmentId, sessionId, clientRequestId);
     if (existingEvent) {
-      if (!progressRequestMatches(existingEvent, { expectedRevision, status, note })) {
+      if (!progressRequestMatches(existingEvent, { expectedRevision, status, summary, detailsJson, note })) {
         return failCommand(db, commandId, {
           ok: false,
           code: 'PROGRESS_REQUEST_CONFLICT',
@@ -1026,8 +1088,10 @@ export function appendProgressEvent(db, request = {}, options = {}) {
     db.prepare(`
       INSERT INTO progress_events (
         id, assignment_id, session_id, client_request_id,
-        expected_revision, revision, status, note, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        expected_revision, revision, status, summary, details_json,
+        note, git_head, git_branch, git_coherence, git_observed_at,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventId,
       assignmentId,
@@ -1036,7 +1100,13 @@ export function appendProgressEvent(db, request = {}, options = {}) {
       expectedRevision,
       nextRevision,
       status,
+      summary,
+      detailsJson,
       note,
+      gitHead,
+      gitBranch,
+      gitCoherence,
+      gitObservedAt,
       timestamp,
     );
     const response = {
@@ -1048,7 +1118,16 @@ export function appendProgressEvent(db, request = {}, options = {}) {
       expectedRevision,
       revision: nextRevision,
       status,
+      summary,
+      details,
       note,
+      git: (gitHead || gitBranch || gitCoherence || gitObservedAt) ? {
+        branch: gitBranch,
+        head: gitHead,
+        shortHead: gitHead ? gitHead.slice(0, 7) : null,
+        coherence: gitCoherence ?? 'unknown',
+        observedAt: gitObservedAt,
+      } : null,
       heartbeatAt: timestamp,
       createdAt: timestamp,
     };

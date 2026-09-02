@@ -7,12 +7,16 @@ import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
 import {
   acceptAssignment,
+  appendProgressEvent,
   completeAssignment,
   createAssignment,
+  issueDispatchGrant,
   readDispatchContext,
   readSessionContext,
+  reassignPendingAssignment,
   recordProgress,
   revokeAssignment,
+  revokeDispatchGrant,
 } from '../src/core/assignments.mjs';
 
 function fixture(t) {
@@ -250,5 +254,149 @@ test('progress rejects terminal statuses while handoff can reconcile a matching 
   });
   assert.equal(mismatched.ok, false);
   assert.equal(mismatched.code, 'ASSIGNMENT_NOT_ACTIVE');
+  db.close();
+});
+
+test('structured progress records summary, details, and git evidence with idempotency', (t) => {
+  const db = fixture(t, 'structured-progress');
+  const project = db.prepare('SELECT id FROM projects LIMIT 1').get();
+  const created = createAssignment(db, {
+    assignmentId: 'assign-structured-1',
+    projectId: project.id,
+    agentId: 'Codex',
+    taskId: 'Build structured progress',
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  const accepted = acceptAssignment(db, {
+    dispatchCode: created.dispatchCode,
+    clientRequestId: 'req-accept-structured',
+    sessionId: 'run-1',
+  });
+  assert.equal(accepted.ok, true);
+
+  // 1. Structured progress with summary and details
+  const prog1 = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-1',
+    expectedRevision: 1,
+    status: 'working',
+    summary: '完成数据层设计与迁移',
+    details: ['字段 summary nullable', 'details_json 默认 []', '支持 git_head/branch 字段'],
+    gitHead: 'abcdef1234567890abcdef1234567890abcdef12',
+    gitBranch: 'feature/structured-progress',
+    gitCoherence: 'coherent',
+    gitObservedAt: '2026-09-02T10:00:00.000Z',
+  });
+  assert.equal(prog1.ok, true);
+  assert.equal(prog1.revision, 2);
+  assert.equal(prog1.summary, '完成数据层设计与迁移');
+  assert.deepEqual(prog1.details, ['字段 summary nullable', 'details_json 默认 []', '支持 git_head/branch 字段']);
+  assert.equal(prog1.git.branch, 'feature/structured-progress');
+  assert.equal(prog1.git.shortHead, 'abcdef1');
+  assert.equal(prog1.git.coherence, 'coherent');
+
+  // 2. Idempotent replay of same request returns original event and same revision
+  const replay1 = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-1',
+    expectedRevision: 1,
+    status: 'working',
+    summary: '完成数据层设计与迁移',
+    details: ['字段 summary nullable', 'details_json 默认 []', '支持 git_head/branch 字段'],
+    // Even if git probe returns different head during replay, replay succeeds without conflict
+    gitHead: '9999991234567890abcdef1234567890abcdef12',
+    gitBranch: 'feature/other',
+  });
+  assert.equal(replay1.ok, true);
+  assert.equal(replay1.eventId, prog1.eventId);
+  assert.equal(replay1.revision, 2);
+  assert.equal(replay1.git.branch, 'feature/structured-progress');
+  assert.equal(replay1.git.shortHead, 'abcdef1');
+
+  // 3. Conflict when replaying same clientRequestId with modified summary
+  assert.throws(
+    () => appendProgressEvent(db, {
+      sessionId: accepted.sessionId,
+      clientRequestId: 'prog-req-1',
+      expectedRevision: 1,
+      status: 'working',
+      summary: '修改过的不同摘要',
+    }),
+    (err) => err.code === 'COMMAND_CONFLICT' || err.code === 'PROGRESS_REQUEST_CONFLICT',
+  );
+
+  // 4. Legacy note-only progress continues to work
+  const prog2 = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-2',
+    expectedRevision: 2,
+    status: 'working',
+    note: 'Legacy note only progress event',
+  });
+  assert.equal(prog2.ok, true);
+  assert.equal(prog2.revision, 3);
+  assert.equal(prog2.note, 'Legacy note only progress event');
+  assert.equal(prog2.summary, null);
+  assert.deepEqual(prog2.details, []);
+  assert.equal(prog2.git, null);
+
+  // 5. Validation failures
+  // Missing both summary and note
+  const invalidEmpty = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-invalid-1',
+    expectedRevision: 3,
+    status: 'working',
+  });
+  assert.equal(invalidEmpty.ok, false);
+  assert.equal(invalidEmpty.code, 'INVALID_REQUEST');
+
+  // Summary too long (> 160)
+  const invalidLongSummary = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-invalid-2',
+    expectedRevision: 3,
+    status: 'working',
+    summary: 'A'.repeat(161),
+  });
+  assert.equal(invalidLongSummary.ok, false);
+  assert.equal(invalidLongSummary.code, 'INVALID_REQUEST');
+
+  // Too many details items (> 8)
+  const invalidTooManyDetails = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-invalid-3',
+    expectedRevision: 3,
+    status: 'working',
+    summary: 'Valid summary',
+    details: Array(9).fill('Detail item'),
+  });
+  assert.equal(invalidTooManyDetails.ok, false);
+  assert.equal(invalidTooManyDetails.code, 'INVALID_REQUEST');
+
+  // Details item too long (> 500)
+  const invalidLongDetail = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-invalid-4',
+    expectedRevision: 3,
+    status: 'working',
+    summary: 'Valid summary',
+    details: ['B'.repeat(501)],
+  });
+  assert.equal(invalidLongDetail.ok, false);
+  assert.equal(invalidLongDetail.code, 'INVALID_REQUEST');
+
+  // Details item empty
+  const invalidEmptyDetail = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-invalid-5',
+    expectedRevision: 3,
+    status: 'working',
+    summary: 'Valid summary',
+    details: ['   '],
+  });
+  assert.equal(invalidEmptyDetail.ok, false);
+  assert.equal(invalidEmptyDetail.code, 'INVALID_REQUEST');
+
   db.close();
 });

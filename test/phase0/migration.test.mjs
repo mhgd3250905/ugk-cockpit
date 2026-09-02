@@ -22,9 +22,119 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   );
   db.close();
+});
+
+test('version 10 database upgrades progress_events schema to version 11 without losing rows', (t) => {
+  const dbPath = fixture(t, 'migration-v10');
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      applied_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO schema_migrations VALUES (1, 'phase0-core', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE worktrees (
+      id TEXT PRIMARY KEY,
+      canonical_path TEXT NOT NULL UNIQUE,
+      repository_identity TEXT NOT NULL,
+      lease_generation INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      stage TEXT NOT NULL CHECK (stage IN ('development', 'maintenance', 'paused')),
+      worktree_id TEXT NOT NULL UNIQUE REFERENCES worktrees(id),
+      status TEXT NOT NULL CHECK (status IN ('ready', 'attention', 'active', 'paused')),
+      status_reason TEXT NOT NULL,
+      last_observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE assignments (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+      agent_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      scope_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      session_id TEXT UNIQUE,
+      accepted_grant_id TEXT,
+      accepted_at TEXT,
+      last_heartbeat_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE progress_events (
+      id TEXT PRIMARY KEY,
+      assignment_id TEXT NOT NULL REFERENCES assignments(id),
+      session_id TEXT NOT NULL,
+      client_request_id TEXT NOT NULL,
+      expected_revision INTEGER NOT NULL,
+      revision INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(assignment_id, session_id, client_request_id)
+    ) STRICT;
+    INSERT INTO worktrees VALUES ('wt-1', 'E:\\repo', 'repo-1', 0, '2026-01-01T00:00:00.000Z');
+    INSERT INTO projects VALUES ('proj-1', 'Test', 'development', 'wt-1', 'ready', 'ready_to_start', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO assignments VALUES ('assign-1', 'proj-1', 'wt-1', 'Codex', 'Task', '{}', 'active', 2, 'sess-1', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO progress_events VALUES ('pe-1', 'assign-1', 'sess-1', 'req-1', 1, 2, 'working', 'Legacy note before v11', '2026-01-01T00:00:00.000Z');
+    PRAGMA user_version = 10;
+  `);
+  legacy.close();
+
+  // Re-open (migrateDatabase)
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 11);
+  const peColumns = upgraded.prepare('PRAGMA table_info(progress_events)').all().map((r) => r.name);
+  assert.ok(peColumns.includes('summary'));
+  assert.ok(peColumns.includes('details_json'));
+  assert.ok(peColumns.includes('git_head'));
+  assert.ok(peColumns.includes('git_branch'));
+  assert.ok(peColumns.includes('git_coherence'));
+  assert.ok(peColumns.includes('git_observed_at'));
+
+  const row = upgraded.prepare('SELECT * FROM progress_events WHERE id = ?').get('pe-1');
+  assert.equal(row.note, 'Legacy note before v11');
+  assert.equal(row.summary, null);
+  assert.equal(row.details_json, '[]');
+  assert.equal(row.git_head, null);
+  assert.equal(row.git_branch, null);
+  assert.equal(row.git_coherence, null);
+  assert.equal(row.git_observed_at, null);
+
+  const insertStmt = upgraded.prepare(`
+    INSERT INTO progress_events (
+      id, assignment_id, session_id, client_request_id,
+      expected_revision, revision, status, note, summary, details_json,
+      git_head, git_branch, git_coherence, git_observed_at, created_at
+    ) VALUES (?, 'assign-1', 'sess-1', ?, 2, 3, 'working', '', ?, '[]', NULL, NULL, ?, NULL, '2026-01-01T00:00:00.000Z')
+  `);
+
+  insertStmt.run('pe-coherent', 'req-coherent', 'Coherent update', 'coherent');
+  insertStmt.run('pe-incoherent', 'req-incoherent', 'Incoherent update', 'incoherent');
+  insertStmt.run('pe-unknown', 'req-unknown', 'Unknown update', 'unknown');
+  insertStmt.run('pe-null', 'req-null', 'Null update', null);
+
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM progress_events WHERE id = ?').get('pe-coherent').git_coherence, 'coherent');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM progress_events WHERE id = ?').get('pe-incoherent').git_coherence, 'incoherent');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM progress_events WHERE id = ?').get('pe-unknown').git_coherence, 'unknown');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM progress_events WHERE id = ?').get('pe-null').git_coherence, null);
+
+  assert.throws(
+    () => insertStmt.run('pe-invalid', 'req-invalid', 'Invalid update', 'invalid_coherence'),
+    /CHECK constraint failed/i,
+  );
+
+  upgraded.close();
 });
 
 test('version 1 database upgrades missing identity columns without losing rows', (t) => {

@@ -453,8 +453,49 @@ function validateMcpProgressBody(body) {
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
   requireString(body, 'status');
-  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
-    || typeof body.note !== 'string' || body.note.length > 4000) {
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+    const error = new Error('Invalid progress request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  const allowedKeys = new Set(['sessionId', 'clientRequestId', 'expectedRevision', 'status', 'summary', 'details', 'note']);
+  for (const key of Object.keys(body)) {
+    if (!allowedKeys.has(key)) {
+      const error = new Error(`Unexpected progress property: ${key}`);
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+  let hasSummary = false;
+  if (body.summary !== undefined) {
+    if (typeof body.summary !== 'string' || !body.summary.trim() || body.summary.length > 160) {
+      const error = new Error('Invalid progress request.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    hasSummary = true;
+  }
+  if (body.details !== undefined) {
+    if (!Array.isArray(body.details)
+      || body.details.length > 8
+      || body.details.some((item) => typeof item !== 'string' || !item.trim() || item.length > 500)) {
+      const error = new Error('Invalid progress request.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+  let hasNote = false;
+  if (body.note !== undefined) {
+    if (typeof body.note !== 'string' || body.note.length > 4000) {
+      const error = new Error('Invalid progress request.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    if (body.note.trim() !== '') {
+      hasNote = true;
+    }
+  }
+  if (!hasSummary && !hasNote) {
     const error = new Error('Invalid progress request.');
     error.code = 'INVALID_REQUEST';
     throw error;
@@ -1421,7 +1462,27 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/progress') {
         const body = await readJson(request);
         validateMcpProgressBody(body);
-        const result = recordProgress(db, body);
+        let gitEvidence = {};
+        const context = readSessionContext(db, body.sessionId);
+        if (context?.ok) {
+          try {
+            const { observation } = await observeRegisteredProject(context.projectId, context);
+            gitEvidence = {
+              gitHead: observation.after?.head ?? null,
+              gitBranch: observation.after?.branch ?? null,
+              gitCoherence: observation.coherence ?? 'unknown',
+              gitObservedAt: observation.observedAt ?? new Date().toISOString(),
+            };
+          } catch {
+            gitEvidence = {
+              gitHead: null,
+              gitBranch: null,
+              gitCoherence: 'unknown',
+              gitObservedAt: new Date().toISOString(),
+            };
+          }
+        }
+        const result = recordProgress(db, { ...body, ...gitEvidence });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
           extra: { session_id: body.sessionId, revision: result.revision ?? null },

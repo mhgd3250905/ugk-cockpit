@@ -29,6 +29,13 @@ test('TOOLS definition contains the required 8 tools and no path/projectId/workt
     TOOLS.find((tool) => tool.name === 'ugk_work_progress').inputSchema.properties.status.enum,
     ['working', 'in_progress']
   );
+  const progressTool = TOOLS.find((tool) => tool.name === 'ugk_work_progress');
+  assert.deepEqual(progressTool.inputSchema.anyOf, [
+    { required: ['summary'] },
+    { required: ['note'] }
+  ]);
+  assert.strictEqual(progressTool.inputSchema.properties.summary.minLength, 1);
+  assert.strictEqual(progressTool.inputSchema.properties.details.items.minLength, 1);
 
   const descriptions = Object.fromEntries(TOOLS.map((tool) => [tool.name, tool.description]));
   assert.match(descriptions.ugk_work_progress, /only.*eligible for implicit/i);
@@ -225,6 +232,32 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.deepEqual(receivedArgs.progress, progressPayload);
   assert.deepEqual(JSON.parse(progRes.result.content[0].text), { revision: 2, status: 'running' });
 
+  // Call ugk_work_progress (structured progress)
+  const structuredProgressPayload = {
+    sessionId: 'sess-100',
+    clientRequestId: 'req-prog-structured',
+    expectedRevision: 2,
+    status: 'working',
+    summary: 'Completed structured slice',
+    details: ['detail 1', 'detail 2']
+  };
+  const structuredProgRes = await dispatchMessage(
+    {
+      jsonrpc: '2.0',
+      id: 110,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_progress',
+        arguments: structuredProgressPayload
+      }
+    },
+    { handlers }
+  );
+  assert.strictEqual(structuredProgRes.id, 110);
+  assert.strictEqual(callCounts.progress, 2);
+  assert.deepEqual(receivedArgs.progress, structuredProgressPayload);
+  assert.deepEqual(JSON.parse(structuredProgRes.result.content[0].text), { revision: 2, status: 'running' });
+
   // Call ugk_work_finish
   const finishPayload = {
     sessionId: 'sess-100',
@@ -407,6 +440,81 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
   assert.strictEqual(called, false);
   assert.strictEqual(terminalProgress.result.isError, true);
   assert.match(terminalProgress.result.content[0].text, /finish or handoff/);
+
+  const progressNoSummaryNoNote = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 231,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_work_progress',
+      arguments: {
+        sessionId: 's1',
+        clientRequestId: 'progress-empty',
+        expectedRevision: 2,
+        status: 'working',
+      },
+    },
+  }, { handlers });
+  assert.strictEqual(progressNoSummaryNoNote.result.isError, true);
+  assert.match(progressNoSummaryNoNote.result.content[0].text, /at least one of summary or note/i);
+
+  const progressEmptySummary = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 232,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_work_progress',
+      arguments: {
+        sessionId: 's1',
+        clientRequestId: 'progress-empty-summary',
+        expectedRevision: 2,
+        status: 'working',
+        summary: '   ',
+      },
+    },
+  }, { handlers });
+  assert.strictEqual(progressEmptySummary.result.isError, true);
+  assert.match(progressEmptySummary.result.content[0].text, /summary/i);
+
+  const progressEmptyDetailsItem = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 233,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_work_progress',
+      arguments: {
+        sessionId: 's1',
+        clientRequestId: 'progress-empty-detail',
+        expectedRevision: 2,
+        status: 'working',
+        summary: 'Valid summary',
+        details: ['valid', '   '],
+      },
+    },
+  }, { handlers });
+  assert.strictEqual(progressEmptyDetailsItem.result.isError, true);
+  assert.match(progressEmptyDetailsItem.result.content[0].text, /details/i);
+
+  for (const field of ['gitBranch', 'gitHead', 'gitCoherence', 'path', 'projectId', 'worktreeId']) {
+    const res = await dispatchMessage({
+      jsonrpc: '2.0',
+      id: `progress-disallowed-${field}`,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_progress',
+        arguments: {
+          sessionId: 's1',
+          clientRequestId: `req-${field}`,
+          expectedRevision: 2,
+          status: 'working',
+          summary: 'Valid summary',
+          [field]: 'spoofed-value',
+        },
+      },
+    }, { handlers });
+    assert.strictEqual(res.result.isError, true);
+    assert.match(res.result.content[0].text, /Forbidden property|Unexpected property/i);
+  }
 
   // ugk_work_begin with forbidden path
   const beginForbiddenPath = await dispatchMessage(
