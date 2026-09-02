@@ -7,6 +7,7 @@ export const COCKPIT_SKILL_NAMES = [
   'cockpit-init',
   'cockpit-progress',
   'cockpit-relay',
+  'cockpit-closeout',
   'cockpit-handoff',
 ];
 

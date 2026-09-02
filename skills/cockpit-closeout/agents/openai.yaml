@@ -1,0 +1,11 @@
+interface:
+  display_name: "Cockpit 阶段收束"
+  short_description: "核对阶段 delta 并记录可验证的本地收束检查点"
+  default_prompt: "使用 $cockpit-closeout 核对当前阶段并记录本地收束检查点。"
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ugk-cockpit"
+      description: "UGK Cockpit 本地 MCP"
+policy:
+  allow_implicit_invocation: false

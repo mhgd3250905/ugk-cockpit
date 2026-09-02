@@ -14,7 +14,7 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 
 ## 模式一：准备接力（旧聊天）
 
-在已有 active Cockpit session 且掌握最近一次成功 MCP 返回的 `sessionId` 与 `revision` 时调用 `ugk_work_relay`。从当前事实整理交接信息，所有列表字段都必须提供字符串数组，若无内容提供 `[]`：
+在已有 active Cockpit session 且掌握最近一次成功 MCP 返回的 `sessionId` 与 `revision` 时调用 `ugk_work_relay`。准备模式只做轻量对齐摘要：复用当前已知事实和本阶段已经观察到的未对齐项，不为 relay 扫描全仓、运行测试、修文档或创建 commit，也不要因此触发 `$cockpit-closeout`。无论是否有未对齐项都不得阻塞 relay；把已知事项带入 `pendingItems`、`risks` 和 `nextSessionFocus`，不明事实不要猜测。所有列表字段都必须提供字符串数组，若无内容提供 `[]`：
 
 ```json
 {
@@ -43,6 +43,8 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 ## 模式二：恢复接力（新聊天）
 
 在新聊天中，用户提供了 `continueCode` 时调用 `ugk_work_resume`：
+
+恢复模式只恢复已保存的 relay 上下文，不执行对齐检查，也不扫描、验证或修正文档；恢复成功后再等待用户安排下一步。
 
 ```json
 {

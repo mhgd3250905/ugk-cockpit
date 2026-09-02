@@ -9,7 +9,13 @@ description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP
 
 普通功能完成、任务完成、Git commit、测试通过、上下文堆积或对话轮次增加都必须保持 active 状态，绝对不能由 AI 自行推断或隐式触发交接。如需跨聊天无缝接力，应使用 `$cockpit-relay`，不得自行 handoff。
 
-不要自动 commit、清理、覆盖或改写项目文件；MCP 会负责最终状态采集、权限、CAS revision、事务和幂等。
+除下述用户手动选择 `completed` 后的 closeout 前置外，不要由 handoff 自动 commit、清理、覆盖或改写项目文件；MCP 会负责最终状态采集、权限、CAS revision、事务和幂等。
+
+## `completed` 的收束前置
+
+仅当用户明确选择 `outcome: "completed"` 时，才要求并检查完整 closeout：在调用 `ugk_work_handoff` 前，必须在同一手动 handoff 工作流中执行或复用一个针对当前 `HEAD` 仍有效的 `$cockpit-closeout` 结果，其中包含已核对的 `commit SHA`、必要验证和对应的非终态检查点。该 `completed` 选择本身就是执行 closeout 前置的用户授权，不要求用户额外再点名 `$cockpit-closeout`；closeout 仍不得由普通完成、commit、测试或其他非终态动作隐式触发。
+
+如果 closeout 未完成、验证已失效、当前 `HEAD` 已变化，或缺少可信 `commit SHA`，不得以 `completed` 调用 `ugk_work_handoff`；向用户说明代码是否受影响、closeout 失败的原因和推荐下一步，并等待处理。`blocked` 或 `abandoned` 不要求 closeout，只如实携带未解决事项。功能完成、commit、测试通过或上下文堆积都不能隐式触发 closeout 或 terminal handoff。
 
 ## 前置条件与内容
 

@@ -21,7 +21,8 @@
 - `0.1.0-alpha.20`：项目详情弹窗按 4 秒节奏自动刷新并保留已加载历史；relay 节点增加等待/已接手状态和实际接手时间，同一 Cockpit session 的新会话恢复不再表现为缺失，也不生成虚假的新 INIT。
 - `0.1.0-alpha.21`：progress 改为一句摘要加结构化详情，服务端在事件发生时采集并固化分支/HEAD；旧 note 原文保留并折叠展示，不对历史 Git 状态作事后推断。
 - `0.1.0-alpha.22`：RELAY/HANDOFF 默认收束为摘要、状态、Git、下一步和数量概览，完整上下文按需展开；新 RELAY 固化服务端 Git 证据，并修复 INIT/HANDOFF 可信快照被误标为未确认的问题。
-- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；relay 与 handoff 分别只在用户显式要求换聊天或结束阶段时调用。
+- `0.1.0-alpha.23`：新增 `$cockpit-closeout` 阶段收束检查点；它只核对已知阶段 delta、确定的 canonical 对齐项和必要验证，并以本地 commit SHA 记录一个非终态 progress 检查点，不因该 commit 重复记录。relay 准备只复用已知未对齐项，completed handoff 在同一手动工作流中必须先执行或复用对当前 HEAD 仍有效的 closeout；三者均须用户显式触发。
+- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；closeout、relay 与 handoff 都只在用户显式动作中执行，`completed` handoff 的选择可伴随 closeout。
 
 ## 产品方向：晨间工作简报
 
@@ -74,11 +75,11 @@
 - 存在尚未交接的旧会话：保持“会话已接入”，展示最近确认节点；只有用户显式 relay、handoff 或 takeover 才转换状态；
 - 代码位置身份变化：停止，要求用户重新选择，绝不自动重绑。
 
-消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。上下文堆积时，用户可显式调用 `$cockpit-relay`：旧聊天调用 `ugk_work_relay` 生成一次性接力消息，新聊天调用 `ugk_work_resume` 继续同一工作会话。只有用户显式要求结束阶段时，才通过 `$cockpit-handoff` 收束。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
+消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。阶段需要收束时，用户可显式调用 `$cockpit-closeout`：AI 只核对当前阶段 delta，修正确定的 canonical 对齐项，运行必要验证，并记录指向本地 commit SHA 的一个非终态 progress 检查点，不因该 commit 再额外记录。上下文堆积时，用户可显式调用 `$cockpit-relay`：准备只复用已知事实和本阶段已观察到的未对齐项，不扫描全仓、运行测试、修文档或创建 commit；新聊天调用 `ugk_work_resume` 继续同一工作会话，恢复模式不执行对齐检查。只有用户显式选择结束阶段时，才通过 `$cockpit-handoff` 收束；选择 `completed` 时在同一手动 handoff 工作流中先执行或复用对当前 HEAD 仍有效的完整 closeout，`blocked`/`abandoned` 不要求 closeout。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
 
 ### 5. 结束工作
 
-用户明确要求结束当前阶段后，AI 才通过 `ugk_work_handoff` 选择：`已完成`、`卡住了`、`稍后继续`，提交标准交接字段、建议技能和文件引用。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
+用户明确要求结束当前阶段并选择结果后，AI 才通过 `ugk_work_handoff` 提交标准交接字段、建议技能和文件引用。选择 `completed` 时，在同一手动 handoff 工作流中先执行或复用对当前 `HEAD` 仍有效的完整 closeout；若 closeout 未完成，不得进行 completed handoff，向用户报告并等待处理。选择 `blocked` 或 `abandoned` 不要求 closeout，只如实携带未解决事项。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
 
 如果出现外部代码保存点、未归属改动、工作线变化或检查中状态变化，不能显示“已完成”，必须解释原因并给出安全动作。
 
@@ -100,7 +101,7 @@
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_handoff`；`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
+- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_handoff`；阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress，也不新增后端工具。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。
