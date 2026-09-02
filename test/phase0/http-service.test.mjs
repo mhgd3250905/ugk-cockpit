@@ -1105,3 +1105,184 @@ test('service restart preserves active run status and does not mark it recovery_
   });
   assert.equal(finishResponse.status, 200);
 });
+
+test('HTTP empty folder selection, spaces listing, and space workspace creation', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  const tempContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-spaces-'));
+  const emptyFolder = path.join(tempContainer, 'empty-dir');
+  const nonEmptyFolder = path.join(tempContainer, 'non-empty-dir');
+  const regularFile = path.join(tempContainer, 'regular-file.txt');
+  mkdirSync(emptyFolder, { recursive: true });
+  mkdirSync(nonEmptyFolder, { recursive: true });
+  writeFileSync(path.join(nonEmptyFolder, 'file.txt'), 'hello', 'utf8');
+  writeFileSync(regularFile, 'hello', 'utf8');
+
+  let currentSelectedFolder = null;
+  const folderPicker = async () => currentSelectedFolder;
+
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root, tempContainer],
+    folderPicker,
+    createGitWorktree: async (repoPath, { targetPath, branch, baseCommit }) => {
+      // Simulate git worktree create
+      execFileSync('git', ['worktree', 'add', '-b', branch, targetPath, baseCommit], {
+        cwd: root,
+        windowsHide: true,
+        stdio: 'pipe',
+      });
+      return { ok: true, targetPath, branch, baseCommit };
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+    rmSync(tempContainer, { recursive: true, force: true });
+  });
+
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    'content-type': 'application/json',
+  };
+
+  // 1. Folder picker cancelled
+  currentSelectedFolder = null;
+  const cancelResponse = await request(service, '/api/v1/folders/select-empty', {
+    method: 'POST',
+    headers,
+  });
+  assert.equal(cancelResponse.status, 200);
+  const cancelResult = await cancelResponse.json();
+  assert.equal(cancelResult.ok, true);
+  assert.equal(cancelResult.cancelled, true);
+
+  // 2. Folder picker select non-empty directory -> 400 DIRECTORY_NOT_EMPTY
+  currentSelectedFolder = nonEmptyFolder;
+  const nonEmptyResponse = await request(service, '/api/v1/folders/select-empty', {
+    method: 'POST',
+    headers,
+  });
+  await assertUserError(nonEmptyResponse, 400, 'DIRECTORY_NOT_EMPTY');
+
+  // 3. Folder picker select file -> 400 NOT_A_DIRECTORY
+  currentSelectedFolder = regularFile;
+  const fileResponse = await request(service, '/api/v1/folders/select-empty', {
+    method: 'POST',
+    headers,
+  });
+  await assertUserError(fileResponse, 400, 'NOT_A_DIRECTORY');
+
+  // 4. Folder picker select valid empty directory -> grantId issued
+  currentSelectedFolder = emptyFolder;
+  const selectResponse = await request(service, '/api/v1/folders/select-empty', {
+    method: 'POST',
+    headers,
+  });
+  assert.equal(selectResponse.status, 200);
+  const selectResult = await selectResponse.json();
+  assert.equal(selectResult.ok, true);
+  assert.equal(selectResult.cancelled, false);
+  assert.ok(selectResult.grantId);
+  assert.equal(typeof selectResult.grantId, 'string');
+  assert.equal(selectResult.folderName, 'empty-dir');
+  assert.equal(selectResult.folderPath, emptyFolder);
+
+  // 5. Register the project first so we have a project to add spaces to
+  currentSelectedFolder = root;
+  const regSelect = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST',
+    headers,
+  })).json();
+  const regProj = await (await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'reg-proj-cmd',
+      grantId: regSelect.grantId,
+      name: 'Spaces Test Project',
+    }),
+  })).json();
+  assert.equal(regProj.ok, true);
+  const projectId = regProj.projectId;
+
+  // 6. GET /api/v1/projects/:projectId/spaces -> initially empty
+  const listResponse = await request(service, `/api/v1/projects/${projectId}/spaces`, {
+    method: 'GET',
+    headers,
+  });
+  assert.equal(listResponse.status, 200);
+  const listResult = await listResponse.json();
+  assert.equal(listResult.ok, true);
+  assert.equal(listResult.projectId, projectId);
+  assert.deepEqual(listResult.spaces, []);
+
+  // 7. POST /api/v1/projects/:projectId/spaces with invalid extra fields (e.g. trying to inject path) -> 400 INVALID_REQUEST
+  const invalidBodyResponse = await request(service, `/api/v1/projects/${projectId}/spaces`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'space-cmd-invalid',
+      grantId: selectResult.grantId,
+      expectedBaseHead: 'd'.repeat(40),
+      path: '/etc/passwd',
+    }),
+  });
+  await assertUserError(invalidBodyResponse, 400, 'INVALID_REQUEST');
+
+  // 8. POST /api/v1/projects/:projectId/spaces with valid payload
+  const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  const createSpaceResponse = await request(service, `/api/v1/projects/${projectId}/spaces`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'create-space-cmd-1',
+      grantId: selectResult.grantId,
+      expectedBaseHead: headCommit,
+      name: 'my-feature-space',
+    }),
+  });
+  assert.equal(createSpaceResponse.status, 201, await createSpaceResponse.clone().text());
+  const createResult = await createSpaceResponse.json();
+  assert.equal(createResult.ok, true);
+  assert.equal(createResult.projectId, projectId);
+  assert.ok(createResult.spaceId);
+  assert.ok(createResult.worktreeId);
+  assert.equal(createResult.canonicalPath, emptyFolder);
+  assert.equal(createResult.name, 'my-feature-space');
+
+  // 9. Replay POST with same commandId -> returns 200 with alreadyExists: true
+  const replayResponse = await request(service, `/api/v1/projects/${projectId}/spaces`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'create-space-cmd-1',
+      grantId: selectResult.grantId,
+      expectedBaseHead: headCommit,
+      name: 'my-feature-space',
+    }),
+  });
+  assert.equal(replayResponse.status, 200);
+  const replayResult = await replayResponse.json();
+  assert.equal(replayResult.ok, true);
+  assert.equal(replayResult.alreadyExists, true);
+
+  // 10. GET /api/v1/projects/:projectId/spaces now lists the created space
+  const updatedList = await (await request(service, `/api/v1/projects/${projectId}/spaces`, {
+    method: 'GET',
+    headers,
+  })).json();
+  assert.equal(updatedList.ok, true);
+  assert.equal(updatedList.spaces.length, 1);
+  assert.equal(updatedList.spaces[0].spaceId, createResult.spaceId);
+  assert.equal(updatedList.spaces[0].name, 'my-feature-space');
+  assert.equal(updatedList.spaces[0].worktreeId, createResult.worktreeId);
+
+  // 11. GET /api/v1/projects/unknown-proj/spaces -> 404 PROJECT_NOT_FOUND
+  const notFoundList = await request(service, '/api/v1/projects/unknown-proj/spaces', {
+    method: 'GET',
+    headers,
+  });
+  await assertUserError(notFoundList, 404, 'PROJECT_NOT_FOUND');
+});

@@ -364,6 +364,36 @@ test('DIRECTORY_IDENTITY_CHANGED: fails if directory is replaced between grant a
   db.close();
 });
 
+test('WORKTREE_PATH_OVERLAP: rejects a target nested inside the main worktree', async (t) => {
+  const { db, repoDir } = fixture(t);
+  const targetPath = path.join(repoDir, 'nested-space');
+  mkdirSync(targetPath);
+  const binding = authorizeEmptyDirectory(targetPath);
+  const grantStore = new EmptyFolderGrantStore({ db });
+  const grant = grantStore.issue(binding, 'principal-overlap');
+  let gitWorktreeCalled = false;
+
+  const result = await createDevelopmentWorkspace(db, {
+    commandId: 'cmd-overlap',
+    projectId: 'proj-1',
+    grantId: grant.grantId,
+    principalHash: 'principal-overlap',
+    expectedBaseHead: 'head-overlap',
+  }, {
+    probe: async (target) => mockObservation({
+      head: 'head-overlap',
+      canonicalPath: target,
+    })(target),
+    createGitWorktree: async () => { gitWorktreeCalled = true; },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'WORKTREE_PATH_OVERLAP');
+  assert.equal(gitWorktreeCalled, false);
+  assert.equal(grantStore.read(grant.grantId).state, 'active');
+  db.close();
+});
+
 test('idempotent replay of same commandId returns identical result without duplicate worktree creation', async (t) => {
   const { root, db, repoDir } = fixture(t);
 

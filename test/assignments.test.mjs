@@ -400,3 +400,166 @@ test('structured progress records summary, details, and git evidence with idempo
 
   db.close();
 });
+
+test('createAssignment binds to development space worktree and rejects cross-project or archived spaces', (t) => {
+  const db = fixture(t);
+  const now = new Date().toISOString();
+
+  // Create another project
+  db.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('worktree-other', 'E:\\fixture\\other', 'repo-other', 'identity-other', ?)
+  `).run(now);
+  db.prepare(`
+    INSERT INTO projects (id, name, stage, worktree_id, status, status_reason, last_observed_at, created_at, updated_at, authorized_root)
+    VALUES ('project-other', 'Other project', 'development', 'worktree-other', 'ready', 'ready_to_start', ?, ?, ?, 'E:\\fixture\\other')
+  `).run(now, now, now);
+
+  // Create development spaces for project-assignment
+  db.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('worktree-space-active', 'E:\\fixture\\space-active', 'repo-assignment', 'identity-space-active', ?)
+  `).run(now);
+  db.prepare(`
+    INSERT INTO development_spaces (id, project_id, worktree_id, name, branch, base_commit, status, status_reason, created_at, updated_at)
+    VALUES ('space-active', 'project-assignment', 'worktree-space-active', 'feature-1', 'ugk/feature-1', 'commit-1', 'ready', 'ready_to_start', ?, ?)
+  `).run(now, now);
+
+  db.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('worktree-space-archived', 'E:\\fixture\\space-archived', 'repo-assignment', 'identity-space-archived', ?)
+  `).run(now);
+  db.prepare(`
+    INSERT INTO development_spaces (id, project_id, worktree_id, name, branch, base_commit, status, status_reason, created_at, updated_at)
+    VALUES ('space-archived', 'project-assignment', 'worktree-space-archived', 'feature-archived', 'ugk/feature-archived', 'commit-1', 'archived', 'archived', ?, ?)
+  `).run(now, now);
+
+  // Create development space for project-other
+  db.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('worktree-space-other', 'E:\\fixture\\space-other', 'repo-other', 'identity-space-other', ?)
+  `).run(now);
+  db.prepare(`
+    INSERT INTO development_spaces (id, project_id, worktree_id, name, branch, base_commit, status, status_reason, created_at, updated_at)
+    VALUES ('space-other', 'project-other', 'worktree-space-other', 'feature-other', 'ugk/feature-other', 'commit-other', 'ready', 'ready_to_start', ?, ?)
+  `).run(now, now);
+
+  // 1. Success creating assignment with spaceId
+  const spaceResult = createAssignment(db, {
+    commandId: 'assignment-create-space',
+    assignmentId: 'assignment-space-1',
+    projectId: 'project-assignment',
+    spaceId: 'space-active',
+    agentId: 'agent-one',
+    taskId: 'space-task-one',
+    scope: { root: 'src', mode: 'write' },
+    dispatchCode: 'space-dispatch-code-1',
+    ttlMs: 60_000,
+  }, { clock });
+  assert.equal(spaceResult.ok, true, JSON.stringify(spaceResult));
+  assert.equal(spaceResult.spaceId, 'space-active');
+  assert.equal(spaceResult.worktreeId, 'worktree-space-active');
+  assert.equal(spaceResult.canonicalPath, 'E:\\fixture\\space-active');
+
+  const context = readDispatchContext(db, { dispatchCode: 'space-dispatch-code-1' }, { clock });
+  assert.equal(context.ok, true);
+  assert.equal(context.spaceId, 'space-active');
+  assert.equal(context.worktreeId, 'worktree-space-active');
+
+  // 2. Accept space assignment and check session context
+  const accepted = acceptAssignment(db, {
+    dispatchCode: 'space-dispatch-code-1',
+    clientRequestId: 'accept-space-1',
+  }, { clock });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.spaceId, 'space-active');
+  assert.equal(accepted.worktreeId, 'worktree-space-active');
+
+  const sessionContext = readSessionContext(db, accepted.sessionId);
+  assert.equal(sessionContext.ok, true);
+  assert.equal(sessionContext.spaceId, 'space-active');
+  assert.equal(sessionContext.worktreeId, 'worktree-space-active');
+
+  // 3. Success creating assignment with worktreeId of space
+  const worktreeResult = createAssignment(db, {
+    commandId: 'assignment-create-worktree',
+    assignmentId: 'assignment-space-2',
+    projectId: 'project-assignment',
+    worktreeId: 'worktree-space-active',
+    agentId: 'agent-one',
+    taskId: 'space-task-two',
+    scope: { mode: 'write' },
+    dispatchCode: 'space-dispatch-code-2',
+  }, { clock });
+  assert.equal(worktreeResult.ok, true);
+  assert.equal(worktreeResult.spaceId, 'space-active');
+  assert.equal(worktreeResult.worktreeId, 'worktree-space-active');
+
+  // 4. Reject cross-project spaceId
+  const crossSpace = createAssignment(db, {
+    commandId: 'assignment-cross-space',
+    assignmentId: 'assignment-cross-1',
+    projectId: 'project-assignment',
+    spaceId: 'space-other',
+    agentId: 'agent-one',
+    taskId: 'cross-task',
+    scope: { mode: 'write' },
+  });
+  assert.equal(crossSpace.ok, false);
+  assert.equal(crossSpace.code, 'WORKTREE_BINDING_MISMATCH');
+
+  // 5. Reject cross-project worktreeId
+  const crossWorktree = createAssignment(db, {
+    commandId: 'assignment-cross-worktree',
+    assignmentId: 'assignment-cross-2',
+    projectId: 'project-assignment',
+    worktreeId: 'worktree-other',
+    agentId: 'agent-one',
+    taskId: 'cross-task',
+    scope: { mode: 'write' },
+  });
+  assert.equal(crossWorktree.ok, false);
+  assert.equal(crossWorktree.code, 'WORKTREE_BINDING_MISMATCH');
+
+  // 6. Reject archived spaceId
+  const archivedSpace = createAssignment(db, {
+    commandId: 'assignment-archived-space',
+    assignmentId: 'assignment-archived-1',
+    projectId: 'project-assignment',
+    spaceId: 'space-archived',
+    agentId: 'agent-one',
+    taskId: 'archived-task',
+    scope: { mode: 'write' },
+  });
+  assert.equal(archivedSpace.ok, false);
+  assert.equal(archivedSpace.code, 'WORKTREE_BINDING_MISMATCH');
+
+  // 7. Reject unknown worktreeId
+  const unknownWorktree = createAssignment(db, {
+    commandId: 'assignment-unknown-worktree',
+    assignmentId: 'assignment-unknown-1',
+    projectId: 'project-assignment',
+    worktreeId: 'worktree-unknown',
+    agentId: 'agent-one',
+    taskId: 'unknown-task',
+    scope: { mode: 'write' },
+  });
+  assert.equal(unknownWorktree.ok, false);
+  assert.equal(unknownWorktree.code, 'WORKTREE_BINDING_MISMATCH');
+
+  // 8. Without spaceId or worktreeId, defaults to main project worktree
+  const defaultResult = createAssignment(db, {
+    commandId: 'assignment-default-main',
+    assignmentId: 'assignment-main-1',
+    projectId: 'project-assignment',
+    agentId: 'agent-one',
+    taskId: 'main-task',
+    scope: { mode: 'write' },
+    dispatchCode: 'main-dispatch-code',
+  }, { clock });
+  assert.equal(defaultResult.ok, true);
+  assert.equal(defaultResult.worktreeId, 'worktree-assignment');
+  assert.equal(defaultResult.canonicalPath, 'E:\\fixture\\assignment');
+
+  db.close();
+});

@@ -147,12 +147,15 @@ function beginCoreCommand(db, {
 function assignmentRow(db, assignmentId) {
   return db.prepare(`
     SELECT assignments.*, projects.name AS project_name, projects.authorized_root,
-           projects.stage AS project_stage, projects.authorized_root,
+           projects.stage AS project_stage,
            worktrees.canonical_path, worktrees.repository_identity,
-           worktrees.identity_fingerprint
+           worktrees.identity_fingerprint,
+           development_spaces.id AS space_id
     FROM assignments
     JOIN projects ON projects.id = assignments.project_id
     JOIN worktrees ON worktrees.id = assignments.worktree_id
+    LEFT JOIN development_spaces ON development_spaces.worktree_id = assignments.worktree_id
+      AND development_spaces.project_id = assignments.project_id
     WHERE assignments.id = ?
   `).get(assignmentId) ?? null;
 }
@@ -165,11 +168,14 @@ function grantRow(db, grantId) {
            projects.name AS project_name, projects.stage AS project_stage,
            projects.authorized_root,
            worktrees.canonical_path, worktrees.repository_identity,
-           worktrees.identity_fingerprint
+           worktrees.identity_fingerprint,
+           development_spaces.id AS space_id
     FROM dispatch_grants
     JOIN assignments ON assignments.id = dispatch_grants.assignment_id
     JOIN projects ON projects.id = dispatch_grants.project_id
     JOIN worktrees ON worktrees.id = dispatch_grants.worktree_id
+    LEFT JOIN development_spaces ON development_spaces.worktree_id = dispatch_grants.worktree_id
+      AND development_spaces.project_id = dispatch_grants.project_id
     WHERE dispatch_grants.id = ?
   `).get(grantId) ?? null;
 }
@@ -178,6 +184,7 @@ function assignmentBinding(row) {
   return {
     assignmentId: row.id,
     projectId: row.project_id,
+    ...(row.space_id ? { spaceId: row.space_id } : {}),
     worktreeId: row.worktree_id,
     canonicalPath: row.canonical_path,
     repositoryIdentity: row.repository_identity,
@@ -212,6 +219,7 @@ function mapGrant(row) {
     grantId: row.id,
     assignmentId: row.assignment_id,
     projectId: row.project_id,
+    ...(row.space_id ? { spaceId: row.space_id } : {}),
     worktreeId: row.worktree_id,
     canonicalPath: row.canonical_path,
     repositoryIdentity: row.repository_identity,
@@ -302,8 +310,8 @@ function normalizedTaskId(request) {
 }
 
 /**
- * Create a pending assignment.  projectId is authoritative for its worktree;
- * a supplied worktreeId/path is checked, never used to rebind the project.
+ * Create a pending assignment. projectId defines the allowed worktrees;
+ * an optional spaceId/worktreeId may select only main or a live space in that project.
  */
 function createPendingAssignment(db, request = {}, options = {}) {
   const assignmentId = request.assignmentId ?? request.id
@@ -316,6 +324,12 @@ function createPendingAssignment(db, request = {}, options = {}) {
     || !isNonEmptyString(agentId)
     || !isNonEmptyString(taskId)) {
     return invalid('assignmentId, projectId, agentId and taskId are required.');
+  }
+  if (request.spaceId !== undefined && !isNonEmptyString(request.spaceId)) {
+    return invalid('spaceId must be a non-empty string when provided.');
+  }
+  if (request.worktreeId !== undefined && !isNonEmptyString(request.worktreeId)) {
+    return invalid('worktreeId must be a non-empty string when provided.');
   }
 
   let encodedScope;
@@ -335,18 +349,99 @@ function createPendingAssignment(db, request = {}, options = {}) {
     WHERE projects.id = ?
   `).get(request.projectId);
   if (!project) return { ok: false, code: 'PROJECT_NOT_FOUND', projectId: request.projectId };
-  if (request.worktreeId !== undefined && request.worktreeId !== project.worktree_id) {
-    return { ok: false, code: 'WORKTREE_BINDING_MISMATCH', projectId: request.projectId };
+
+  let targetWorktree = null;
+  let targetSpaceId = null;
+
+  if (isNonEmptyString(request.spaceId)) {
+    const space = db.prepare(`
+      SELECT development_spaces.*,
+             worktrees.canonical_path, worktrees.repository_identity,
+             worktrees.identity_fingerprint
+      FROM development_spaces
+      JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+      WHERE development_spaces.id = ?
+    `).get(request.spaceId);
+    if (!space || space.project_id !== request.projectId || space.status === 'archived' || space.archived_at) {
+      return {
+        ok: false,
+        code: 'WORKTREE_BINDING_MISMATCH',
+        projectId: request.projectId,
+        spaceId: request.spaceId,
+      };
+    }
+    if (request.worktreeId !== undefined && request.worktreeId !== space.worktree_id) {
+      return { ok: false, code: 'WORKTREE_BINDING_MISMATCH', projectId: request.projectId };
+    }
+    targetWorktree = {
+      worktree_id: space.worktree_id,
+      canonical_path: space.canonical_path,
+      repository_identity: space.repository_identity,
+      identity_fingerprint: space.identity_fingerprint,
+    };
+    targetSpaceId = space.id;
+  } else if (isNonEmptyString(request.worktreeId)) {
+    if (request.worktreeId === project.worktree_id) {
+      targetWorktree = {
+        worktree_id: project.worktree_id,
+        canonical_path: project.canonical_path,
+        repository_identity: project.repository_identity,
+        identity_fingerprint: project.identity_fingerprint,
+      };
+    } else {
+      const space = db.prepare(`
+        SELECT development_spaces.*,
+               worktrees.canonical_path, worktrees.repository_identity,
+               worktrees.identity_fingerprint
+        FROM development_spaces
+        JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+        WHERE development_spaces.worktree_id = ? AND development_spaces.project_id = ?
+      `).get(request.worktreeId, request.projectId);
+      if (!space || space.status === 'archived' || space.archived_at) {
+        return {
+          ok: false,
+          code: 'WORKTREE_BINDING_MISMATCH',
+          projectId: request.projectId,
+          worktreeId: request.worktreeId,
+        };
+      }
+      targetWorktree = {
+        worktree_id: space.worktree_id,
+        canonical_path: space.canonical_path,
+        repository_identity: space.repository_identity,
+        identity_fingerprint: space.identity_fingerprint,
+      };
+      targetSpaceId = space.id;
+    }
+  } else {
+    targetWorktree = {
+      worktree_id: project.worktree_id,
+      canonical_path: project.canonical_path,
+      repository_identity: project.repository_identity,
+      identity_fingerprint: project.identity_fingerprint,
+    };
   }
+
+  if (targetWorktree.repository_identity !== project.repository_identity) {
+    return {
+      ok: false,
+      code: 'WORKTREE_BINDING_MISMATCH',
+      projectId: request.projectId,
+      ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+      worktreeId: targetWorktree.worktree_id,
+    };
+  }
+
   if ((request.canonicalPath ?? request.path) !== undefined
-    && (request.canonicalPath ?? request.path) !== project.canonical_path) {
+    && (request.canonicalPath ?? request.path) !== targetWorktree.canonical_path) {
     return { ok: false, code: 'WORKTREE_BINDING_MISMATCH', projectId: request.projectId };
   }
 
   const intent = {
     assignmentId,
     projectId: request.projectId,
-    worktreeId: project.worktree_id,
+    worktreeId: targetWorktree.worktree_id,
+    ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
     agentId,
     taskId,
     scope: JSON.parse(encodedScope),
@@ -366,7 +461,7 @@ function createPendingAssignment(db, request = {}, options = {}) {
     const existing = db.prepare('SELECT * FROM assignments WHERE id = ?').get(assignmentId);
     if (existing) {
       const same = existing.project_id === project.project_id
-        && existing.worktree_id === project.worktree_id
+        && existing.worktree_id === targetWorktree.worktree_id
         && existing.agent_id === agentId
         && existing.task_id === taskId
         && existing.scope_json === encodedScope;
@@ -385,7 +480,7 @@ function createPendingAssignment(db, request = {}, options = {}) {
     `).run(
       assignmentId,
       project.project_id,
-      project.worktree_id,
+      targetWorktree.worktree_id,
       agentId,
       taskId,
       encodedScope,
@@ -396,10 +491,11 @@ function createPendingAssignment(db, request = {}, options = {}) {
       ok: true,
       assignmentId,
       projectId: project.project_id,
-      worktreeId: project.worktree_id,
-      canonicalPath: project.canonical_path,
-      repositoryIdentity: project.repository_identity,
-      worktreeIdentity: project.identity_fingerprint,
+      ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+      worktreeId: targetWorktree.worktree_id,
+      canonicalPath: targetWorktree.canonical_path,
+      repositoryIdentity: targetWorktree.repository_identity,
+      worktreeIdentity: targetWorktree.identity_fingerprint,
       agentId,
       taskId,
       scope: JSON.parse(encodedScope),
@@ -784,6 +880,7 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
           grantId,
           assignmentId: grant.assignment_id,
           projectId: grant.project_id,
+          ...(grant.space_id ? { spaceId: grant.space_id } : {}),
           worktreeId: grant.worktree_id,
           agentId: grant.agent_id,
           taskId: grant.task_id,
@@ -870,6 +967,7 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
       grantId,
       assignmentId: assignment.id,
       projectId: assignment.project_id,
+      ...(grant.space_id ? { spaceId: grant.space_id } : {}),
       worktreeId: assignment.worktree_id,
       canonicalPath: grant.canonical_path,
       repositoryIdentity: grant.repository_identity,
@@ -1353,10 +1451,13 @@ export function readSessionContext(db, sessionId) {
     SELECT assignments.*, projects.name AS project_name, projects.authorized_root,
            projects.stage AS project_stage,
            worktrees.canonical_path, worktrees.repository_identity,
-           worktrees.identity_fingerprint
+           worktrees.identity_fingerprint,
+           development_spaces.id AS space_id
     FROM assignments
     JOIN projects ON projects.id = assignments.project_id
     JOIN worktrees ON worktrees.id = assignments.worktree_id
+    LEFT JOIN development_spaces ON development_spaces.worktree_id = assignments.worktree_id
+      AND development_spaces.project_id = assignments.project_id
     WHERE assignments.session_id = ?
   `).get(sessionId);
   if (!assignment) return { ok: false, code: 'SESSION_NOT_FOUND', sessionId };
@@ -1424,10 +1525,13 @@ export function listAssignments(db, { projectId, status } = {}) {
     SELECT assignments.*, projects.name AS project_name,
            projects.stage AS project_stage, projects.authorized_root,
            worktrees.canonical_path, worktrees.repository_identity,
-           worktrees.identity_fingerprint
+           worktrees.identity_fingerprint,
+           development_spaces.id AS space_id
     FROM assignments
     JOIN projects ON projects.id = assignments.project_id
     JOIN worktrees ON worktrees.id = assignments.worktree_id
+    LEFT JOIN development_spaces ON development_spaces.worktree_id = assignments.worktree_id
+      AND development_spaces.project_id = assignments.project_id
     ${where}
     ORDER BY assignments.created_at ASC, assignments.id ASC
   `).all(...values).map(mapAssignment);
@@ -1456,11 +1560,14 @@ export function listDispatchGrants(db, { assignmentId, state } = {}) {
            projects.name AS project_name, projects.stage AS project_stage,
            projects.authorized_root,
            worktrees.canonical_path, worktrees.repository_identity,
-           worktrees.identity_fingerprint
+           worktrees.identity_fingerprint,
+           development_spaces.id AS space_id
     FROM dispatch_grants
     JOIN assignments ON assignments.id = dispatch_grants.assignment_id
     JOIN projects ON projects.id = dispatch_grants.project_id
     JOIN worktrees ON worktrees.id = dispatch_grants.worktree_id
+    LEFT JOIN development_spaces ON development_spaces.worktree_id = dispatch_grants.worktree_id
+      AND development_spaces.project_id = dispatch_grants.project_id
     ${where}
     ORDER BY dispatch_grants.created_at ASC, dispatch_grants.id ASC
   `).all(...values).map(mapGrant);

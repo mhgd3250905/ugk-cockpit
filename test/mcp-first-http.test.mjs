@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -336,4 +336,209 @@ test('handoff is atomic across manual, run, and assignment and retries idempoten
   assert.equal(finishedAssignment.status, 'completed');
   assert.equal(finishedAssignment.revision, progress.revision + 1);
   finalDb.close();
+});
+
+test('development space MCP init, progress, relay, and resume workflows bind correctly', async (t) => {
+  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-space-mcp-'));
+  const root = path.join(container, 'main-repo');
+  const spaceFolder = path.join(container, 'space-worktree');
+  execFileSync('git', ['init', '-b', 'main', '--quiet', root]);
+  writeFileSync(path.join(root, 'README.md'), '# Main Repo\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: root });
+  execFileSync('git', ['-c', 'user.name=UGK Test', '-c', 'user.email=ugk@example.invalid', 'commit', '--quiet', '-m', 'initial commit'], { cwd: root });
+  const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+  mkdirSync(spaceFolder, { recursive: true });
+
+  const dbPath = path.join(container, 'cockpit.db');
+  let currentSelectedFolder = null;
+  const folderPicker = async () => currentSelectedFolder;
+
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root, spaceFolder],
+    folderPicker,
+    createGitWorktree: async (repoPath, { targetPath, branch, baseCommit }) => {
+      execFileSync('git', ['worktree', 'add', '-b', branch, targetPath, baseCommit], {
+        cwd: repoPath,
+        windowsHide: true,
+        stdio: 'pipe',
+      });
+      return { ok: true, targetPath, branch, baseCommit };
+    },
+  });
+  t.after(async () => {
+    await service.close();
+    rmSync(container, { recursive: true, force: true });
+  });
+
+  // 1. Register main project
+  currentSelectedFolder = root;
+  const selectProjRes = await (await post(service, '/api/v1/folders/select', {})).json();
+  assert.equal(selectProjRes.ok, true);
+  const regProjRes = await (await post(service, '/api/v1/projects', {
+    commandId: 'reg-space-mcp-proj',
+    grantId: selectProjRes.grantId,
+    name: 'Space MCP Project',
+  })).json();
+  assert.equal(regProjRes.ok, true);
+  const projectId = regProjRes.projectId;
+
+  // 2. Select empty folder for development space
+  currentSelectedFolder = spaceFolder;
+  const selectEmptyRes = await (await post(service, '/api/v1/folders/select-empty', {})).json();
+  assert.equal(selectEmptyRes.ok, true);
+  assert.equal(selectEmptyRes.cancelled, false);
+  const emptyGrantId = selectEmptyRes.grantId;
+
+  // 3. Create development space
+  const createSpaceRes = await (await post(service, `/api/v1/projects/${projectId}/spaces`, {
+    commandId: 'create-space-mcp-cmd',
+    grantId: emptyGrantId,
+    expectedBaseHead: headCommit,
+    name: 'space-feature-mcp',
+  })).json();
+  assert.equal(createSpaceRes.ok, true);
+  const spaceId = createSpaceRes.spaceId;
+  const spaceWorktreeId = createSpaceRes.worktreeId;
+  assert.ok(spaceId);
+  assert.ok(spaceWorktreeId);
+
+  // 4. Create assignment targeting the space
+  const createAssignRes = await post(service, `/api/v1/projects/${projectId}/assignments`, {
+    clientRequestId: 'space-assign-req-1',
+    agent: 'Antigravity',
+    mode: 'init',
+    task: '开发空间任务',
+    spaceId,
+  });
+  assert.equal(createAssignRes.status, 201);
+  const assignResult = await createAssignRes.json();
+  assert.equal(assignResult.ok, true);
+  assert.equal(assignResult.spaceId, spaceId);
+  assert.equal(assignResult.worktreeId, spaceWorktreeId);
+
+  // 5. Reissue assignment with spaceId
+  const reissueRes = await post(service, `/api/v1/projects/${projectId}/assignments/reissue`, {
+    clientRequestId: 'space-reissue-req-1',
+    agent: 'Antigravity',
+    spaceId,
+  });
+  assert.equal(reissueRes.status, 200);
+  const reissued = await reissueRes.json();
+  assert.equal(reissued.ok, true);
+  assert.equal(reissued.spaceId, spaceId);
+  assert.equal(reissued.worktreeId, spaceWorktreeId);
+
+  const match = reissued.message.match(/initCode: "([^"]+)"/);
+  assert.ok(match);
+  const initCode = match[1];
+
+  // 6. Attempting MCP init from wrong working directory (main repo root instead of spaceFolder) -> rejected
+  const mismatchInitRes = await post(service, '/api/v1/mcp/work/init', {
+    initCode,
+    clientRequestId: 'mcp-init-wrong-dir',
+    currentTask: '开发空间任务',
+    currentState: '开始工作',
+    mcpWorkingDirectory: root,
+  });
+  assert.equal(mismatchInitRes.status, 409);
+  const mismatchErr = await mismatchInitRes.json();
+  assert.equal(mismatchErr.code, 'DISPATCH_GRANT_BINDING_MISMATCH');
+
+  // 7. MCP init from correct spaceFolder -> succeeds
+  const successInitRes = await post(service, '/api/v1/mcp/work/init', {
+    initCode,
+    clientRequestId: 'mcp-init-correct-dir',
+    currentTask: '开发空间任务',
+    currentState: '空间环境就绪，开始工作',
+    mcpWorkingDirectory: spaceFolder,
+  });
+  assert.equal(successInitRes.status, 200, await successInitRes.clone().text());
+  const initialized = await successInitRes.json();
+  assert.equal(initialized.status, 'active');
+  assert.equal(initialized.revision, 2);
+  const sessionId = initialized.sessionId;
+
+  // 8. MCP progress in development space
+  const progressRes = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId,
+    clientRequestId: 'space-prog-1',
+    expectedRevision: 2,
+    status: 'working',
+    summary: '开发空间进展汇报',
+    details: ['在开发空间工作副本修改文件'],
+  });
+  assert.equal(progressRes.status, 200);
+  const progress = await progressRes.json();
+  assert.equal(progress.revision, 3);
+
+  // 9. MCP relay in development space
+  const relayRes = await post(service, '/api/v1/mcp/work/relay', {
+    sessionId,
+    clientRequestId: 'space-relay-1',
+    expectedRevision: 3,
+    nextSessionFocus: '下一条会话继续空间开发',
+    summary: '空间阶段总结',
+    currentState: '就绪',
+    completedItems: ['已完成第一阶段'],
+    pendingItems: ['准备第二阶段'],
+    decisions: ['保持独立分支'],
+    artifactRefs: [],
+    risks: [],
+    suggestedSkills: [],
+  });
+  assert.equal(relayRes.status, 200);
+  const relay = await relayRes.json();
+  assert.ok(relay.continueCode);
+
+  // 10. MCP resume from spaceFolder
+  const resumeRes = await post(service, '/api/v1/mcp/work/resume', {
+    continueCode: relay.continueCode,
+    clientRequestId: 'space-resume-1',
+    mcpWorkingDirectory: spaceFolder,
+  });
+  assert.equal(resumeRes.status, 200);
+  const resumed = await resumeRes.json();
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.status, 'active');
+  assert.equal(resumed.worktreeId, spaceWorktreeId);
+
+  // 11. Verify main worktree assignments still work independently
+  const mainAssignRes = await post(service, `/api/v1/projects/${projectId}/assignments`, {
+    clientRequestId: 'main-assign-req-1',
+    agent: 'ZCode',
+    mode: 'init',
+    task: '主分支独立任务',
+  });
+  assert.equal(mainAssignRes.status, 201);
+  const mainAssign = await mainAssignRes.json();
+  assert.equal(mainAssign.spaceId, null);
+  assert.equal(mainAssign.canonicalPath, root);
+
+  const mainReissueRes = await post(service, `/api/v1/projects/${projectId}/assignments/reissue`, {
+    clientRequestId: 'main-reissue-req-1',
+    agent: 'ZCode',
+  });
+  assert.equal(mainReissueRes.status, 200);
+  const mainReissued = await mainReissueRes.json();
+  assert.equal(mainReissued.spaceId, null);
+  assert.equal(mainReissued.worktreeId, mainAssign.worktreeId);
+
+  const mainMatch = mainReissued.message.match(/initCode: "([^"]+)"/);
+  assert.ok(mainMatch);
+  const mainInitCode = mainMatch[1];
+
+  const mainInitRes = await post(service, '/api/v1/mcp/work/init', {
+    initCode: mainInitCode,
+    clientRequestId: 'main-mcp-init',
+    currentTask: '主分支独立任务',
+    currentState: '主分支开始',
+    mcpWorkingDirectory: root,
+  });
+  assert.equal(mainInitRes.status, 200);
+  const mainInitialized = await mainInitRes.json();
+  assert.equal(mainInitialized.status, 'active');
+  assert.notEqual(mainInitialized.sessionId, sessionId);
 });

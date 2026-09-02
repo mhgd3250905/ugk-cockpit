@@ -65,6 +65,16 @@ function hasGitMarker(targetPath) {
   return existsSync(path.join(targetPath, '.git'));
 }
 
+function pathsOverlap(left, right) {
+  const leftPath = path.resolve(left);
+  const rightPath = path.resolve(right);
+  const leftToRight = path.relative(leftPath, rightPath);
+  const rightToLeft = path.relative(rightPath, leftPath);
+  const isWithin = (relative) => relative === ''
+    || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return isWithin(leftToRight) || isWithin(rightToLeft);
+}
+
 function failCommand(db, commandId, response) {
   if (!commandId) return response;
   db.prepare(`
@@ -376,6 +386,24 @@ export async function createDevelopmentWorkspace(db, request = {}, options = {})
         message: `Expected base HEAD ${expectedBaseHead} does not match current repository HEAD ${mainObservation.after.head}.`,
         currentHead: mainObservation.after.head,
         expectedBaseHead,
+      };
+      failCommand(db, commandId, res);
+      grantStore.unclaim(grantId, commandId);
+      return res;
+    }
+
+    const overlappingWorktree = db.prepare(`
+      SELECT id, canonical_path
+      FROM worktrees
+      WHERE repository_identity = ?
+    `).all(repositoryIdentity).find((row) => pathsOverlap(row.canonical_path, targetPath));
+    if (overlappingWorktree) {
+      const res = {
+        ok: false,
+        code: 'WORKTREE_PATH_OVERLAP',
+        message: '目标目录不能位于现有工作副本内部，也不能包含现有工作副本。',
+        targetPath,
+        conflictingWorktreeId: overlappingWorktree.id,
       };
       failCommand(db, commandId, res);
       grantStore.unclaim(grantId, commandId);

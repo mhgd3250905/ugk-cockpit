@@ -14,12 +14,19 @@ import {
   reassignPendingAssignment,
   recordProgress,
 } from '../core/assignments.mjs';
-import { FolderGrantStore } from '../core/folder-grants.mjs';
+import { FolderGrantStore, EmptyFolderGrantStore } from '../core/folder-grants.mjs';
 import { createHandoff, readLatestHandoff } from '../core/handoffs.mjs';
 import { createRelay, resumeRelay } from '../core/relays.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
-import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
+import {
+  authorizeEmptyDirectory,
+  authorizeExistingPath,
+  revalidateAuthorizedPath,
+  revalidateEmptyDirectory,
+} from '../core/path-guard.mjs';
 import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
+import { readDevelopmentSpace } from '../core/spaces.mjs';
+import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
@@ -239,6 +246,30 @@ const PUBLIC_ERRORS = {
     impact: '没有启动第二条写入会话，已有工作记录保持不变。',
     requiredAction: '请回到 Cockpit 查看当前接手者；接管必须由你确认。',
   },
+  DISPATCH_GRANT_BINDING_MISMATCH: {
+    status: 409,
+    message: '当前 AI 会话所在的代码位置与接手记录不一致。',
+    impact: '没有接手任务，也没有修改代码或项目绑定。',
+    requiredAction: '请在正确的项目或开发空间文件夹中重试。',
+  },
+  DISPATCH_GRANT_BINDING_INVALID: {
+    status: 409,
+    message: '接手记录中的代码位置或绑定信息已失效。',
+    impact: '没有接手任务，也没有修改代码。',
+    requiredAction: '请在项目页重新发起分配并复制新消息。',
+  },
+  SESSION_ALREADY_BOUND: {
+    status: 409,
+    message: '这次 AI 会话已经绑定到了另一项任务。',
+    impact: '没有覆盖已有会话，也没有修改代码。',
+    requiredAction: '请使用新的会话编号或重新开始。',
+  },
+  SESSION_BINDING_MISMATCH: {
+    status: 409,
+    message: '这次 AI 会话绑定的工作副本不匹配。',
+    impact: '没有执行操作，也没有修改代码。',
+    requiredAction: '请确认在正确的代码位置执行。',
+  },
   ASSIGNMENT_REVISION_CONFLICT: {
     status: 409,
     message: '这项任务已经有更新的进展。',
@@ -310,6 +341,144 @@ const PUBLIC_ERRORS = {
     message: '接力码有效期超过安全上限。',
     impact: '没有创建接力，也没有修改代码。',
     requiredAction: '请使用较短的有效期后重试。',
+  },
+  DIRECTORY_NOT_EMPTY: {
+    status: 400,
+    message: '所选文件夹不是空目录。',
+    impact: '没有创建开发空间，也没有修改或删除该文件夹中的任何文件。',
+    requiredAction: '请选择一个全新的完全空文件夹。',
+  },
+  NOT_A_DIRECTORY: {
+    status: 400,
+    message: '所选路径不是文件夹。',
+    impact: '没有创建开发空间，也没有修改任何文件。',
+    requiredAction: '请选择一个有效的文件夹。',
+  },
+  DIRECTORY_IDENTITY_CHANGED: {
+    status: 409,
+    message: '所选文件夹身份在确认后发生变化。',
+    impact: '已停止创建，没有修改任何文件。',
+    requiredAction: '请重新选择空文件夹并确认。',
+  },
+  DIRECTORY_VERIFICATION_FAILED: {
+    status: 400,
+    message: '所选空文件夹核验失败。',
+    impact: '没有创建开发空间，也没有修改任何文件。',
+    requiredAction: '请重新选择空文件夹并确认。',
+  },
+  WORKTREE_NOT_FOUND: {
+    status: 404,
+    message: '找不到指定的工作副本或开发空间。',
+    impact: '没有创建任务，也没有修改代码。',
+    requiredAction: '请检查工作副本记录或开发空间状态。',
+  },
+  SPACE_NOT_FOUND: {
+    status: 404,
+    message: '找不到这个开发空间。',
+    impact: '没有创建任务，也没有修改代码。',
+    requiredAction: '请刷新项目页，确认开发空间仍存在。',
+  },
+  SPACE_ID_CONFLICT: {
+    status: 409,
+    message: '该开发空间标识已存在。',
+    impact: '没有重复创建开发空间，也没有修改已有记录。',
+    requiredAction: '请刷新页面后重试。',
+  },
+  WORKTREE_ALREADY_IN_USE: {
+    status: 409,
+    message: '该工作副本已绑定到另一个开发空间。',
+    impact: '没有重复创建开发空间，也没有修改已有记录。',
+    requiredAction: '请选择一个独立的工作副本或空目录。',
+  },
+  WORKTREE_BINDING_MISMATCH: {
+    status: 409,
+    message: '所选工作副本与项目或空间绑定不匹配。',
+    impact: '没有分配任务，也没有修改代码。',
+    requiredAction: '请确认工作副本属于当前项目且属于有效未归档开发空间。',
+  },
+  BASE_HEAD_STALE: {
+    status: 409,
+    message: '代码库状态刚刚发生了变化，当前基础版本与预期不一致。',
+    impact: '没有创建新的开发空间，也没有修改代码。',
+    requiredAction: '请刷新项目状态后重试。',
+  },
+  REPOSITORY_LOCKED: {
+    status: 503,
+    message: '代码仓库正在被另一项操作占用。',
+    impact: '本次操作没有执行，代码没有被修改。',
+    requiredAction: '请稍等片刻后重试。',
+  },
+  BRANCH_ALREADY_EXISTS: {
+    status: 409,
+    message: '该分支名称在代码仓库中已存在。',
+    impact: '没有创建开发空间，也没有修改已有分支。',
+    requiredAction: '请使用新的操作编号或选择不同的分支名称。',
+  },
+  WORKTREE_RECOVERY_UNCERTAIN: {
+    status: 409,
+    message: '目标目录状态需要人工确认，无法自动判定归属。',
+    impact: '没有删除任何已有文件或工作副本。',
+    requiredAction: '请检查目标目录中的 Git 状态，确认后再试。',
+  },
+  MAIN_WORKTREE_INVALID: {
+    status: 409,
+    message: '主工作副本状态不符合预期。',
+    impact: '没有创建开发空间，也没有修改代码。',
+    requiredAction: '请检查主工作副本路径与配置。',
+  },
+  MAIN_WORKTREE_INCOHERENT: {
+    status: 409,
+    message: '主工作副本代码正在变动中。',
+    impact: '没有创建开发空间，也没有修改代码。',
+    requiredAction: '请等待改动完成或刷新后重试。',
+  },
+  REPOSITORY_IDENTITY_MISMATCH: {
+    status: 409,
+    message: '工作副本与项目的代码仓库身份不一致。',
+    impact: '没有绑定工作副本，也没有修改代码。',
+    requiredAction: '请确认所选文件夹属于同一个代码仓库。',
+  },
+  FOLDER_GRANT_CONSUMED: {
+    status: 409,
+    message: '这次文件夹授权已经被使用。',
+    impact: '没有重复创建开发空间，也没有修改文件。',
+    requiredAction: '请重新选择空目录。',
+  },
+  BRANCH_CHECK_FAILED: {
+    status: 503,
+    message: '暂时无法确认新分支是否可用。',
+    impact: '没有创建开发空间，也没有修改代码。',
+    requiredAction: '请稍后重试；如果持续失败，请检查本机 Git 状态。',
+  },
+  GIT_WORKTREE_ADD_FAILED: {
+    status: 409,
+    message: 'Git 未能创建新的开发空间。',
+    impact: '平台没有清理或覆盖目标目录；现有代码保持不变。',
+    requiredAction: '请检查提示中的目标目录和 Git 状态，再使用新的操作重试。',
+  },
+  PROBE_FAILED: {
+    status: 503,
+    message: '暂时无法核验项目代码状态。',
+    impact: '没有创建开发空间，也没有修改代码。',
+    requiredAction: '请确认项目文件夹可访问后重试。',
+  },
+  WORKTREE_REGISTRATION_CONFLICT: {
+    status: 409,
+    message: '新工作副本与已有平台记录冲突。',
+    impact: '平台没有覆盖已有记录，也没有清理目标目录。',
+    requiredAction: '请在高级详情中核对代码位置，然后人工决定如何处理。',
+  },
+  SPACE_REGISTRATION_CONFLICT: {
+    status: 409,
+    message: '开发空间与已有平台记录冲突。',
+    impact: '平台没有覆盖已有空间，也没有清理目标目录。',
+    requiredAction: '请刷新项目页并核对该开发空间。',
+  },
+  WORKTREE_PATH_OVERLAP: {
+    status: 409,
+    message: '新开发空间不能放在现有工作副本内部。',
+    impact: '没有创建分支或开发空间，也没有修改现有代码。',
+    requiredAction: '请选择与现有项目代码位置并列或完全独立的空文件夹。',
   },
 };
 
@@ -440,6 +609,11 @@ function validateAssignmentBody(body) {
   requireString(body, 'agent');
   requireString(body, 'mode');
   if (body.mode === 'task') requireString(body, 'task');
+  if (body.spaceId !== undefined && (typeof body.spaceId !== 'string' || !body.spaceId.trim())) {
+    const error = new Error('Invalid spaceId');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
   if (!['Codex', 'ZCode', 'Antigravity'].includes(body.agent)
     || !['handoff', 'task', 'init'].includes(body.mode)
     || (body.task !== undefined && (typeof body.task !== 'string' || body.task.length > 1000))) {
@@ -770,12 +944,16 @@ export async function createCockpitHttpServer({
   probe = probeGitWorktree,
   folderPicker = selectFolder,
   folderGrants = null,
+  emptyFolderGrants = null,
   webRoot = DEFAULT_WEB_ROOT,
   faultInjector,
+  createGitWorktree,
+  checkBranchExists,
 }) {
   if (!token || token.length < 32) throw new Error('A local API token of at least 32 characters is required.');
   const db = openCockpitDatabase(dbPath);
   const activeFolderGrants = folderGrants ?? new FolderGrantStore({ db });
+  const activeEmptyFolderGrants = emptyFolderGrants ?? new EmptyFolderGrantStore({ db });
   const browserSessionToken = randomBytes(32).toString('base64url');
   const mcpSessions = new Map();
 
@@ -812,6 +990,22 @@ export async function createCockpitHttpServer({
     };
   }
 
+  async function prepareEmptyFolderSelection(selectedPath, principalHash) {
+    if (!selectedPath) return { ok: true, cancelled: true };
+    const binding = authorizeEmptyDirectory(selectedPath, selectedPath);
+    revalidateEmptyDirectory(binding);
+    const grant = activeEmptyFolderGrants.issue(binding, principalHash);
+    return {
+      ok: true,
+      cancelled: false,
+      grantId: grant.grantId,
+      folderName: path.basename(binding.candidateReal),
+      folderPath: binding.candidateReal,
+      expiresAt: grant.expiresAt,
+      promise: '只在空目录中创建托管开发空间；不会清理、覆盖、提交、上传或删除其他文件。',
+    };
+  }
+
   async function observeRegisteredProject(projectId, expected = null) {
     const project = readProjectContext(db, projectId);
     if (!project) {
@@ -819,29 +1013,63 @@ export async function createCockpitHttpServer({
       error.code = 'PROJECT_NOT_FOUND';
       throw error;
     }
-    const binding = authorizeExistingPath(project.canonical_path, project.authorized_root);
+    const targetWorktreeId = expected?.worktreeId ?? project.worktree_id;
+    let authorizedRoot;
+    let expectedCanonicalPath;
+    let expectedWorktreeIdentity;
+    let spaceRow = null;
+
+    if (targetWorktreeId === project.worktree_id) {
+      authorizedRoot = project.authorized_root;
+      expectedCanonicalPath = project.canonical_path;
+      expectedWorktreeIdentity = project.identity_fingerprint;
+    } else {
+      spaceRow = db.prepare(`
+        SELECT development_spaces.*,
+               worktrees.canonical_path, worktrees.repository_identity,
+               worktrees.identity_fingerprint
+        FROM development_spaces
+        JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+        WHERE development_spaces.worktree_id = ? AND development_spaces.project_id = ?
+      `).get(targetWorktreeId, projectId);
+      if (!spaceRow) {
+        const error = new Error('Development space worktree not found.');
+        error.code = 'WORKTREE_NOT_FOUND';
+        throw error;
+      }
+      if (spaceRow.status === 'archived') {
+        const error = new Error('Development space is archived.');
+        error.code = 'WORKTREE_NOT_FOUND';
+        throw error;
+      }
+      authorizedRoot = spaceRow.canonical_path;
+      expectedCanonicalPath = spaceRow.canonical_path;
+      expectedWorktreeIdentity = spaceRow.identity_fingerprint;
+    }
+
+    const binding = authorizeExistingPath(expectedCanonicalPath, authorizedRoot);
     const observation = await probe(
       binding.candidateReal,
       expected?.baselineHead ? { expectedBaselineHead: expected.baselineHead } : undefined,
     );
     revalidateAuthorizedPath(binding);
-    authorizeObservation(observation, [project.authorized_root]);
+    authorizeObservation(observation, [authorizedRoot, project.authorized_root]);
     if (
-      observation.canonicalPath !== project.canonical_path
+      observation.canonicalPath !== expectedCanonicalPath
       || observation.repositoryIdentity !== project.repository_identity
-      || observation.worktreeIdentity !== project.identity_fingerprint
+      || observation.worktreeIdentity !== expectedWorktreeIdentity
       || (expected && (
-        expected.projectId !== project.id
-        || expected.worktreeId !== project.worktree_id
-        || expected.repositoryIdentity !== project.repository_identity
-        || expected.worktreeIdentity !== project.identity_fingerprint
+        (expected.projectId && expected.projectId !== project.id)
+        || (expected.worktreeId && expected.worktreeId !== targetWorktreeId)
+        || (expected.repositoryIdentity && expected.repositoryIdentity !== project.repository_identity)
+        || (expected.worktreeIdentity && expected.worktreeIdentity !== expectedWorktreeIdentity)
       ))
     ) {
-      const error = new Error('Registered project identity changed.');
+      const error = new Error('Registered project or space identity changed.');
       error.code = 'WORKTREE_IDENTITY_CHANGED';
       throw error;
     }
-    return { project, observation };
+    return { project, space: spaceRow, observation, worktreeId: targetWorktreeId };
   }
 
   async function resolveMcpWorkingProject(workingDirectory) {
@@ -851,16 +1079,23 @@ export async function createCockpitHttpServer({
       throw error;
     }
     const candidates = db.prepare(`
-      SELECT projects.id, worktrees.canonical_path
-      FROM projects
-      JOIN worktrees ON worktrees.id = projects.worktree_id
-      ORDER BY length(worktrees.canonical_path) DESC
+      SELECT * FROM (
+        SELECT projects.id AS project_id, projects.worktree_id AS worktree_id, worktrees.canonical_path AS canonical_path
+        FROM projects
+        JOIN worktrees ON worktrees.id = projects.worktree_id
+        UNION ALL
+        SELECT development_spaces.project_id AS project_id, development_spaces.worktree_id AS worktree_id, worktrees.canonical_path AS canonical_path
+        FROM development_spaces
+        JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+        WHERE development_spaces.status != 'archived'
+      )
+      ORDER BY length(canonical_path) DESC
     `).all();
     for (const candidate of candidates) {
       try {
         const binding = authorizeExistingPath(workingDirectory, candidate.canonical_path);
         revalidateAuthorizedPath(binding);
-        return observeRegisteredProject(candidate.id);
+        return observeRegisteredProject(candidate.project_id, { worktreeId: candidate.worktree_id });
       } catch (error) {
         if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(error?.code)) continue;
         throw error;
@@ -967,6 +1202,15 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      if (request.method === 'POST' && (
+        url.pathname === '/api/v1/folders/select-empty'
+        || (url.pathname === '/api/v1/folders/select' && (url.searchParams.get('type') === 'empty' || url.searchParams.get('mode') === 'empty'))
+      )) {
+        const selectedPath = await folderPicker();
+        sendJson(response, 200, await prepareEmptyFolderSelection(selectedPath, authentication.principalHash));
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/v1/folders/select') {
         const selectedPath = await folderPicker();
         sendJson(response, 200, await prepareFolderSelection(selectedPath, authentication.principalHash));
@@ -1040,6 +1284,73 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      const projectSpacesMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/spaces$/);
+      if (request.method === 'GET' && projectSpacesMatch) {
+        const projectId = decodeURIComponent(projectSpacesMatch[1]);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const status = url.searchParams.get('status') || undefined;
+        const spaces = listDevelopmentWorkspaces(db, { projectId, status });
+        sendJson(response, 200, {
+          ok: true,
+          projectId,
+          spaces,
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && projectSpacesMatch) {
+        const projectId = decodeURIComponent(projectSpacesMatch[1]);
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        requireString(body, 'grantId');
+        requireString(body, 'expectedBaseHead');
+        if (body.name !== undefined && (typeof body.name !== 'string' || !body.name.trim())) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const allowedKeys = new Set(['commandId', 'grantId', 'expectedBaseHead', 'name']);
+        for (const key of Object.keys(body)) {
+          if (!allowedKeys.has(key)) {
+            sendError(response, 'INVALID_REQUEST');
+            return;
+          }
+        }
+        const existingCmd = readCommand(db, body.commandId);
+        const isReplay = existingCmd?.kind === 'workspace.create' && ['committed', 'failed'].includes(existingCmd.state);
+        const result = await createDevelopmentWorkspace(db, {
+          commandId: body.commandId,
+          projectId,
+          grantId: body.grantId,
+          expectedBaseHead: body.expectedBaseHead,
+          name: body.name?.trim() || '',
+          principalHash: authentication.principalHash,
+        }, {
+          probe,
+          createGitWorktree,
+          checkBranchExists,
+          grantStore: activeEmptyFolderGrants,
+        });
+        if (result.ok) {
+          sendJson(response, (isReplay || result.alreadyExists) ? 200 : 201, {
+            ...result,
+            ...(isReplay ? { alreadyExists: true } : {}),
+          });
+        } else {
+          sendError(response, result.code, {
+            commandId: body.commandId,
+            extra: {
+              space_id: result.spaceId ?? null,
+              worktree_id: result.worktreeId ?? null,
+            },
+          });
+        }
+        return;
+      }
+
       const projectDetailMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
       if (request.method === 'GET' && projectDetailMatch) {
         const projectId = decodeURIComponent(projectDetailMatch[1]);
@@ -1083,11 +1394,22 @@ export async function createCockpitHttpServer({
         const projectId = decodeURIComponent(assignmentMatch[1]);
         const body = await readJson(request);
         validateAssignmentBody(body);
-        await observeRegisteredProject(projectId);
-        const assignmentId = id('assignment', `${projectId}:${body.clientRequestId}`);
-        const grantId = id('dispatch', `${projectId}:${body.clientRequestId}`);
+        let targetWorktreeId;
+        let targetSpace = null;
+        if (body.spaceId) {
+          targetSpace = readDevelopmentSpace(db, body.spaceId);
+          if (!targetSpace || targetSpace.projectId !== projectId || targetSpace.status === 'archived') {
+            sendError(response, 'WORKTREE_BINDING_MISMATCH');
+            return;
+          }
+          targetWorktreeId = targetSpace.worktreeId;
+        }
+        await observeRegisteredProject(projectId, targetWorktreeId ? { worktreeId: targetWorktreeId } : undefined);
+        const seedScope = body.spaceId ? `${projectId}:${body.spaceId}` : projectId;
+        const assignmentId = id('assignment', `${seedScope}:${body.clientRequestId}`);
+        const grantId = id('dispatch', `${seedScope}:${body.clientRequestId}`);
         const dispatchCode = createHmac('sha256', token)
-          .update(`dispatch:${projectId}:${body.clientRequestId}`)
+          .update(`dispatch:${seedScope}:${body.clientRequestId}`)
           .digest('base64url');
         const task = body.mode === 'handoff'
           ? '读取最后一次交接并等待用户安排'
@@ -1095,10 +1417,12 @@ export async function createCockpitHttpServer({
             ? (body.task?.trim() || '接入项目并继续当前对话中的工作')
             : body.task.trim());
         const result = createAssignment(db, {
-          commandId: id('assignment_create', `${projectId}:${body.clientRequestId}`),
+          commandId: id('assignment_create', `${seedScope}:${body.clientRequestId}`),
           assignmentId,
           grantId,
           projectId,
+          ...(body.spaceId ? { spaceId: body.spaceId } : {}),
+          ...(targetWorktreeId ? { worktreeId: targetWorktreeId } : {}),
           agentId: body.agent,
           taskId: task,
           scope: {
@@ -1121,6 +1445,10 @@ export async function createCockpitHttpServer({
         sendJson(response, 201, {
           ok: true,
           assignmentId,
+          projectId,
+          spaceId: result.spaceId ?? body.spaceId ?? null,
+          worktreeId: result.worktreeId,
+          canonicalPath: result.canonicalPath,
           agent: body.agent,
           mode: body.mode,
           task,
@@ -1144,12 +1472,36 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
-        await observeRegisteredProject(projectId);
-        const pendingAssignments = db.prepare(`
+        if (body.spaceId !== undefined && (typeof body.spaceId !== 'string' || !body.spaceId.trim())) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+
+        let targetWorktreeId;
+        let targetSpace = null;
+        if (body.spaceId) {
+          targetSpace = readDevelopmentSpace(db, body.spaceId);
+          if (!targetSpace || targetSpace.projectId !== projectId || targetSpace.status === 'archived') {
+            sendError(response, 'NOT_FOUND');
+            return;
+          }
+          targetWorktreeId = targetSpace.worktreeId;
+        }
+
+        const observedTarget = await observeRegisteredProject(
+          projectId,
+          targetWorktreeId ? { worktreeId: targetWorktreeId } : undefined,
+        );
+        targetWorktreeId = observedTarget.worktreeId;
+
+        let sql = `
           SELECT * FROM assignments
-          WHERE project_id = ? AND status = 'pending'
-          ORDER BY created_at DESC, id DESC
-        `).all(projectId);
+          WHERE project_id = ? AND worktree_id = ? AND status = 'pending'
+        `;
+        const params = [projectId, targetWorktreeId];
+        sql += ' ORDER BY created_at DESC, id DESC';
+
+        const pendingAssignments = db.prepare(sql).all(...params);
         const assignment = pendingAssignments.find((row) => {
           try {
             return JSON.parse(row.scope_json).mode === 'adopt';
@@ -1189,6 +1541,9 @@ export async function createCockpitHttpServer({
           ok: true,
           reissued: true,
           assignmentId: assignment.id,
+          projectId,
+          spaceId: targetSpace?.id ?? grant.spaceId ?? null,
+          worktreeId: assignment.worktree_id,
           agent: assignment.agent_id,
           mode: 'init',
           task: assignment.task_id,
@@ -1348,7 +1703,7 @@ export async function createCockpitHttpServer({
         }
         const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
         if (working.project.id !== context.projectId
-          || working.project.worktree_id !== context.worktreeId) {
+          || working.worktreeId !== context.worktreeId) {
           sendError(response, 'DISPATCH_GRANT_BINDING_MISMATCH');
           return;
         }
@@ -1464,7 +1819,7 @@ export async function createCockpitHttpServer({
         const result = resumeRelay(db, {
           ...body,
           projectId: working.project.id,
-          worktreeId: working.project.worktree_id,
+          worktreeId: working.worktreeId,
           canonicalPath: working.observation.canonicalPath,
           repositoryIdentity: working.observation.repositoryIdentity,
           worktreeIdentity: working.observation.worktreeIdentity,
