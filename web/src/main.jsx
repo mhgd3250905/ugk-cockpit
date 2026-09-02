@@ -67,6 +67,37 @@ const TIMELINE_KINDS = {
   handoff: { code: 'HANDOFF', label: '阶段交接' },
 };
 
+const THEME_OPTIONS = [
+  { mode: 'light', label: '亮色', icon: SunIcon },
+  { mode: 'dark', label: '暗色', icon: MoonIcon },
+  { mode: 'system', label: '跟随系统', icon: SystemIcon },
+];
+
+const THEME_STORAGE_KEY = 'ugk-cockpit-theme';
+
+function useTheme() {
+  const [mode, setMode] = useState(() => {
+    if (typeof window !== 'undefined' && typeof window.__ugkGetThemeMode === 'function') {
+      return window.__ugkGetThemeMode();
+    }
+    try {
+      const stored = localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
+    } catch {
+      // Storage unavailable: default to dark.
+    }
+    return 'dark';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && typeof window.__ugkSetTheme === 'function') {
+      window.__ugkSetTheme(mode);
+    }
+  }, [mode]);
+
+  return [mode, setMode];
+}
+
 const api = createApiClient({
   fetchImpl: (...args) => fetch(...args),
   storage: localStorage,
@@ -86,6 +117,80 @@ function formatTime(value) {
   } catch {
     return String(value);
   }
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M19.1 4.9l-1.5 1.5M6.4 17.6l-1.5 1.5" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
+    </svg>
+  );
+}
+
+function SystemIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="4" width="20" height="13" rx="2" />
+      <path d="M8 21h8M12 17v4" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+      <path d="M20 4v7h-7" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function LogoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 17V7l8 10V7" />
+      <path d="M18 17h3" />
+    </svg>
+  );
+}
+
+function ThemeSwitch({ mode, onChange }) {
+  return (
+    <div className="theme-switch" role="group" aria-label="界面主题">
+      {THEME_OPTIONS.map((option) => {
+        const Icon = option.icon;
+        return (
+          <button
+            key={option.mode}
+            type="button"
+            className="theme-switch-btn"
+            aria-pressed={mode === option.mode}
+            onClick={() => onChange(option.mode)}
+          >
+            <Icon />
+            <span>{option.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function calculateRefreshLimit(currentCount) {
@@ -274,6 +379,7 @@ function App() {
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
   const [projectDetail, setProjectDetail] = useState(null);
+  const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
   const projectDetailRef = useRef(projectDetail);
   const activeDetailProjectId = projectDetail?.seed?.id ?? null;
@@ -638,14 +744,15 @@ function App() {
         <div className="header-main-row">
           <div className="brand-zone">
             <div className="brand-title-wrap">
-              <span className="brand-mark" aria-hidden="true">■</span>
+              <span className="brand-mark" aria-hidden="true"><LogoIcon /></span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha.22</span>
+              <span className="badge badge-version">{__APP_VERSION__}</span>
             </div>
-            <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
+            <p className="brand-tagline">本机 AI 项目控制台</p>
           </div>
 
           <div className="header-actions">
+            <ThemeSwitch mode={themeMode} onChange={setThemeMode} />
             <button
               type="button"
               className="btn btn-secondary btn-sm"
@@ -653,7 +760,7 @@ function App() {
               disabled={busy}
               title="重新加载简报数据"
             >
-              <span className="btn-icon" aria-hidden="true">↻</span> 重新加载简报
+              <span className="btn-icon" aria-hidden="true"><RefreshIcon /></span> 重新加载简报
             </button>
             <button
               type="button"
@@ -661,7 +768,7 @@ function App() {
               onClick={() => chooseFolder()}
               disabled={busy}
             >
-              <span className="btn-icon" aria-hidden="true">＋</span> 选择项目文件夹
+              <span className="btn-icon" aria-hidden="true"><PlusIcon /></span> 选择项目文件夹
             </button>
           </div>
         </div>
@@ -717,13 +824,6 @@ function App() {
         ) : (
           groups.length > 0 && (
             <section className="projects-section" aria-label="项目矩阵">
-              <div className="section-toolbar">
-                <h2 className="section-heading">全部项目</h2>
-                <span className="section-subtitle">
-                  共 {projects.length} 个项目 · 按状态分组
-                </span>
-              </div>
-
               <div className="groups-container">
                 {groups.map((group) => (
                   <div key={group.key} className="status-group">
@@ -869,31 +969,29 @@ function ProjectCard({ project, onAction, onOpen }) {
   const confirmedAt = project.activeWork?.lastProgress?.createdAt
     ?? project.activeWork?.lastActivityAt
     ?? project.lastObservedAt;
+  const showStage = project.stage && project.stage !== 'development';
 
   return (
-    <article className={`project-item-card status-theme-${theme}`}>
+    <article className={`project-card status-${theme}`}>
       <button
         type="button"
-        className="project-card-open"
+        className="card-open"
         onClick={() => onOpen(project)}
         aria-label={`查看 ${project.name} 的运行详情`}
       >
-        <div className="card-topline">
-          <div className="card-badges">
-            <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
-            <span className="badge badge-status">{copy.eyebrow}</span>
-          </div>
+        <div className="card-eyebrow">
+          <span className="card-status-badge">{copy.eyebrow}</span>
           <time className="card-time">{formatTime(confirmedAt)}</time>
         </div>
 
         <h4 className="card-name">{project.name}</h4>
-        <div className="card-status-title">{copy.title}</div>
-        <p className="card-status-desc">{copy.detail}</p>
-        <span className="card-detail-hint">查看运行详情 <span aria-hidden="true">→</span></span>
+        {showStage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
+        <p className="card-what">{copy.title}</p>
+        <p className="card-impact">{copy.detail}</p>
       </button>
 
-      <div className="card-actions-row">
-        <span className="card-agent">{agent ? `当前 AI · ${agent}` : '当前没有 AI 会话'}</span>
+      <footer className="card-foot">
+        <span className="card-agent">{agent ? `${agent}` : '暂无 AI 会话'}</span>
         {isDisabled ? (
           <span className="read-only-action">{actionLabel}</span>
         ) : (
@@ -908,7 +1006,7 @@ function ProjectCard({ project, onAction, onOpen }) {
             {actionLabel}
           </button>
         )}
-      </div>
+      </footer>
     </article>
   );
 }
@@ -937,7 +1035,7 @@ function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder }) {
     >
       <section
         ref={modalRef}
-        className={`project-detail-dialog status-theme-${getProjectTheme(project)}`}
+        className={`project-detail-dialog status-${getProjectTheme(project)}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-detail-title"
@@ -1144,7 +1242,7 @@ function TimelineNode({ item, index }) {
             </span>
           )}
           {item.kind === 'handoff' && (
-            <span className="handoff-status-chip handoff-status-completed">阶段已交接</span>
+            <span className="handoff-status-chip">阶段已交接</span>
           )}
         </div>
 

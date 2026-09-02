@@ -1,8 +1,9 @@
 # UGK Cockpit 前端设计系统规范
 
 - **设计定位**：本机控制台 · Mission Control Product UI
-- **视觉风格**：温暖克制的本地工具界面，强调真实状态、清晰行动和代码安全
+- **视觉风格**：深色优先的暖中性控制台，强调真实状态、清晰行动和代码安全
 - **基准标准**：WCAG 2.2 AA / Responsive Fluid Grid / Zero-Dependency Web
+- **主题**：默认深色，提供亮色，并支持跟随系统；由用户手动选择并持久化
 
 ## 1. 信息架构
 
@@ -20,40 +21,87 @@ Mission Control Shell
 
 ## 2. 颜色与 Design Tokens
 
-采用暖中性画布、深墨蓝文字与深橙关键动作。各项目卡片根据行动状态使用清晰但克制的状态背景色与左侧边框强调，不采用置顶大卡，确保每个项目恰好出现一次。
+采用暖中性画布、单一安全橙强调。**深色为默认主题**，亮色主题通过 `<html data-theme="light">` 覆盖同名令牌。
+
+组件一律**只引用语义令牌**，不出现硬编码色值——这是双主题能保持一致的前提。
 
 ```css
 :root {
-  --bg-app: #f5f2ec;
-  --bg-card: #fffdf9;
-  --bg-subtle: #f1ece4;
-  --bg-muted: #e7e0d5;
-  --border-subtle: #e1d8ca;
-  --border-strong: #cbbdab;
-  --ink-primary: #172033;
+  /* 深色（默认） */
+  --surface-app: #14120f;
+  --surface-card: #1c1917;
+  --surface-raised: #252220;
+  --surface-sunken: #0f0e0c;
+  --border-subtle: #322d29;
+  --border-card: #3f3833;
+  --border-control: #72685f;
+  --ink-primary: #f2efe9;
+  --ink-secondary: #d8d3cb;
+  --ink-muted: #a8a29e;
+  --ink-faint: #948d85;
+  --accent: #f97316;
+  --accent-hover: #fb923c;
+  --accent-text: #fb923c;
+  --accent-ink: #1c1105;
+  --accent-soft: #2b1a0e;
+  --accent-soft-border: #7c4a1d;
+  --state-attention-bg: #2b1a0e;  --state-attention-border: #7c4a1d;  --state-attention-text: #fb923c;
+  --state-active-bg: #10241d;      --state-active-border: #2f6b52;      --state-active-text: #34d399;
+  --state-ready-bg: #2a2410;       --state-ready-border: #6b5a1e;       --state-ready-text: #facc15;
+  --state-paused-bg: #22201e;      --state-paused-border: #45403c;      --state-paused-text: #b8b2ab;
+}
+
+:root[data-theme="light"] {
+  --surface-app: #f5f2ec;
+  --surface-card: #fffdf9;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f1ece4;
+  --border-subtle: #e3dbce;
+  --border-card: #d8cec0;
+  --border-control: #8a8177;
+  --ink-primary: #17202e;
   --ink-secondary: #374151;
-  --ink-muted: #5f6875;
-  --accent-primary: #c2410c;
+  --ink-muted: #5b6472;
+  --ink-faint: #6b7482;
+  --accent: #c2410c;
   --accent-hover: #9a3412;
-  --accent-focus: rgba(194, 65, 12, 0.35);
-  --state-attention-bg: #fff7ed;
-  --state-attention-border: #fdba74;
-  --state-attention-accent: #ea580c;
-  --state-active-bg: #ecfdf5;
-  --state-active-border: #a7f3d0;
-  --state-active-accent: #10b981;
-  --state-ready-bg: #fefce8;
-  --state-ready-border: #fef08a;
-  --state-ready-accent: #ca8a04;
-  --state-paused-bg: #f1ece4;
-  --state-paused-border: #e1d8ca;
-  --state-paused-accent: #94a3b8;
+  --accent-text: #9a3412;
+  --accent-ink: #ffffff;
+  --accent-soft: #fff7ed;
+  --accent-soft-border: #fdba74;
+  --state-attention-bg: #fff7ed;  --state-attention-border: #fdba74;  --state-attention-text: #9a3412;
+  --state-active-bg: #ecfdf5;     --state-active-border: #6ee7b7;     --state-active-text: #065f46;
+  --state-ready-bg: #fefce8;      --state-ready-border: #fde047;      --state-ready-text: #854d0e;
+  --state-paused-bg: #f1ece4;     --state-paused-border: #d8cec0;     --state-paused-text: #55606e;
 }
 ```
 
-- `#c2410c` 上的白色文字对比度约为 **5.18:1**，满足普通字号 WCAG AA。
+对比度（对卡片底色实算，均满足 AA）：
+
+- 深色正文 15.24:1、次要 11.74:1、弱化 6.93:1、最弱 5.34:1。
+- 深色强调按钮：`#1c1105` 文字 on `#f97316` 为 **6.62:1**；同底白字只有 2.80:1，**深色主题必须使用深字**。
+- 亮色强调按钮：白字 on `#c2410c` 为 5.18:1。
+- 四类状态徽标文字对其背景均 ≥ 5.44:1。
+
+- **状态色不铺满卡片**：卡片一律 `--surface-card`，状态色只用于左侧色条（3px，待确认类加粗到 4px）与状态徽标。靠这个约束避免"便签墙"观感。
+- 深色下阴影几乎不可见，层次由**背景差 + 1px 边框**承担，不靠投影。
 - 正文、状态和动作必须同时用文字表达，颜色只作辅助编码。
-- 不使用蓝紫渐变、玻璃拟态、纸张纹理或装饰性噪点。
+- 不使用蓝紫渐变、玻璃拟态、纸张纹理或装饰性噪点；图标为内联 SVG，不使用字符字形。
+
+## 2.1 主题切换
+
+- 首绘前由 `web/public/assets/theme-boot.js` 读取 `localStorage['ugk-cockpit-theme']`（`light|dark|system`，缺省 `dark`），写入 `documentElement.dataset.theme`、`style.colorScheme` 以及单个 `theme-color` meta 元素（使 Windows 原生滚动条、表单与浏览器外框色彩同步跟随）。
+- 该脚本位于 `assets/` 下并以经典同步脚本引入，因此**满足 CSP `script-src 'self'`，无需 nonce，也无需改动服务端静态资源白名单**。
+- `prefers-color-scheme` 监听**在"跟随系统"模式下实时生效**，并在系统变化时同步更新 `dataset.theme`、`style.colorScheme` 与 `theme-color` meta 标签；手动选择亮色或暗色时不会被系统变化覆盖。
+- 界面右上角提供「亮色 / 暗色 / 跟随系统」分段控件，用 `aria-pressed` 标注当前项。
+
+## 2.2 排版基线（中文）
+
+- 字重只允许 **400 / 600 / 700**：Windows 上的 Microsoft YaHei 只有 400 与 700，`650/740/760` 会被量化导致层级丢失。
+- **中文禁用负字距**：正文 `letter-spacing: 0`，标题最多 `-0.01em`。
+- 字号下限 **11px**；中文 `line-height` ≥ 1.5。
+- 等宽字体族末尾补 `"Microsoft YaHei UI"`，否则中英混排会基线跳动。
+
 
 ## 3. 字体与排版
 
@@ -78,7 +126,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 - 主要卡片和模态框使用 **8–12px** 圆角。
 - 按钮、输入框与紧凑信息块可使用 **4–8px** 圆角，以保持清晰密度。
 - 实体组件使用 1px 中性边框。
-- 卡片只使用轻微、低透明度的柔和阴影，避免厚重悬浮效果。
+- 卡片只使用轻微、低透明度的柔和阴影，避免厚重悬浮效果；深色主题下层次改由背景差与边框承担（深色阴影不可见）。
 - 间距使用 4 / 8 / 12 / 16 / 20 / 24 / 32 / 48 / 64px 比例。
 
 ## 5. 状态与动作
@@ -103,7 +151,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 
 ### 按钮
 
-- Primary：深橙底、白字、1px 同色边框；hover 使用更深橙。
+- Primary：深橙底、白字（深色主题下反转为深墨字）、1px 同色边框；hover 使用更深橙。
 - Secondary：暖白底、深墨蓝字、中性边框。
 - Disabled 只用于确有控件语义但暂不可用的动作；纯状态说明使用非交互标签。
 - `:focus-visible` 使用 3px 深橙轮廓和 3px offset。
