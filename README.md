@@ -4,7 +4,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.14` — 将 `$cockpit-relay` 准备输出固定为可原样复制的标准恢复指令，以 MCP `continueMessage` 为唯一事实源。旧聊天输出包含单独一行 `continueCode` 的标准指令块，新聊天凭接力码恢复同一 active session、revision 链和写入权限，不重新 init，也不要求用户自行拼接指令或另贴摘要。四个 Skill 可安装到 Agent；只有 `$cockpit-progress` 可以在有效检查点后隐式调用。
+`0.1.0-alpha.15` — 完成专业 Mission Control 前端重构：界面由真实状态驱动，支持响应式与无障碍体验，并修复 assignment/reissue/interrupted/paused 状态下的安全问题；同时将 `$cockpit-relay` 准备输出固定为可原样复制的标准恢复指令，以 MCP `continueMessage` 为唯一事实源。旧聊天输出包含单独一行 `continueCode` 的标准指令块，新聊天凭接力码恢复同一 active session、revision 链和写入权限，不重新 init，也不要求用户自行拼接指令或另贴摘要。四个 Skill 可安装到 Agent；只有 `$cockpit-progress` 可以在有效检查点后隐式调用。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
