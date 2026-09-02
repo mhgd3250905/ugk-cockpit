@@ -88,10 +88,10 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 | `active_work` | 展示 Agent、目标和最近进展，不重复分配 |
 | `relay_waiting` | 展示接力摘要，不创建新 assignment |
 | `agent_waiting` | 提示回到已接入的 Agent 会话安排任务，不重复分配 |
-| `run_may_be_interrupted` | 只读风险状态；引导回到原 AI 会话通过 MCP 检查，不伪造“恢复”动作 |
 | `user_paused` | 强制暂停视图，不创建 assignment |
 
 后端未提供的动作不得伪装成可点击按钮。只读状态使用说明标签，不使用虚假 CTA。
+`active_work` 只表示工作会话已经接入且尚未交接，不表示 Agent 进程当前在线；heartbeat、活动时间和 service 重启不得改变这一普通界面状态。
 
 ## 6. 组件与反馈
 

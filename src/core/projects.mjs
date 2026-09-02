@@ -289,7 +289,6 @@ export function readDashboard(db) {
     LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
     ORDER BY
       CASE
-        WHEN runs.id IS NOT NULL AND runs.health = 'recovery_uncertain' THEN 0
         WHEN observations.coherence != 'coherent' OR observations.has_changes = 1 THEN 0
         WHEN runs.id IS NOT NULL THEN 1
         WHEN projects.stage != 'paused' THEN 2 ELSE 3
@@ -352,7 +351,7 @@ export function readDashboard(db) {
       statusReason: isWorking
         ? (isRelayWaiting
           ? 'relay_waiting'
-          : (row.run_health === 'recovery_uncertain' ? 'run_may_be_interrupted' : 'active_work'))
+          : 'active_work')
         : (isWaiting
           ? 'agent_waiting'
           : (assignment?.status === 'pending'

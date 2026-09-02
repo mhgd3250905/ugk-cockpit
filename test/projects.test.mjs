@@ -216,3 +216,38 @@ test('dashboard surfaces the active Agent and latest handoff', (t) => {
   assert.equal(dashboard[0].lastHandoff.nextStep, '验证真实项目');
   db.close();
 });
+
+test('an active run marked recovery_uncertain remains active_work on dashboard without false interruption', (t) => {
+  const db = fixture(t);
+  const observed = observation();
+  registerProject(db, {
+    commandId: 'register-recovery-uncertain-project',
+    name: '未交接会话',
+    observation: observed,
+  });
+  const started = startWriteRun(db, {
+    commandId: 'start-recovery-uncertain-run',
+    worktreeId: worktreeIdFor(observed.worktreeIdentity),
+    canonicalPath: observed.canonicalPath,
+    repositoryIdentity: observed.repositoryIdentity,
+    worktreeIdentity: observed.worktreeIdentity,
+    agentClaim: 'Codex',
+    goal: '验证不会误判为中断',
+    baseline: {
+      repositoryIdentity: observed.repositoryIdentity,
+      worktreeIdentity: observed.worktreeIdentity,
+      coherence: 'coherent',
+    },
+  });
+  db.prepare(`
+    UPDATE runs SET health = 'recovery_uncertain' WHERE id = ?
+  `).run(started.runId);
+
+  const dashboard = readDashboard(db);
+  assert.equal(dashboard.length, 1);
+  assert.equal(dashboard[0].status, 'active');
+  assert.equal(dashboard[0].statusReason, 'active_work');
+  assert.equal(dashboard[0].activeRun.id, started.runId);
+  assert.equal(dashboard[0].activeRun.health, 'recovery_uncertain');
+  db.close();
+});

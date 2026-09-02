@@ -736,10 +736,6 @@ export async function createCockpitHttpServer({
   const activeFolderGrants = folderGrants ?? new FolderGrantStore({ db });
   const browserSessionToken = randomBytes(32).toString('base64url');
   const mcpSessions = new Map();
-  db.prepare(`
-    UPDATE runs SET health = 'recovery_uncertain'
-    WHERE lifecycle = 'active'
-  `).run();
 
   async function prepareFolderSelection(selectedPath, principalHash) {
     if (!selectedPath) return { ok: true, cancelled: true };

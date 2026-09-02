@@ -6,6 +6,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openCockpitDatabase } from '../../src/core/database.mjs';
+import { registerProject } from '../../src/core/projects.mjs';
+import { probeGitWorktree } from '../../src/git/probe.mjs';
 import { createCockpitHttpServer } from '../../src/service/http-server.mjs';
 import { VERSION } from '../../src/version.mjs';
 
@@ -1029,4 +1031,77 @@ test('the loopback endpoint is a second single-instance fence', async (t) => {
     }),
     { code: 'EADDRINUSE' },
   );
+});
+
+test('service restart preserves active run status and does not mark it recovery_uncertain or interrupt dashboard', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  const observation = await probeGitWorktree(root);
+  const seedDb = openCockpitDatabase(dbPath);
+  registerProject(seedDb, {
+    commandId: 'register-restart-active-project',
+    name: '重启中的会话',
+    observation,
+  });
+  seedDb.close();
+  let service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+  t.after(async () => {
+    await service?.close();
+    cleanup(root);
+  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    'content-type': 'application/json',
+  };
+  const startResponse = await request(service, '/api/v1/runs/start', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'restart-active-start',
+      runId: 'restart-active-run',
+      worktreePath: root,
+      agentClaim: 'codex',
+      goal: 'restart preserves active run',
+    }),
+  });
+  assert.equal(startResponse.status, 201);
+  const started = await startResponse.json();
+  assert.equal(started.ok, true);
+
+  await service.close();
+  service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+
+  const checkDb = openCockpitDatabase(dbPath, { migrate: false });
+  const runRow = checkDb.prepare('SELECT lifecycle, health FROM runs WHERE id = ?').get('restart-active-run');
+  assert.equal(runRow.lifecycle, 'active');
+  assert.equal(runRow.health, 'healthy');
+  checkDb.close();
+
+  const dashboardResponse = await request(service, '/api/v1/dashboard', { headers });
+  assert.equal(dashboardResponse.status, 200);
+  const dashboard = await dashboardResponse.json();
+  assert.equal(dashboard.projects.length, 1);
+  assert.equal(dashboard.projects[0].statusReason, 'active_work');
+  assert.equal(dashboard.projects[0].activeRun.id, 'restart-active-run');
+
+  const finishResponse = await request(service, '/api/v1/runs/restart-active-run/finish', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'restart-active-finish',
+      expectedRevision: started.revision,
+      leaseGeneration: started.leaseGeneration,
+      outcome: 'completed',
+      summary: 'finished after restart',
+    }),
+  });
+  assert.equal(finishResponse.status, 200);
 });

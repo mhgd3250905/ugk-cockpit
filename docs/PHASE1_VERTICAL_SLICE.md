@@ -14,6 +14,7 @@
 - `0.1.0-alpha.13`：新增 `$cockpit-relay`、`ugk_work_relay` 与 `ugk_work_resume`，让用户显式把上下文接到新聊天，同时保持原 active session、revision 链和写入权限。
 - `0.1.0-alpha.14`：把 cockpit-relay 准备输出固定为可原样复制的标准恢复指令，以 MCP continueMessage 为唯一事实源，摘要与复制块严格隔离，resume 自动返回已存 relayContext。
 - `0.1.0-alpha.15`：完成专业 Mission Control 前端重构，界面由真实状态驱动并支持响应式与无障碍；修复 assignment/reissue/interrupted/paused 状态下的安全问题，新增 `PRODUCT.md` 与 `DESIGN.md`。
+- `0.1.0-alpha.16`：移除 false liveness 与服务重启导致的中断推断；Dashboard 仅依据明确会话节点展示状态，服务重启不修改 active run 的 health，现存 recovery_uncertain 数据在普通界面统一作为 active work 处理。
 - 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；relay 与 handoff 分别只在用户显式要求换聊天或结束阶段时调用。
 
 ## 产品方向：晨间工作简报
@@ -51,8 +52,8 @@
 
 项目按行动意义分组，而不是按内部状态枚举分组：
 
-- `需要你处理`：中断、身份变化、未归属改动、同时编辑或状态读取失败；
-- `正在工作`：存在可确认的 AI 工作会话；
+- `需要你处理`：身份变化、未归属改动、同时编辑或状态读取失败；
+- `工作会话`：存在已经接入且尚未交接的 AI 工作会话；
 - `可以继续`：没有阻断，可开始下一段工作；
 - `暂时放下`：用户主动暂停。
 
@@ -64,10 +65,10 @@
 
 - 有本地改动：默认保留并标记为“开始前已有改动”；
 - 另一个 AI 正在编辑：默认只读，不自动接管；
-- 上次未正常结束：显示“可能已中断”，提供继续或整理记录；
+- 存在尚未交接的旧会话：保持“会话已接入”，展示最近确认节点；只有用户显式 relay、handoff 或 takeover 才转换状态；
 - 代码位置身份变化：停止，要求用户重新选择，绝不自动重绑。
 
-消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后直接显示“正在工作”；最近交接存在时在 init 结果中返回。工作中通过 `$cockpit-progress` 报告里程碑。上下文堆积时，用户可显式调用 `$cockpit-relay`：旧聊天调用 `ugk_work_relay` 生成一次性接力消息，新聊天调用 `ugk_work_resume` 继续同一工作会话。只有用户显式要求结束阶段时，才通过 `$cockpit-handoff` 收束。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
+消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。上下文堆积时，用户可显式调用 `$cockpit-relay`：旧聊天调用 `ugk_work_relay` 生成一次性接力消息，新聊天调用 `ugk_work_resume` 继续同一工作会话。只有用户显式要求结束阶段时，才通过 `$cockpit-handoff` 收束。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
 
 ### 5. 结束工作
 
@@ -118,7 +119,7 @@
 - 没有持久化确认时不显示“已保存”；离线数据必须带最后更新时间。
 - 有开始前改动时默认保留，错误归属给当前 AI 的次数必须为 0。
 - 同一代码位置的第二个写入会话默认被拒绝；接管必须二次确认。
-- 上次工作中断后两步内可以继续或整理记录，不能自动标成完成。
+- 存在尚未交接的旧会话时，不得因 heartbeat、记录时间或 service 重启推断中断或完成；只展示最近确认节点，并通过显式 relay、handoff 或 takeover 转换。
 - 错误仓库和同路径替换 100% 拒绝自动重绑。
 
 ## 进入实现前的依赖决策

@@ -10,12 +10,6 @@ const STATUS = {
     detail: '这些改动会原样保留，不会自动算给下一位 AI。',
     action: '查看并继续',
   },
-  run_may_be_interrupted: {
-    eyebrow: '今天先处理',
-    title: '上一次 AI 可能没有正常结束',
-    detail: '代码没有被删除。请回到原 AI 会话，让 Agent 通过 Cockpit MCP 检查当前会话与接手记录；这里不会新建任务或接管写入权限。',
-    action: '请在原 AI 会话中检查',
-  },
   status_check_incomplete: {
     eyebrow: '暂时无法确认',
     title: '刚才没有读完代码状态',
@@ -31,14 +25,14 @@ const STATUS = {
   assignment_waiting: {
     eyebrow: '等待接手',
     title: '任务已经准备好，等待 AI 接手',
-    detail: '只有 AI 成功接手后，这里才会显示正在工作。',
+    detail: '只有 AI 成功接手后，这里才会显示工作会话已经接入。',
     action: '重新生成接入指令',
   },
   active_work: {
-    eyebrow: '正在推进',
-    title: 'AI 已经接手这项任务',
-    detail: '最近进展和结束交接会自动回到这里。',
-    action: 'AI 正在工作',
+    eyebrow: '会话已接入',
+    title: '这项工作尚未交接',
+    detail: 'Cockpit 已记录 AI 接入和最近进展；只有明确交接后，这段工作才会结束。',
+    action: '会话尚未交接',
   },
   relay_waiting: {
     eyebrow: '接力已准备',
@@ -95,15 +89,13 @@ function getProjectStatusReason(project) {
 function getActionLabel(statusReason) {
   switch (statusReason) {
     case 'active_work':
-      return 'AI 正在工作';
+      return '会话尚未交接';
     case 'relay_waiting':
       return '等待新会话继续';
     case 'agent_waiting':
       return '等待你的安排';
     case 'assignment_waiting':
       return '重新生成接入指令';
-    case 'run_may_be_interrupted':
-      return '请在原 AI 会话中检查';
     case 'user_paused':
       return '已暂时放下';
     case 'preexisting_changes':
@@ -117,7 +109,7 @@ function getActionLabel(statusReason) {
 }
 
 function isActionDisabled(statusReason) {
-  return ['active_work', 'relay_waiting', 'agent_waiting', 'run_may_be_interrupted', 'user_paused'].includes(statusReason);
+  return ['active_work', 'relay_waiting', 'agent_waiting', 'user_paused'].includes(statusReason);
 }
 
 function createErrorNotice(error, {
@@ -402,7 +394,7 @@ function App() {
       await navigator.clipboard.writeText(dispatch.message);
       setNotice({
         message: '接手消息已复制。',
-        required_action: `把它发送给 ${handoffAgent}；成功接入后页面会显示正在工作。`,
+        required_action: `把它发送给 ${handoffAgent}；成功接入后页面会显示工作会话已经接入。`,
         actionLabel: '知道了',
         retry: () => setNotice(null),
       });
@@ -432,7 +424,7 @@ function App() {
   const priority = useMemo(() => {
     if (!projects.length) return null;
     return (
-      projects.find((item) => item.status === 'attention' || getProjectStatusReason(item) === 'run_may_be_interrupted')
+      projects.find((item) => item.status === 'attention')
       ?? projects.find((item) => item.status === 'active')
       ?? projects.find((item) => getProjectStatusReason(item) === 'agent_waiting')
       ?? projects.find((item) => getProjectStatusReason(item) === 'assignment_waiting')
@@ -448,7 +440,7 @@ function App() {
   const stats = useMemo(() => {
     const total = projects.length;
     const attentionCount = projects.filter(
-      (p) => p.status === 'attention' || ['run_may_be_interrupted', 'status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(p))
+      (p) => p.status === 'attention' || ['status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(p))
     ).length;
     const activeCount = projects.filter(
       (p) => p.status === 'active' || ['active_work', 'relay_waiting', 'agent_waiting', 'assignment_waiting'].includes(getProjectStatusReason(p))
@@ -474,7 +466,7 @@ function App() {
         pausedList.push(item);
       } else if (
         item.status === 'attention' ||
-        ['run_may_be_interrupted', 'status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(item))
+        ['status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(item))
       ) {
         attentionList.push(item);
       } else if (
@@ -489,7 +481,7 @@ function App() {
 
     return [
       { key: 'attention', title: '待确认 · 需要处理', list: attentionList },
-      { key: 'active', title: '推进中 · 活跃会话', list: activeList },
+      { key: 'active', title: '工作会话 · 接入或未交接', list: activeList },
       { key: 'ready', title: '准备就绪 · 可以继续', list: readyList },
       { key: 'paused', title: '日常维护与暂时放下', list: pausedList },
     ].filter((g) => g.list.length > 0);
@@ -555,7 +547,7 @@ function App() {
                 <span className="stat-badge stat-attention">待确认 <strong>{stats.attentionCount}</strong></span>
               )}
               {stats.activeCount > 0 && (
-                <span className="stat-badge stat-active">推进中 <strong>{stats.activeCount}</strong></span>
+                <span className="stat-badge stat-active">会话中 <strong>{stats.activeCount}</strong></span>
               )}
               {stats.readyCount > 0 && (
                 <span className="stat-badge stat-ready">就绪 <strong>{stats.readyCount}</strong></span>
@@ -759,7 +751,7 @@ function PriorityHero({ project, onAction }) {
         <div className="hero-summary-strip">
           {project.activeWork && (
             <div className="summary-item">
-              <span className="summary-label">活跃会话</span>
+              <span className="summary-label">未交接会话</span>
               <span className="summary-val">{project.activeWork.agent} · {project.activeWork.task || '任务推进中'}</span>
               {project.activeWork.lastProgress?.note && (
                 <span className="summary-sub progress-summary">最新进展：{project.activeWork.lastProgress.note}</span>
@@ -834,7 +826,7 @@ function ProjectCard({ project, onAction }) {
       {project.activeWork && (
         <div className="card-meta-box">
           <div className="meta-line">
-            <span className="meta-tag">执行中</span>
+            <span className="meta-tag">已接入</span>
             <span className="meta-agent">{project.activeWork.agent}</span>
             <span className="meta-text">{project.activeWork.task || '任务推进中'}</span>
           </div>
@@ -1141,7 +1133,7 @@ function HandoffModal({
               <div className="success-alert-box">
                 <p>
                   接入指令已创建。请复制下方消息发送给 <strong>{agent}</strong>。
-                  MCP 客户端连接成功后，控制台会自动刷新为“正在推进”状态。
+                  MCP 客户端连接成功后，控制台会自动刷新为“会话已接入”状态。
                 </p>
               </div>
 
