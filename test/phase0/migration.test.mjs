@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
   );
   db.close();
 });
@@ -452,7 +452,7 @@ test('version 12 database upgrades to version 15 with repository_identity backfi
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
 
   // Verify projects.repository_identity was backfilled
   const projectRow = upgraded.prepare('SELECT * FROM projects WHERE id = ?').get('proj-1');
@@ -626,7 +626,7 @@ test('version 8 database upgrades to version 15 preserving existing assignments'
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   const proj = upgraded.prepare('SELECT * FROM projects WHERE id = ?').get('proj-v8');
   assert.equal(proj.repository_identity, 'repo-identity-v8');
   const assign = upgraded.prepare('SELECT * FROM assignments WHERE id = ?').get('assign-v8');
@@ -634,7 +634,7 @@ test('version 8 database upgrades to version 15 preserving existing assignments'
   upgraded.close();
 });
 
-test('version 4 database upgrades to version 15 preserving projects', (t) => {
+test('version 4 database upgrades to version 16 preserving projects', (t) => {
   const dbPath = fixture(t, 'migration-v4');
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
@@ -670,10 +670,69 @@ test('version 4 database upgrades to version 15 preserving projects', (t) => {
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   const proj = upgraded.prepare('SELECT * FROM projects WHERE id = ?').get('proj-v4');
   assert.equal(proj.repository_identity, 'repo-identity-v4');
   assert.equal(proj.authorized_root, '');
+  upgraded.close();
+});
+
+test('version 15 database upgrades to version 16 creating empty_folder_grants table and indexes', (t) => {
+  const dbPath = fixture(t, 'migration-v15');
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      applied_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO schema_migrations VALUES (1, 'phase0-core', '2026-01-01T00:00:00.000Z');
+    INSERT INTO schema_migrations VALUES (15, 'repository-locks', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE repository_locks (
+      repository_identity TEXT PRIMARY KEY,
+      lock_id TEXT NOT NULL UNIQUE,
+      holder TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      acquired_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      command_id TEXT
+    ) STRICT;
+    PRAGMA user_version = 15;
+  `);
+  legacy.close();
+
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 16);
+
+  // Verify empty_folder_grants table exists
+  const cols = upgraded.prepare('PRAGMA table_info(empty_folder_grants)').all().map((r) => r.name);
+  assert.ok(cols.includes('id'));
+  assert.ok(cols.includes('principal_hash'));
+  assert.ok(cols.includes('folder_path'));
+  assert.ok(cols.includes('canonical_path'));
+  assert.ok(cols.includes('file_identity'));
+  assert.ok(cols.includes('state'));
+  assert.ok(cols.includes('claimed_by_command'));
+  assert.ok(cols.includes('expires_at'));
+  assert.ok(cols.includes('created_at'));
+
+  // Test insertion and state check constraint
+  upgraded.prepare(`
+    INSERT INTO empty_folder_grants (
+      id, principal_hash, folder_path, canonical_path, file_identity, state, claimed_by_command, expires_at, created_at
+    ) VALUES ('g-1', 'p-hash', 'E:\\empty', 'E:\\empty', 'fi-1', 'active', NULL, 1900000000000, '2026-01-01T00:00:00.000Z');
+  `).run();
+
+  assert.throws(
+    () => upgraded.prepare(`
+      INSERT INTO empty_folder_grants (
+        id, principal_hash, folder_path, canonical_path, file_identity, state, claimed_by_command, expires_at, created_at
+      ) VALUES ('g-2', 'p-hash', 'E:\\empty2', 'E:\\empty2', 'fi-2', 'invalid_state', NULL, 1900000000000, '2026-01-01T00:00:00.000Z');
+    `).run(),
+    /CHECK constraint failed/i,
+  );
+
   upgraded.close();
 });
 

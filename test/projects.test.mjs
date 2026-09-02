@@ -6,6 +6,7 @@ import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
 import {
   readDashboard,
+  readProjectContext,
   refreshProject,
   registerProject,
   worktreeIdFor,
@@ -249,5 +250,32 @@ test('an active run marked recovery_uncertain remains active_work on dashboard w
   assert.equal(dashboard[0].statusReason, 'active_work');
   assert.equal(dashboard[0].activeRun.id, started.runId);
   assert.equal(dashboard[0].activeRun.health, 'recovery_uncertain');
+  db.close();
+});
+
+test('registerProject writes observation.repositoryIdentity into projects table and readProjectContext returns it', (t) => {
+  const db = fixture(t);
+  const observed = observation({
+    canonicalPath: 'E:\\fixture\\repo-identity-test',
+    repositoryIdentity: 'repo-ident-abc-123',
+    worktreeIdentity: 'worktree-ident-abc-123',
+  });
+  const result = registerProject(db, {
+    commandId: 'register-repo-identity-test',
+    name: '项目身份测试',
+    observation: observed,
+  });
+  assert.equal(result.ok, true);
+
+  // Directly verify database row
+  const row = db.prepare('SELECT * FROM projects WHERE id = ?').get(result.projectId);
+  assert.equal(row.repository_identity, 'repo-ident-abc-123');
+
+  // Verify readProjectContext returns repository_identity
+  const context = readProjectContext(db, result.projectId);
+  assert.ok(context);
+  assert.equal(context.repository_identity, 'repo-ident-abc-123');
+  assert.equal(context.worktree_repository_identity, 'repo-ident-abc-123');
+
   db.close();
 });

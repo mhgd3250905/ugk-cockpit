@@ -9,20 +9,20 @@ const execFileAsync = promisify(execFile);
 const MAX_ALTERNATES_BYTES = 64 * 1024;
 const MAX_ALTERNATE_DIRECTORIES = 64;
 
-const SAFE_GIT_PREFIX = [
+export const SAFE_GIT_PREFIX = [
   '--no-optional-locks',
   '-c', 'core.fsmonitor=false',
   '-c', 'core.untrackedCache=false',
   '-c', 'credential.helper=',
-  '-c', 'core.hooksPath=NUL',
+  '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
   '-c', 'core.longpaths=true',
 ];
 
-function digest(value) {
+export function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function safeGitEnvironment() {
+export function safeGitEnvironment() {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),
   );
@@ -34,7 +34,7 @@ function safeGitEnvironment() {
   return environment;
 }
 
-async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0] }) {
+export async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0] } = {}) {
   try {
     const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...args], {
       cwd,
@@ -54,11 +54,11 @@ async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0] }) {
   }
 }
 
-async function gitText(cwd, args, options) {
+export async function gitText(cwd, args, options) {
   return (await git(cwd, args, options)).stdout;
 }
 
-async function fileIdentity(targetPath) {
+export async function fileIdentity(targetPath) {
   const details = await stat(targetPath, { bigint: true });
   const evidence = {
     device: details.dev.toString(),

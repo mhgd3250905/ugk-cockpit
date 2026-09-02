@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 15;
+export const SUPPORTED_SCHEMA_VERSION = 16;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -537,6 +537,26 @@ CREATE TABLE repository_locks (
 ) STRICT;
 
 CREATE INDEX idx_repository_locks_expiry ON repository_locks(expires_at);
+`,
+  },
+  {
+    version: 16,
+    name: 'empty-folder-grants',
+    sql: `
+CREATE TABLE empty_folder_grants (
+  id TEXT PRIMARY KEY,
+  principal_hash TEXT NOT NULL,
+  folder_path TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  file_identity TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'claimed', 'consumed')),
+  claimed_by_command TEXT,
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_empty_folder_grants_expiry ON empty_folder_grants(state, expires_at);
+CREATE INDEX idx_empty_folder_grants_canonical ON empty_folder_grants(canonical_path);
 `,
   },
 ];

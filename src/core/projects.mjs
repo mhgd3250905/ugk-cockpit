@@ -22,8 +22,10 @@ export function worktreeIdFor(worktreeIdentity) {
 export function readProjectContext(db, projectId) {
   return db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
+           projects.repository_identity,
            projects.worktree_id, worktrees.canonical_path,
-           worktrees.repository_identity, worktrees.identity_fingerprint
+           worktrees.repository_identity AS worktree_repository_identity,
+           worktrees.identity_fingerprint
     FROM projects
     JOIN worktrees ON worktrees.id = projects.worktree_id
     WHERE projects.id = ?
@@ -119,8 +121,8 @@ export function registerProject(db, request) {
     const projectInsert = db.prepare(`
       INSERT OR IGNORE INTO projects (
         id, name, stage, worktree_id, status, status_reason,
-        last_observed_at, created_at, updated_at, authorized_root
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_observed_at, created_at, updated_at, authorized_root, repository_identity
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       projectId,
       name,
@@ -132,6 +134,7 @@ export function registerProject(db, request) {
       timestamp,
       timestamp,
       authorizedRoot,
+      observation.repositoryIdentity,
     );
     db.prepare(`
       INSERT OR IGNORE INTO project_observations (
