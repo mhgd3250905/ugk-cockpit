@@ -86,6 +86,10 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.equal(prepared.relayPrepared, true);
   assert.equal(prepared.status, 'awaiting_resume');
   assert.equal(prepared.revision, initialized.revision + 1);
+  assert.ok(prepared.git);
+  assert.equal(prepared.git.branch, observation.after.branch);
+  assert.ok(prepared.git.head);
+  assert.equal(prepared.git.coherence, 'coherent');
   assert.ok(prepared.continueCode);
   assert.equal(typeof prepared.continueMessage, 'string');
   assert.match(prepared.continueMessage, /\$cockpit-relay/);
@@ -94,11 +98,25 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.ok(prepared.continueMessage.includes(prepared.continueCode));
   assert.equal(prepared.continueMessage.split(prepared.continueCode).length - 1, 1);
 
+  // Subsequent Git changes in worktree must not mutate the frozen relay evidence upon idempotent replay
+  writeFileSync(path.join(root, 'EXTRA.md'), '# extra\n');
+  execFileSync('git', ['add', 'EXTRA.md'], { cwd: root });
+  execFileSync('git', [
+    '-c', 'user.name=UGK Test',
+    '-c', 'user.email=ugk@example.invalid',
+    'commit', '--quiet', '-m', 'extra commit after relay',
+  ], { cwd: root });
+  const newGitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  assert.notEqual(newGitHead, prepared.git.head);
+
   // The HTTP payload does not carry the secret.  A retry after a lost
-  // response deterministically derives the same code from the service token.
+  // response deterministically derives the same code from the service token
+  // and preserves the snapshot Git evidence from the original request.
   const relayRetry = await post(service, '/api/v1/mcp/work/relay', relayBody);
   assert.equal(relayRetry.status, 200, await relayRetry.clone().text());
-  assert.deepEqual(await relayRetry.json(), prepared);
+  const retried = await relayRetry.json();
+  assert.deepEqual(retried, prepared);
+  assert.equal(retried.git.head, prepared.git.head);
 
   const relayConflict = await post(service, '/api/v1/mcp/work/relay', {
     ...relayBody,
@@ -107,7 +125,11 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.equal(relayConflict.status, 409, await relayConflict.clone().text());
   assert.equal((await relayConflict.json()).code, 'COMMAND_CONFLICT');
 
-  for (const field of ['relayId', 'commandId', 'expiresAt', 'ttlMs']) {
+  for (const field of [
+    'relayId', 'commandId', 'expiresAt', 'ttlMs',
+    'gitHead', 'gitBranch', 'gitCoherence', 'gitObservedAt', 'git',
+    'path', 'projectId', 'worktreeId',
+  ]) {
     const invalid = await post(service, '/api/v1/mcp/work/relay', {
       ...relayBody,
       clientRequestId: `relay-http-invalid-${field}`,

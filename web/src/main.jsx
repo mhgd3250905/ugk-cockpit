@@ -640,7 +640,7 @@ function App() {
             <div className="brand-title-wrap">
               <span className="brand-mark" aria-hidden="true">■</span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha.21</span>
+              <span className="badge badge-version">v0.1.0-alpha.22</span>
             </div>
             <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
           </div>
@@ -1088,6 +1088,17 @@ function TimelineNode({ item, index }) {
     ['风险', item.risks],
   ].filter(([, values]) => Array.isArray(values) && values.length > 0);
   const relayInfo = getRelayStateInfo(item);
+  const isRelayOrHandoff = item.kind === 'relay' || item.kind === 'handoff';
+  const hasCounts = isRelayOrHandoff && (
+    (item.completedItems?.length > 0) ||
+    (item.pendingItems?.length > 0) ||
+    (item.decisions?.length > 0) ||
+    (item.risks?.length > 0)
+  );
+  const hasContextDetails = Boolean(
+    (item.currentState && item.currentState !== item.summary) ||
+    detailGroups.length > 0
+  );
 
   return (
     <li
@@ -1125,12 +1136,15 @@ function TimelineNode({ item, index }) {
               )
             )
           ) : (
-            <span className="git-unrecorded">{item.kind === 'progress' ? 'Git 未采集' : '当时分支未记录'}</span>
+            <span className="git-unrecorded">{item.kind === 'progress' || item.kind === 'relay' ? 'Git 未采集' : '当时分支未记录'}</span>
           )}
           {relayInfo && (
             <span className={`relay-status-chip relay-status-${relayInfo.statusTheme}`}>
               {relayInfo.label}{relayInfo.acceptedAt ? ` · ${formatTime(relayInfo.acceptedAt)}` : ''}
             </span>
+          )}
+          {item.kind === 'handoff' && (
+            <span className="handoff-status-chip handoff-status-completed">阶段已交接</span>
           )}
         </div>
 
@@ -1141,43 +1155,86 @@ function TimelineNode({ item, index }) {
         )}
 
         <h4>{item.summary || item.note || kind.label}</h4>
-        {item.currentState && item.currentState !== item.summary && (
-          <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
-        )}
 
-        {item.details && item.details.length > 0 && (
-          <div className="timeline-progress-details-wrap">
-            <ul className="timeline-progress-details">
-              {item.details.slice(0, 3).map((detail, dIdx) => (
-                <li key={`detail-${dIdx}`}>{detail}</li>
-              ))}
-            </ul>
-            {item.details.length > 3 && (
-              <details className="timeline-details-expand">
-                <summary>查看更多详情（共 {item.details.length} 条）</summary>
-                <ul className="timeline-progress-details">
-                  {item.details.slice(3).map((detail, dIdx) => (
-                    <li key={`detail-more-${dIdx}`}>{detail}</li>
-                  ))}
-                </ul>
-              </details>
+        {hasCounts && (
+          <div className="timeline-counts-row">
+            {item.completedItems?.length > 0 && (
+              <span className="timeline-count-badge">已完成 {item.completedItems.length}</span>
             )}
-          </div>
-        )}
-
-        {detailGroups.length > 0 && (
-          <div className="timeline-detail-groups">
-            {detailGroups.map(([label, values]) => (
-              <section key={label}>
-                <h5>{label}</h5>
-                <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
-              </section>
-            ))}
+            {item.pendingItems?.length > 0 && (
+              <span className="timeline-count-badge">待继续 {item.pendingItems.length}</span>
+            )}
+            {item.decisions?.length > 0 && (
+              <span className="timeline-count-badge">决定 {item.decisions.length}</span>
+            )}
+            {item.risks?.length > 0 && (
+              <span className="timeline-count-badge">风险 {item.risks.length}</span>
+            )}
           </div>
         )}
 
         {item.nextSessionFocus && (
           <div className="timeline-next-focus"><span>下一步</span>{item.nextSessionFocus}</div>
+        )}
+
+        {isRelayOrHandoff ? (
+          hasContextDetails && (
+            <details className="timeline-details-accordion">
+              <summary>{item.kind === 'relay' ? '查看接力上下文' : '查看交接详情'}</summary>
+              <div className="timeline-details-content">
+                {item.currentState && item.currentState !== item.summary && (
+                  <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
+                )}
+                {detailGroups.length > 0 && (
+                  <div className="timeline-detail-groups">
+                    {detailGroups.map(([label, values]) => (
+                      <section key={label}>
+                        <h5>{label}</h5>
+                        <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </details>
+          )
+        ) : (
+          <>
+            {item.currentState && item.currentState !== item.summary && (
+              <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
+            )}
+
+            {item.details && item.details.length > 0 && (
+              <div className="timeline-progress-details-wrap">
+                <ul className="timeline-progress-details">
+                  {item.details.slice(0, 3).map((detail, dIdx) => (
+                    <li key={`detail-${dIdx}`}>{detail}</li>
+                  ))}
+                </ul>
+                {item.details.length > 3 && (
+                  <details className="timeline-details-expand">
+                    <summary>查看更多详情（共 {item.details.length} 条）</summary>
+                    <ul className="timeline-progress-details">
+                      {item.details.slice(3).map((detail, dIdx) => (
+                        <li key={`detail-more-${dIdx}`}>{detail}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+
+            {detailGroups.length > 0 && (
+              <div className="timeline-detail-groups">
+                {detailGroups.map(([label, values]) => (
+                  <section key={label}>
+                    <h5>{label}</h5>
+                    <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
+                  </section>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         {item.bodyMarkdown && (

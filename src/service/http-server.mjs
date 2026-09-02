@@ -1418,8 +1418,29 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/relay') {
         const body = await readJson(request);
         validateMcpRelayBody(body);
+        let gitEvidence = {};
+        const context = readSessionContext(db, body.sessionId);
+        if (context?.ok) {
+          try {
+            const { observation } = await observeRegisteredProject(context.projectId, context);
+            gitEvidence = {
+              gitHead: observation.after?.head ?? null,
+              gitBranch: observation.after?.branch ?? null,
+              gitCoherence: observation.coherence ?? 'unknown',
+              gitObservedAt: observation.observedAt ?? new Date().toISOString(),
+            };
+          } catch {
+            gitEvidence = {
+              gitHead: null,
+              gitBranch: null,
+              gitCoherence: 'unknown',
+              gitObservedAt: new Date().toISOString(),
+            };
+          }
+        }
         const result = createRelay(db, {
           ...body,
+          ...gitEvidence,
           // Derive the one-time secret from the persistent service token so a
           // lost HTTP response can be safely retried with the same payload.
           // Only its digest is persisted by the core relay implementation.

@@ -159,6 +159,29 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   `).run(initJson.sessionId, initJson.sessionId, legacyLongNote);
   legacyDb.close();
 
+  // Insert a historical legacy relay without Git evidence
+  const insertRelayDb = openCockpitDatabase(dbPath);
+  insertRelayDb.prepare(`
+    INSERT INTO relays (
+      id, sequence, assignment_id, project_id, worktree_id,
+      session_id, run_id, client_request_id, expected_revision, revision,
+      next_session_focus, summary, current_state,
+      completed_items, pending_items, decisions,
+      artifact_refs, risks, suggested_skills,
+      git_head, git_branch, git_coherence, git_observed_at,
+      code_hash, state, expires_at, created_at
+    ) VALUES (
+      'rel_legacy_null_1', 99, (SELECT id FROM assignments WHERE session_id = ?), ?, (SELECT worktree_id FROM projects WHERE id = ?),
+      ?, NULL, 'req-legacy-relay-1', 1, 2,
+      '历史遗留接力下一步', '历史遗留接力摘要', '历史遗留接力状态',
+      '["遗留完成项"]', '["遗留待继续"]', '["遗留决定"]',
+      '[]', '["遗留风险"]', '[]',
+      NULL, NULL, NULL, NULL,
+      'legacy-code-hash', 'expired', 1000, '2025-12-31T00:00:00.000Z'
+    )
+  `).run(initJson.sessionId, registered.projectId, registered.projectId, initJson.sessionId);
+  insertRelayDb.close();
+
   // Step 4: Record conversation relay
   const relayRes = await post(service, '/api/v1/mcp/work/relay', {
     sessionId: initJson.sessionId,
@@ -177,15 +200,18 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(relayRes.status, 200);
   const relayJson = await relayRes.json();
 
-  // Verify relay item in timeline is active before resume
+  // Verify relay item in timeline is active before resume and has server-collected Git evidence
   const detailBeforeResumeRes = await get(service, `/api/v1/projects/${registered.projectId}`);
   assert.equal(detailBeforeResumeRes.status, 200);
   const detailBeforeResume = await detailBeforeResumeRes.json();
-  const activeRelayItem = detailBeforeResume.timeline.items.find((it) => it.kind === 'relay');
+  const activeRelayItem = detailBeforeResume.timeline.items.find((it) => it.id === relayJson.relayId);
   assert.ok(activeRelayItem);
   assert.equal(activeRelayItem.id, relayJson.relayId);
   assert.equal(activeRelayItem.state, 'active');
   assert.equal(activeRelayItem.acceptedAt, null);
+  assert.ok(activeRelayItem.git);
+  assert.equal(activeRelayItem.git.branch, 'main');
+  assert.equal(activeRelayItem.git.coherence, 'coherent');
 
   // Resume relay in same worktree
   const resumeRes = await post(service, '/api/v1/mcp/work/resume', {
@@ -203,11 +229,14 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   const detailAfterResumeRes = await get(service, `/api/v1/projects/${registered.projectId}`);
   assert.equal(detailAfterResumeRes.status, 200);
   const detailAfterResume = await detailAfterResumeRes.json();
-  const acceptedRelayItem = detailAfterResume.timeline.items.find((it) => it.kind === 'relay');
+  const acceptedRelayItem = detailAfterResume.timeline.items.find((it) => it.id === relayJson.relayId);
   assert.ok(acceptedRelayItem);
   assert.equal(acceptedRelayItem.id, relayJson.relayId);
   assert.equal(acceptedRelayItem.state, 'accepted');
   assert.equal(acceptedRelayItem.acceptedAt, resumeJson.relay.acceptedAt);
+  assert.ok(acceptedRelayItem.git);
+  assert.equal(acceptedRelayItem.git.branch, 'main');
+  assert.equal(acceptedRelayItem.git.coherence, 'coherent');
 
   // Step 5: Commit on main
   writeFileSync(path.join(root, 'TIMELINE.md'), '# Timeline Feature\n');
@@ -241,10 +270,10 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
 
   assert.equal(detail.ok, true);
   assert.equal(detail.project.name, 'Detail Fixture Project');
-  assert.equal(detail.timeline.total, 5); // init + legacy progress + structured progress + relay + handoff
+  assert.equal(detail.timeline.total, 6); // init + legacy progress + structured progress + relay + handoff + legacy relay
 
   const items = detail.timeline.items;
-  // Reverse chronological order: newest first -> handoff, relay, structured progress, init, legacy progress
+  // Reverse chronological order: newest first -> handoff, relay, structured progress, init, legacy progress, legacy relay
   assert.equal(items[0].kind, 'handoff');
   assert.equal(items[0].typeLabel, '阶段交接');
   assert.equal(items[0].agent, 'Codex');
@@ -252,14 +281,25 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[0].git.branch, 'main');
   assert.equal(items[0].git.head, newHead);
   assert.equal(items[0].git.shortHead, newHead.slice(0, 7));
+  assert.equal(items[0].git.coherence, 'coherent');
+  assert.ok(items[0].git.observedAt);
   assert.equal(items[0].git.branchChanged, false);
+  assert.deepEqual(items[0].completedItems, ['紧凑卡片', '详情 Dialog', '时间线动效']);
+  assert.deepEqual(items[0].pendingItems, ['最终发布 readiness 检查']);
+  assert.deepEqual(items[0].decisions, ['保持克制动效']);
 
   assert.equal(items[1].kind, 'relay');
   assert.equal(items[1].typeLabel, '聊天接力');
   assert.equal(items[1].summary, '后端 API 与时间线聚合已就绪');
   assert.equal(items[1].state, 'accepted');
   assert.equal(items[1].acceptedAt, resumeJson.relay.acceptedAt);
-  assert.equal(items[1].git, null); // relay does not fabricate git info
+  assert.ok(items[1].git);
+  assert.equal(items[1].git.branch, 'main');
+  assert.equal(items[1].git.coherence, 'coherent');
+  assert.ok(items[1].git.observedAt);
+  assert.deepEqual(items[1].completedItems, ['timeline.mjs 模块', 'http-server 路由']);
+  assert.deepEqual(items[1].pendingItems, ['main.jsx 弹窗重构']);
+  assert.deepEqual(items[1].decisions, ['使用倒序展示']);
 
   assert.equal(items[2].kind, 'progress');
   assert.equal(items[2].typeLabel, '工作进展');
@@ -275,6 +315,8 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[3].summary, '开始接入，基线干净');
   assert.equal(items[3].git.branch, 'main');
   assert.ok(items[3].git.head);
+  assert.equal(items[3].git.coherence, 'coherent');
+  assert.ok(items[3].git.observedAt);
 
   assert.equal(items[4].kind, 'progress');
   assert.equal(items[4].typeLabel, '工作进展');
@@ -284,19 +326,30 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[4].isLegacyNote, true);
   assert.equal(items[4].git, null);
 
+  assert.equal(items[5].kind, 'relay');
+  assert.equal(items[5].id, 'rel_legacy_null_1');
+  assert.equal(items[5].summary, '历史遗留接力摘要');
+  assert.equal(items[5].git, null); // Legacy relay without git info does not guess
+  assert.deepEqual(items[5].completedItems, ['遗留完成项']);
+  assert.deepEqual(items[5].pendingItems, ['遗留待继续']);
+  assert.deepEqual(items[5].decisions, ['遗留决定']);
+  assert.deepEqual(items[5].risks, ['遗留风险']);
+
   // Step 8: Test pagination
   const pagedRes = await get(service, `/api/v1/projects/${registered.projectId}/timeline?limit=2&offset=0`);
   assert.equal(pagedRes.status, 200);
   const paged = await pagedRes.json();
-  assert.equal(paged.total, 5);
+  assert.equal(paged.total, 6);
   assert.equal(paged.items.length, 2);
   assert.equal(paged.hasMore, true);
   assert.equal(paged.items[0].kind, 'handoff');
   assert.equal(paged.items[1].kind, 'relay');
+  assert.equal(paged.items[1].id, relayJson.relayId);
 
   const offsetRes = await get(service, `/api/v1/projects/${registered.projectId}/timeline?limit=2&offset=2`);
   assert.equal(offsetRes.status, 200);
   const offsetJson = await offsetRes.json();
+  assert.equal(offsetJson.total, 6);
   assert.equal(offsetJson.items.length, 2);
   assert.equal(offsetJson.hasMore, true);
   assert.equal(offsetJson.items[0].kind, 'progress');
@@ -306,10 +359,13 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   const finalPageRes = await get(service, `/api/v1/projects/${registered.projectId}/timeline?limit=2&offset=4`);
   assert.equal(finalPageRes.status, 200);
   const finalPageJson = await finalPageRes.json();
-  assert.equal(finalPageJson.items.length, 1);
+  assert.equal(finalPageJson.total, 6);
+  assert.equal(finalPageJson.items.length, 2);
   assert.equal(finalPageJson.hasMore, false);
   assert.equal(finalPageJson.items[0].kind, 'progress');
   assert.equal(finalPageJson.items[0].isLegacyNote, true);
+  assert.equal(finalPageJson.items[1].kind, 'relay');
+  assert.equal(finalPageJson.items[1].id, 'rel_legacy_null_1');
 
   // Step 9: 404 on non-existent project
   const notFoundRes = await get(service, '/api/v1/projects/non-existent-id');

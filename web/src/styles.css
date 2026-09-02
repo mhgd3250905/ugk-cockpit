@@ -1351,6 +1351,16 @@ summary:focus-visible {
 .relay-status-active { border: 1px solid #fed7aa; background: #fff7ed; color: #c2410c; }
 .relay-status-accepted { border: 1px solid #a7f3d0; background: #ecfdf5; color: #065f46; }
 .relay-status-expired { border: 1px solid var(--border-subtle); background: var(--bg-subtle); color: var(--ink-muted); }
+.handoff-status-chip {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.3;
+  font-weight: 700;
+  border: 1px solid #ddd6fe;
+  background: #f5f3ff;
+  color: #6d28d9;
+}
 
 .branch-change-note {
   margin-top: 10px;
@@ -1363,13 +1373,68 @@ summary:focus-visible {
 
 .branch-change-note code { font-family: var(--font-mono); }
 .timeline-bubble > h4 { margin: 13px 0 0; color: var(--ink-primary); font-size: 15px; font-weight: 740; line-height: 1.45; }
-.timeline-node-progress .timeline-bubble > h4 {
+.timeline-node-progress .timeline-bubble > h4,
+.timeline-node-relay .timeline-bubble > h4,
+.timeline-node-handoff .timeline-bubble > h4 {
   font-weight: 600;
   line-height: 1.4;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.timeline-counts-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.timeline-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  background: #f1ece4;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.timeline-details-accordion {
+  margin-top: 10px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.timeline-details-accordion summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent-primary);
+  user-select: none;
+  transition: color 0.15s ease-out;
+}
+
+.timeline-details-accordion summary:hover {
+  color: var(--accent-hover);
+}
+
+.timeline-details-content {
+  margin-top: 8px;
+  animation: details-expand-in 0.2s cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+
+@keyframes details-expand-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .timeline-progress-details-wrap {

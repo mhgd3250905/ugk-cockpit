@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 11;
+export const SUPPORTED_SCHEMA_VERSION = 12;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -367,6 +367,27 @@ CREATE INDEX idx_relays_assignment_created ON relays(assignment_id, created_at D
       }
       if (!columns.has('git_observed_at')) {
         db.exec('ALTER TABLE progress_events ADD COLUMN git_observed_at TEXT;');
+      }
+    },
+  },
+  {
+    version: 12,
+    name: 'relay-structured-git-evidence',
+    apply(db) {
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(relays)').all().map((row) => row.name),
+      );
+      if (!columns.has('git_head')) {
+        db.exec('ALTER TABLE relays ADD COLUMN git_head TEXT;');
+      }
+      if (!columns.has('git_branch')) {
+        db.exec('ALTER TABLE relays ADD COLUMN git_branch TEXT;');
+      }
+      if (!columns.has('git_coherence')) {
+        db.exec("ALTER TABLE relays ADD COLUMN git_coherence TEXT CHECK (git_coherence IN ('coherent', 'incoherent', 'unknown'));");
+      }
+      if (!columns.has('git_observed_at')) {
+        db.exec('ALTER TABLE relays ADD COLUMN git_observed_at TEXT;');
       }
     },
   },

@@ -108,6 +108,10 @@ test('relay advances the same active Run/assignment, stores only a code hash, an
     expectedRevision: progress.revision,
     continueCode: 'relay-secret-code',
     ttlMs: 60_000,
+    gitHead: 'head-relay-commit',
+    gitBranch: 'main',
+    gitCoherence: 'coherent',
+    gitObservedAt: '2026-01-01T00:00:00.000Z',
     ...relayFields,
   }, { clock: 1_800_000_000_000 });
   assert.equal(prepared.ok, true, JSON.stringify(prepared));
@@ -116,6 +120,13 @@ test('relay advances the same active Run/assignment, stores only a code hash, an
   assert.equal(prepared.revision, 3);
   assert.equal(prepared.sessionId, 'session-relay');
   assert.equal(typeof prepared.relayId, 'string');
+  assert.deepEqual(prepared.git, {
+    branch: 'main',
+    head: 'head-relay-commit',
+    shortHead: 'head-re',
+    coherence: 'coherent',
+    observedAt: '2026-01-01T00:00:00.000Z',
+  });
   assert.equal(prepared.continueCode, 'relay-secret-code');
   assert.equal(typeof prepared.continueMessage, 'string');
   assert.equal(prepared.continueMessage, [
@@ -192,6 +203,14 @@ test('relay advances the same active Run/assignment, stores only a code hash, an
   assert.equal(resumed.sessionId, prepared.sessionId);
   assert.equal(resumed.relayId, prepared.relayId);
   assert.equal(resumed.revision, 4);
+  assert.deepEqual(resumed.git, {
+    branch: 'main',
+    head: 'head-relay-commit',
+    shortHead: 'head-re',
+    coherence: 'coherent',
+    observedAt: '2026-01-01T00:00:00.000Z',
+  });
+  assert.deepEqual(resumed.relay.git, resumed.git);
   assert.equal(resumed.relay.summary, relayFields.summary);
   assert.equal(resumed.context.run.revision, 4);
 
@@ -384,4 +403,39 @@ test('stdio exposes strict relay/resume schemas and service-client forwards the 
     clientRequestId: 'stdio-resume-request',
     mcpWorkingDirectory: 'E:\\fixture\\relay',
   });
+});
+
+test('legacy relay without git evidence maps to git: null and never retroactively guesses', (t) => {
+  const db = fixture(t);
+  const at = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO assignments (
+      id, project_id, worktree_id, agent_id, task_id, scope_json,
+      status, revision, session_id, created_at, updated_at
+    ) VALUES ('assign-legacy', 'project-relay', 'worktree-relay', 'Codex', 'legacy task', '{}', 'active', 2, 'sess-legacy', ?, ?)
+  `).run(at, at);
+  db.prepare(`
+    INSERT INTO relays (
+      id, sequence, assignment_id, project_id, worktree_id,
+      session_id, run_id, client_request_id, expected_revision, revision,
+      next_session_focus, summary, current_state,
+      completed_items, pending_items, decisions,
+      artifact_refs, risks, suggested_skills,
+      git_head, git_branch, git_coherence, git_observed_at,
+      code_hash, state, expires_at, created_at
+    ) VALUES (
+      'relay-legacy-null-git', 1, 'assign-legacy', 'project-relay', 'worktree-relay',
+      'sess-legacy', NULL, 'req-legacy-null', 1, 2,
+      'next focus', 'legacy relay summary', 'legacy state',
+      '[]', '[]', '[]', '[]', '[]', '[]',
+      NULL, NULL, NULL, NULL,
+      'dummy-code-hash', 'active', 1900000000000, ?
+    )
+  `).run(at);
+
+  const active = readLatestActiveRelay(db, 'sess-legacy');
+  assert.ok(active);
+  assert.equal(active.id, 'relay-legacy-null-git');
+  assert.equal(active.git, null);
+  db.close();
 });

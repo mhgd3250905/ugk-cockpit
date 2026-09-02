@@ -42,7 +42,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            h.pending_items, h.decisions, h.artifact_refs, h.risks, h.suggested_skills,
            h.body_markdown, h.created_at,
            a.agent_id, a.task_id,
-           s.head AS snapshot_head, s.branch AS snapshot_branch
+           s.head AS snapshot_head, s.branch AS snapshot_branch,
+           s.coherence AS snapshot_coherence, s.observed_at AS snapshot_observed_at
     FROM handoffs h
     LEFT JOIN assignments a ON a.id = h.assignment_id
     LEFT JOIN snapshots s ON (s.run_id = h.session_id OR s.run_id = h.run_id) AND s.phase = 'final'
@@ -56,7 +57,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     SELECT hr.id AS receipt_id, hr.run_id, hr.outcome, hr.summary, hr.next_step,
            hr.payload_json, hr.created_at,
            r.agent_claim, r.goal, r.revision, r.created_at AS run_created_at, r.finished_at,
-           s.head AS snapshot_head, s.branch AS snapshot_branch
+           s.head AS snapshot_head, s.branch AS snapshot_branch,
+           s.coherence AS snapshot_coherence, s.observed_at AS snapshot_observed_at
     FROM handoff_receipts hr
     JOIN runs r ON r.id = hr.run_id
     JOIN projects p ON p.worktree_id = r.worktree_id
@@ -70,6 +72,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            rel.revision, rel.next_session_focus, rel.summary, rel.current_state,
            rel.completed_items, rel.pending_items, rel.decisions, rel.artifact_refs,
            rel.risks, rel.suggested_skills, rel.state, rel.created_at, rel.accepted_at,
+           rel.git_head, rel.git_branch, rel.git_coherence, rel.git_observed_at,
            a.agent_id, a.task_id,
            r.agent_claim
     FROM relays rel
@@ -97,6 +100,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            a.session_id, a.revision AS assignment_revision, a.accepted_at, a.created_at,
            pe.note AS adopted_note, pe.created_at AS adopted_at,
            s.head AS baseline_head, s.branch AS baseline_branch,
+           s.coherence AS baseline_coherence, s.observed_at AS baseline_observed_at,
            r.agent_claim, r.goal, r.created_at AS run_created_at
     FROM assignments a
     LEFT JOIN progress_events pe ON pe.assignment_id = a.id AND pe.status = 'adopted'
@@ -109,7 +113,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 
   const standaloneRuns = db.prepare(`
     SELECT r.id AS run_id, r.agent_claim, r.goal, r.created_at, r.revision,
-           s.head AS baseline_head, s.branch AS baseline_branch
+           s.head AS baseline_head, s.branch AS baseline_branch,
+           s.coherence AS baseline_coherence, s.observed_at AS baseline_observed_at
     FROM runs r
     JOIN projects p ON p.worktree_id = r.worktree_id
     LEFT JOIN snapshots s ON s.run_id = r.id AND s.phase = 'baseline'
@@ -124,10 +129,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     agent: row.agent_id || null,
     revision: row.revision ?? 1,
     sequence: row.sequence ?? 1,
-    git: (row.snapshot_branch || row.snapshot_head) ? {
+    git: (row.snapshot_branch || row.snapshot_head || row.snapshot_coherence || row.snapshot_observed_at) ? {
       branch: row.snapshot_branch ?? null,
       head: row.snapshot_head ?? null,
       shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
+      coherence: row.snapshot_coherence ?? 'unknown',
+      observedAt: row.snapshot_observed_at ?? null,
     } : null,
     summary: row.summary,
     details: [],
@@ -151,10 +158,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     agent: row.agent_claim || null,
     revision: row.revision ?? 1,
     sequence: 1,
-    git: (row.snapshot_branch || row.snapshot_head) ? {
+    git: (row.snapshot_branch || row.snapshot_head || row.snapshot_coherence || row.snapshot_observed_at) ? {
       branch: row.snapshot_branch ?? null,
       head: row.snapshot_head ?? null,
       shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
+      coherence: row.snapshot_coherence ?? 'unknown',
+      observedAt: row.snapshot_observed_at ?? null,
     } : null,
     summary: row.summary,
     details: [],
@@ -170,30 +179,39 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     bodyMarkdown: null,
   }));
 
-  const relayItems = relayRows.map((row) => ({
-    id: row.id,
-    kind: 'relay',
-    typeLabel: '聊天接力',
-    timestamp: row.created_at,
-    agent: row.agent_id || row.agent_claim || null,
-    revision: row.revision ?? 1,
-    sequence: row.sequence ?? 1,
-    git: null,
-    state: row.state || 'active',
-    acceptedAt: row.accepted_at || null,
-    summary: row.summary,
-    details: [],
-    note: null,
-    nextSessionFocus: row.next_session_focus || null,
-    currentState: row.current_state || null,
-    completedItems: parseJson(row.completed_items, []),
-    pendingItems: parseJson(row.pending_items, []),
-    decisions: parseJson(row.decisions, []),
-    artifactRefs: parseJson(row.artifact_refs, []),
-    risks: parseJson(row.risks, []),
-    suggestedSkills: parseJson(row.suggested_skills, []),
-    bodyMarkdown: null,
-  }));
+  const relayItems = relayRows.map((row) => {
+    const gitEvidence = (row.git_branch || row.git_head || row.git_coherence || row.git_observed_at) ? {
+      branch: row.git_branch ?? null,
+      head: row.git_head ?? null,
+      shortHead: row.git_head ? row.git_head.slice(0, 7) : null,
+      coherence: row.git_coherence ?? 'unknown',
+      observedAt: row.git_observed_at ?? null,
+    } : null;
+    return {
+      id: row.id,
+      kind: 'relay',
+      typeLabel: '聊天接力',
+      timestamp: row.created_at,
+      agent: row.agent_id || row.agent_claim || null,
+      revision: row.revision ?? 1,
+      sequence: row.sequence ?? 1,
+      git: gitEvidence,
+      state: row.state || 'active',
+      acceptedAt: row.accepted_at || null,
+      summary: row.summary,
+      details: [],
+      note: null,
+      nextSessionFocus: row.next_session_focus || null,
+      currentState: row.current_state || null,
+      completedItems: parseJson(row.completed_items, []),
+      pendingItems: parseJson(row.pending_items, []),
+      decisions: parseJson(row.decisions, []),
+      artifactRefs: parseJson(row.artifact_refs, []),
+      risks: parseJson(row.risks, []),
+      suggestedSkills: parseJson(row.suggested_skills, []),
+      bodyMarkdown: null,
+    };
+  });
 
   const progressItems = progressRows.map((row) => {
     const details = parseJson(row.details_json, []);
@@ -241,10 +259,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       agent: row.agent_id || row.agent_claim || null,
       revision: 1,
       sequence: 1,
-      git: (row.baseline_branch || row.baseline_head) ? {
+      git: (row.baseline_branch || row.baseline_head || row.baseline_coherence || row.baseline_observed_at) ? {
         branch: row.baseline_branch ?? null,
         head: row.baseline_head ?? null,
         shortHead: row.baseline_head ? row.baseline_head.slice(0, 7) : null,
+        coherence: row.baseline_coherence ?? 'unknown',
+        observedAt: row.baseline_observed_at ?? null,
       } : null,
       summary: row.adopted_note || row.task_id || row.goal || '接入项目与基线',
       note: row.adopted_note || null,
@@ -266,10 +286,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       agent: row.agent_claim || null,
       revision: 1,
       sequence: 1,
-      git: (row.baseline_branch || row.baseline_head) ? {
+      git: (row.baseline_branch || row.baseline_head || row.baseline_coherence || row.baseline_observed_at) ? {
         branch: row.baseline_branch ?? null,
         head: row.baseline_head ?? null,
         shortHead: row.baseline_head ? row.baseline_head.slice(0, 7) : null,
+        coherence: row.baseline_coherence ?? 'unknown',
+        observedAt: row.baseline_observed_at ?? null,
       } : null,
       summary: row.goal || '接入项目与基线',
       note: null,
@@ -412,7 +434,8 @@ export function readProjectDetail(db, projectId, options = {}) {
   const nowAt = Date.now();
   const activeRelay = activeAssignment?.session_id ? db.prepare(`
     SELECT id, session_id, revision, next_session_focus,
-           summary, expires_at, created_at
+           summary, expires_at, created_at,
+           git_head, git_branch, git_coherence, git_observed_at
     FROM relays
     WHERE session_id = ? AND state = 'active' AND expires_at > ?
     ORDER BY created_at DESC, sequence DESC, id DESC
@@ -525,6 +548,13 @@ export function readProjectDetail(db, projectId, options = {}) {
       revision: activeRelay.revision,
       nextSessionFocus: activeRelay.next_session_focus,
       summary: activeRelay.summary,
+      git: (activeRelay.git_branch || activeRelay.git_head || activeRelay.git_coherence || activeRelay.git_observed_at) ? {
+        branch: activeRelay.git_branch ?? null,
+        head: activeRelay.git_head ?? null,
+        shortHead: activeRelay.git_head ? activeRelay.git_head.slice(0, 7) : null,
+        coherence: activeRelay.git_coherence ?? 'unknown',
+        observedAt: activeRelay.git_observed_at ?? null,
+      } : null,
       expiresAt: activeRelay.expires_at,
       createdAt: activeRelay.created_at,
     } : null,

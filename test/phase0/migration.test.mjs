@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
   );
   db.close();
 });
@@ -83,6 +83,36 @@ test('version 10 database upgrades progress_events schema to version 11 without 
       created_at TEXT NOT NULL,
       UNIQUE(assignment_id, session_id, client_request_id)
     ) STRICT;
+    CREATE TABLE relays (
+      id TEXT PRIMARY KEY,
+      sequence INTEGER NOT NULL CHECK (sequence >= 1),
+      assignment_id TEXT NOT NULL REFERENCES assignments(id),
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+      session_id TEXT NOT NULL,
+      run_id TEXT,
+      client_request_id TEXT NOT NULL,
+      expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+      revision INTEGER NOT NULL CHECK (revision >= expected_revision),
+      next_session_focus TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      current_state TEXT NOT NULL,
+      completed_items TEXT NOT NULL,
+      pending_items TEXT NOT NULL,
+      decisions TEXT NOT NULL,
+      artifact_refs TEXT NOT NULL,
+      risks TEXT NOT NULL,
+      suggested_skills TEXT NOT NULL,
+      code_hash TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK (state IN ('active', 'accepted', 'expired')),
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      accepted_at TEXT,
+      accepted_client_request_id TEXT,
+      accepted_revision INTEGER,
+      UNIQUE(session_id, client_request_id),
+      UNIQUE(session_id, sequence)
+    ) STRICT;
     INSERT INTO worktrees VALUES ('wt-1', 'E:\\repo', 'repo-1', 0, '2026-01-01T00:00:00.000Z');
     INSERT INTO projects VALUES ('proj-1', 'Test', 'development', 'wt-1', 'ready', 'ready_to_start', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
     INSERT INTO assignments VALUES ('assign-1', 'proj-1', 'wt-1', 'Codex', 'Task', '{}', 'active', 2, 'sess-1', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
@@ -93,7 +123,7 @@ test('version 10 database upgrades progress_events schema to version 11 without 
 
   // Re-open (migrateDatabase)
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 11);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 12);
   const peColumns = upgraded.prepare('PRAGMA table_info(progress_events)').all().map((r) => r.name);
   assert.ok(peColumns.includes('summary'));
   assert.ok(peColumns.includes('details_json'));
@@ -131,6 +161,143 @@ test('version 10 database upgrades progress_events schema to version 11 without 
 
   assert.throws(
     () => insertStmt.run('pe-invalid', 'req-invalid', 'Invalid update', 'invalid_coherence'),
+    /CHECK constraint failed/i,
+  );
+
+  upgraded.close();
+});
+
+test('version 11 database upgrades relays schema to version 12 without losing rows', (t) => {
+  const dbPath = fixture(t, 'migration-v11');
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      applied_at TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO schema_migrations VALUES (1, 'phase0-core', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE worktrees (
+      id TEXT PRIMARY KEY,
+      canonical_path TEXT NOT NULL UNIQUE,
+      repository_identity TEXT NOT NULL,
+      lease_generation INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      stage TEXT NOT NULL CHECK (stage IN ('development', 'maintenance', 'paused')),
+      worktree_id TEXT NOT NULL UNIQUE REFERENCES worktrees(id),
+      status TEXT NOT NULL CHECK (status IN ('ready', 'attention', 'active', 'paused')),
+      status_reason TEXT NOT NULL,
+      last_observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE assignments (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+      agent_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      scope_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      session_id TEXT UNIQUE,
+      accepted_grant_id TEXT,
+      accepted_at TEXT,
+      last_heartbeat_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE relays (
+      id TEXT PRIMARY KEY,
+      sequence INTEGER NOT NULL CHECK (sequence >= 1),
+      assignment_id TEXT NOT NULL REFERENCES assignments(id),
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+      session_id TEXT NOT NULL,
+      run_id TEXT,
+      client_request_id TEXT NOT NULL,
+      expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+      revision INTEGER NOT NULL CHECK (revision >= expected_revision),
+      next_session_focus TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      current_state TEXT NOT NULL,
+      completed_items TEXT NOT NULL,
+      pending_items TEXT NOT NULL,
+      decisions TEXT NOT NULL,
+      artifact_refs TEXT NOT NULL,
+      risks TEXT NOT NULL,
+      suggested_skills TEXT NOT NULL,
+      code_hash TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK (state IN ('active', 'accepted', 'expired')),
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      accepted_at TEXT,
+      accepted_client_request_id TEXT,
+      accepted_revision INTEGER,
+      UNIQUE(session_id, client_request_id),
+      UNIQUE(session_id, sequence)
+    ) STRICT;
+    INSERT INTO worktrees VALUES ('wt-1', 'E:\\repo', 'repo-1', 0, '2026-01-01T00:00:00.000Z');
+    INSERT INTO projects VALUES ('proj-1', 'Test', 'development', 'wt-1', 'ready', 'ready_to_start', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO assignments VALUES ('assign-1', 'proj-1', 'wt-1', 'Codex', 'Task', '{}', 'active', 2, 'sess-1', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO relays VALUES (
+      'rel-1', 1, 'assign-1', 'proj-1', 'wt-1', 'sess-1', NULL, 'req-1', 1, 2,
+      'next focus', 'summary text', 'current state', '[]', '[]', '[]', '[]', '[]', '[]',
+      'hash-1', 'active', 1900000000000, '2026-01-01T00:00:00.000Z', NULL, NULL, NULL
+    );
+    PRAGMA user_version = 11;
+  `);
+  legacy.close();
+
+  // Re-open (migrateDatabase)
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 12);
+  const relayColumns = upgraded.prepare('PRAGMA table_info(relays)').all().map((r) => r.name);
+  assert.ok(relayColumns.includes('git_head'));
+  assert.ok(relayColumns.includes('git_branch'));
+  assert.ok(relayColumns.includes('git_coherence'));
+  assert.ok(relayColumns.includes('git_observed_at'));
+
+  const row = upgraded.prepare('SELECT * FROM relays WHERE id = ?').get('rel-1');
+  assert.equal(row.summary, 'summary text');
+  assert.equal(row.git_head, null);
+  assert.equal(row.git_branch, null);
+  assert.equal(row.git_coherence, null);
+  assert.equal(row.git_observed_at, null);
+
+  const insertStmt = upgraded.prepare(`
+    INSERT INTO relays (
+      id, sequence, assignment_id, project_id, worktree_id,
+      session_id, run_id, client_request_id, expected_revision, revision,
+      next_session_focus, summary, current_state,
+      completed_items, pending_items, decisions,
+      artifact_refs, risks, suggested_skills,
+      code_hash, state, expires_at, created_at,
+      git_head, git_branch, git_coherence, git_observed_at
+    ) VALUES (
+      ?, ?, 'assign-1', 'proj-1', 'wt-1', 'sess-1', NULL, ?, 2, 3,
+      'next', 'summary', 'state', '[]', '[]', '[]', '[]', '[]', '[]',
+      ?, 'active', 1900000000000, '2026-01-01T00:00:00.000Z',
+      NULL, NULL, ?, NULL
+    )
+  `);
+
+  insertStmt.run('rel-coherent', 2, 'req-coherent', 'hash-coherent', 'coherent');
+  insertStmt.run('rel-incoherent', 3, 'req-incoherent', 'hash-incoherent', 'incoherent');
+  insertStmt.run('rel-unknown', 4, 'req-unknown', 'hash-unknown', 'unknown');
+  insertStmt.run('rel-null', 5, 'req-null', 'hash-null', null);
+
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM relays WHERE id = ?').get('rel-coherent').git_coherence, 'coherent');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM relays WHERE id = ?').get('rel-incoherent').git_coherence, 'incoherent');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM relays WHERE id = ?').get('rel-unknown').git_coherence, 'unknown');
+  assert.equal(upgraded.prepare('SELECT git_coherence FROM relays WHERE id = ?').get('rel-null').git_coherence, null);
+
+  assert.throws(
+    () => insertStmt.run('rel-invalid', 6, 'req-invalid', 'hash-invalid', 'invalid_coherence'),
     /CHECK constraint failed/i,
   );
 

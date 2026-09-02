@@ -198,6 +198,13 @@ function parseJson(encoded, fallback) {
 
 function mapRelay(row) {
   if (!row) return null;
+  const gitEvidence = (row.git_branch || row.git_head || row.git_coherence || row.git_observed_at) ? {
+    branch: row.git_branch ?? null,
+    head: row.git_head ?? null,
+    shortHead: row.git_head ? row.git_head.slice(0, 7) : null,
+    coherence: row.git_coherence ?? 'unknown',
+    observedAt: row.git_observed_at ?? null,
+  } : null;
   return {
     ok: true,
     id: row.id,
@@ -225,6 +232,7 @@ function mapRelay(row) {
     codeHash: row.code_hash,
     state: row.state,
     status: row.state,
+    git: gitEvidence,
     expiresAt: row.expires_at,
     expiresAtIso: new Date(row.expires_at).toISOString(),
     createdAt: row.created_at,
@@ -284,6 +292,7 @@ function preparedResponse(row, continueCode = null) {
     assignmentId: row.assignment_id,
     projectId: row.project_id,
     worktreeId: row.worktree_id,
+    git: relay.git,
     expiresAt: row.expires_at,
     expiresAtIso: new Date(row.expires_at).toISOString(),
     nextSessionFocus: relay.nextSessionFocus,
@@ -322,6 +331,7 @@ function acceptedResponse(row, context, acceptedRevision) {
     assignmentId: row.assignment_id,
     projectId: row.project_id,
     worktreeId: row.worktree_id,
+    git: relay.git,
     relay,
     relayContext: relay,
     nextSessionFocus: relay.nextSessionFocus,
@@ -429,6 +439,10 @@ export function createRelay(db, request = {}, options = {}) {
   if (!isNonEmptyString(relayId)) return invalid('relayId must be non-empty.');
   const continueCode = request.continueCode ?? randomBytes(32).toString('base64url');
   if (!isNonEmptyString(continueCode)) return invalid('continueCode must be non-empty.');
+  const gitHead = request.gitHead ?? request.git_head ?? null;
+  const gitBranch = request.gitBranch ?? request.git_branch ?? null;
+  const gitCoherence = request.gitCoherence ?? request.git_coherence ?? null;
+  const gitObservedAt = request.gitObservedAt ?? request.git_observed_at ?? null;
   const codeHash = digest(continueCode);
   const commandId = request.commandId
     ?? commandIdFor('relay.create', relayId, clientRequestId);
@@ -588,8 +602,9 @@ export function createRelay(db, request = {}, options = {}) {
         next_session_focus, summary, current_state,
         completed_items, pending_items, decisions,
         artifact_refs, risks, suggested_skills,
+        git_head, git_branch, git_coherence, git_observed_at,
         code_hash, state, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
     `).run(
       relayId,
       sequence,
@@ -610,6 +625,10 @@ export function createRelay(db, request = {}, options = {}) {
       canonicalJson(fields.artifactRefs),
       canonicalJson(fields.risks),
       canonicalJson(fields.suggestedSkills),
+      gitHead,
+      gitBranch,
+      gitCoherence,
+      gitObservedAt,
       codeHash,
       expiry.expiresAt,
       at,
