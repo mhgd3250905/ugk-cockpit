@@ -248,6 +248,12 @@ export function refreshProject(db, request) {
       status,
       statusReason,
       observedAt: observation.observedAt,
+      git: {
+        head: observation.after.head ?? null,
+        branch: observation.after.branch ?? null,
+        hasChanges: Boolean(observation.after.hasChanges),
+        coherence: observation.coherence ?? 'unknown',
+      },
     };
     db.prepare(`
       UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?

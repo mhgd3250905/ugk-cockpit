@@ -1286,3 +1286,90 @@ test('HTTP empty folder selection, spaces listing, and space workspace creation'
   });
   await assertUserError(notFoundList, 404, 'PROJECT_NOT_FOUND');
 });
+
+test('HTTP refreshes a stale main-project observation before development-space creation', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  const tempContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-stale-space-'));
+  const emptyFolder = path.join(tempContainer, 'empty-dir');
+  mkdirSync(emptyFolder, { recursive: true });
+
+  let currentSelectedFolder = root;
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root, tempContainer],
+    folderPicker: async () => currentSelectedFolder,
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+    rmSync(tempContainer, { recursive: true, force: true });
+  });
+
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    'content-type': 'application/json',
+  };
+  const selectedProject = await (await request(service, '/api/v1/folders/select', {
+    method: 'POST',
+    headers,
+  })).json();
+  const registered = await (await request(service, '/api/v1/projects', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'register-stale-space-project',
+      grantId: selectedProject.grantId,
+      name: 'Stale Space Project',
+    }),
+  })).json();
+  const staleHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+  writeFileSync(path.join(root, 'CHANGE.md'), 'new main work\n', 'utf8');
+  execFileSync('git', ['add', 'CHANGE.md'], { cwd: root, windowsHide: true, stdio: 'pipe' });
+  execFileSync('git', ['commit', '-m', 'advance main'], { cwd: root, windowsHide: true, stdio: 'pipe' });
+  const currentHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  assert.notEqual(currentHead, staleHead);
+
+  currentSelectedFolder = emptyFolder;
+  const selectedEmpty = await (await request(service, '/api/v1/folders/select-empty', {
+    method: 'POST',
+    headers,
+  })).json();
+  const staleCreate = await request(service, `/api/v1/projects/${registered.projectId}/spaces`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'create-space-from-stale-head',
+      grantId: selectedEmpty.grantId,
+      expectedBaseHead: staleHead,
+      name: 'stale-space',
+    }),
+  });
+  await assertUserError(staleCreate, 409, 'BASE_HEAD_STALE');
+
+  const refreshResponse = await request(service, `/api/v1/projects/${registered.projectId}/refresh`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ commandId: 'refresh-before-space-create' }),
+  });
+  assert.equal(refreshResponse.status, 200);
+  const refreshed = await refreshResponse.json();
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.git.head, currentHead);
+  assert.equal(refreshed.git.branch, 'main');
+
+  const createResponse = await request(service, `/api/v1/projects/${registered.projectId}/spaces`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'create-space-after-refresh',
+      grantId: selectedEmpty.grantId,
+      expectedBaseHead: refreshed.git.head,
+      name: 'fresh-space',
+    }),
+  });
+  assert.equal(createResponse.status, 201, await createResponse.clone().text());
+  assert.equal((await createResponse.json()).ok, true);
+});

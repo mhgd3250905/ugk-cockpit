@@ -635,12 +635,16 @@ function App() {
     try {
       const selected = await api('/api/v1/folders/select-empty', { method: 'POST', body: '{}' });
       if (selected.cancelled) return;
+      const refreshed = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/refresh`, {
+        method: 'POST',
+        body: JSON.stringify({ commandId: crypto.randomUUID() }),
+      });
       const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/spaces`, {
         method: 'POST',
         body: JSON.stringify({
           commandId: crypto.randomUUID(),
           grantId: selected.grantId,
-          expectedBaseHead: project.git.head,
+          expectedBaseHead: refreshed.git.head,
           name: selected.folderName || '通用开发空间',
         }),
       });

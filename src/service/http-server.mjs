@@ -24,7 +24,7 @@ import {
   revalidateAuthorizedPath,
   revalidateEmptyDirectory,
 } from '../core/path-guard.mjs';
-import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
+import { readDashboard, readProjectContext, refreshProject, registerProject } from '../core/projects.mjs';
 import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
 import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
@@ -1533,6 +1533,26 @@ export async function createCockpitHttpServer({
           commandId: body.commandId,
           extra: { project_id: result.projectId ?? null },
         });
+        return;
+      }
+
+      const projectRefreshMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/refresh$/);
+      if (request.method === 'POST' && projectRefreshMatch) {
+        const projectId = decodeURIComponent(projectRefreshMatch[1]);
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        if (Object.keys(body).some((key) => key !== 'commandId')) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const { observation } = await observeRegisteredProject(projectId);
+        const result = refreshProject(db, {
+          commandId: body.commandId,
+          projectId,
+          observation,
+        });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, { commandId: body.commandId });
         return;
       }
 
