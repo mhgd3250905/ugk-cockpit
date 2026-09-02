@@ -1346,6 +1346,10 @@ summary:focus-visible {
 .git-chip { border: 1px solid #bfdbfe; background: #eff6ff; color: #1e5f99; font-family: var(--font-mono); }
 .git-commit { border-color: var(--border-subtle); background: #f8fafc; color: var(--ink-muted); }
 .git-unrecorded { border: 1px dashed var(--border-strong); color: var(--ink-faint); }
+.relay-status-chip { padding: 3px 7px; border-radius: 999px; font-size: 10px; line-height: 1.3; font-weight: 700; }
+.relay-status-active { border: 1px solid #fed7aa; background: #fff7ed; color: #c2410c; }
+.relay-status-accepted { border: 1px solid #a7f3d0; background: #ecfdf5; color: #065f46; }
+.relay-status-expired { border: 1px solid var(--border-subtle); background: var(--bg-subtle); color: var(--ink-muted); }
 
 .branch-change-note {
   margin-top: 10px;

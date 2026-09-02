@@ -49,7 +49,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            rel.session_id, rel.run_id, rel.client_request_id, rel.expected_revision,
            rel.revision, rel.next_session_focus, rel.summary, rel.current_state,
            rel.completed_items, rel.pending_items, rel.decisions, rel.artifact_refs,
-           rel.risks, rel.suggested_skills, rel.state, rel.created_at,
+           rel.risks, rel.suggested_skills, rel.state, rel.created_at, rel.accepted_at,
            a.agent_id, a.task_id,
            r.agent_claim
     FROM relays rel
@@ -155,6 +155,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     revision: row.revision ?? 1,
     sequence: row.sequence ?? 1,
     git: null,
+    state: row.state || 'active',
+    acceptedAt: row.accepted_at || null,
     summary: row.summary,
     note: null,
     nextSessionFocus: row.next_session_focus || null,

@@ -116,6 +116,38 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(relayRes.status, 200);
   const relayJson = await relayRes.json();
 
+  // Verify relay item in timeline is active before resume
+  const detailBeforeResumeRes = await get(service, `/api/v1/projects/${registered.projectId}`);
+  assert.equal(detailBeforeResumeRes.status, 200);
+  const detailBeforeResume = await detailBeforeResumeRes.json();
+  const activeRelayItem = detailBeforeResume.timeline.items.find((it) => it.kind === 'relay');
+  assert.ok(activeRelayItem);
+  assert.equal(activeRelayItem.id, relayJson.relayId);
+  assert.equal(activeRelayItem.state, 'active');
+  assert.equal(activeRelayItem.acceptedAt, null);
+
+  // Resume relay in same worktree
+  const resumeRes = await post(service, '/api/v1/mcp/work/resume', {
+    continueCode: relayJson.continueCode,
+    clientRequestId: 'req-resume-1',
+    mcpWorkingDirectory: root,
+  });
+  assert.equal(resumeRes.status, 200);
+  const resumeJson = await resumeRes.json();
+  assert.equal(resumeJson.ok, true);
+  assert.equal(resumeJson.relay.state, 'accepted');
+  assert.ok(resumeJson.relay.acceptedAt);
+
+  // Verify relay item in timeline is now accepted with exact acceptedAt
+  const detailAfterResumeRes = await get(service, `/api/v1/projects/${registered.projectId}`);
+  assert.equal(detailAfterResumeRes.status, 200);
+  const detailAfterResume = await detailAfterResumeRes.json();
+  const acceptedRelayItem = detailAfterResume.timeline.items.find((it) => it.kind === 'relay');
+  assert.ok(acceptedRelayItem);
+  assert.equal(acceptedRelayItem.id, relayJson.relayId);
+  assert.equal(acceptedRelayItem.state, 'accepted');
+  assert.equal(acceptedRelayItem.acceptedAt, resumeJson.relay.acceptedAt);
+
   // Step 5: Commit on main
   writeFileSync(path.join(root, 'TIMELINE.md'), '# Timeline Feature\n');
   execFileSync('git', ['add', 'TIMELINE.md'], { cwd: root });
@@ -126,7 +158,7 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   const handoffRes = await post(service, '/api/v1/mcp/work/handoff', {
     sessionId: initJson.sessionId,
     clientRequestId: 'req-handoff-1',
-    expectedRevision: relayJson.revision,
+    expectedRevision: resumeJson.revision,
     outcome: 'completed',
     nextSessionFocus: '验证浏览器端动效',
     summary: '已完成时间线与大尺寸项目详情弹窗',
@@ -164,6 +196,8 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[1].kind, 'relay');
   assert.equal(items[1].typeLabel, '聊天接力');
   assert.equal(items[1].summary, '后端 API 与时间线聚合已就绪');
+  assert.equal(items[1].state, 'accepted');
+  assert.equal(items[1].acceptedAt, resumeJson.relay.acceptedAt);
   assert.equal(items[1].git, null); // relay does not fabricate git info
 
   assert.equal(items[2].kind, 'progress');

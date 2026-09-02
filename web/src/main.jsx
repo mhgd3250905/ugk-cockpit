@@ -88,6 +88,37 @@ function formatTime(value) {
   }
 }
 
+export function calculateRefreshLimit(currentCount) {
+  const count = typeof currentCount === 'number' && Number.isFinite(currentCount) ? currentCount : 30;
+  return Math.min(100, Math.max(30, Math.floor(count)));
+}
+
+export function getRelayStateInfo(item) {
+  if (!item || item.kind !== 'relay') return null;
+  if (item.state === 'accepted') {
+    return {
+      state: 'accepted',
+      label: '新会话已接手',
+      acceptedAt: item.acceptedAt ?? null,
+      statusTheme: 'accepted',
+    };
+  }
+  if (item.state === 'expired') {
+    return {
+      state: 'expired',
+      label: '接力已过期',
+      acceptedAt: null,
+      statusTheme: 'expired',
+    };
+  }
+  return {
+    state: 'active',
+    label: '等待新会话接手',
+    acceptedAt: null,
+    statusTheme: 'active',
+  };
+}
+
 function getProjectStatusReason(project) {
   if (project?.status === 'paused' || project?.stage === 'paused') return 'user_paused';
   return project?.statusReason ?? 'ready_to_start';
@@ -244,6 +275,46 @@ function App() {
   const [dispatch, setDispatch] = useState(null);
   const [projectDetail, setProjectDetail] = useState(null);
   const detailRequestRef = useRef(0);
+  const projectDetailRef = useRef(projectDetail);
+  const activeDetailProjectId = projectDetail?.seed?.id ?? null;
+
+  useEffect(() => {
+    projectDetailRef.current = projectDetail;
+  }, [projectDetail]);
+
+  useEffect(() => {
+    if (!activeDetailProjectId) return;
+
+    async function pollProjectDetail() {
+      const current = projectDetailRef.current;
+      if (!current || current.seed.id !== activeDetailProjectId || current.loadingMore) return;
+      const count = current.data?.timeline?.items?.length ?? 30;
+      const limit = calculateRefreshLimit(count);
+      const requestId = detailRequestRef.current;
+      try {
+        const data = await api(
+          `/api/v1/projects/${encodeURIComponent(activeDetailProjectId)}?limit=${limit}&offset=0`
+        );
+        if (detailRequestRef.current !== requestId) return;
+        setProjectDetail((prev) => {
+          if (!prev || prev.seed.id !== activeDetailProjectId || prev.loadingMore) return prev;
+          const visibleCount = prev.data?.timeline?.items?.length ?? 0;
+          if (visibleCount > limit) return prev;
+          return {
+            ...prev,
+            data,
+            loading: false,
+            error: null,
+          };
+        });
+      } catch {
+        // Retain currently displayed content without overlaying error
+      }
+    }
+
+    const timer = setInterval(pollProjectDetail, 4000);
+    return () => clearInterval(timer);
+  }, [activeDetailProjectId]);
 
   async function refresh({ successNotice = null } = {}) {
     try {
@@ -569,7 +640,7 @@ function App() {
             <div className="brand-title-wrap">
               <span className="brand-mark" aria-hidden="true">■</span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha.19</span>
+              <span className="badge badge-version">v0.1.0-alpha.20</span>
             </div>
             <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
           </div>
@@ -1016,6 +1087,7 @@ function TimelineNode({ item, index }) {
     ['关键决定', item.decisions],
     ['风险', item.risks],
   ].filter(([, values]) => Array.isArray(values) && values.length > 0);
+  const relayInfo = getRelayStateInfo(item);
 
   return (
     <li
@@ -1041,6 +1113,11 @@ function TimelineNode({ item, index }) {
             </>
           ) : (
             <span className="git-unrecorded">当时分支未记录</span>
+          )}
+          {relayInfo && (
+            <span className={`relay-status-chip relay-status-${relayInfo.statusTheme}`}>
+              {relayInfo.label}{relayInfo.acceptedAt ? ` · ${formatTime(relayInfo.acceptedAt)}` : ''}
+            </span>
           )}
         </div>
 
