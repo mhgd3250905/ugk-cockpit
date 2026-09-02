@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 16;
+export const SUPPORTED_SCHEMA_VERSION = 17;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -557,6 +557,40 @@ CREATE TABLE empty_folder_grants (
 
 CREATE INDEX idx_empty_folder_grants_expiry ON empty_folder_grants(state, expires_at);
 CREATE INDEX idx_empty_folder_grants_canonical ON empty_folder_grants(canonical_path);
+`,
+  },
+  {
+    version: 17,
+    name: 'submission-attempts',
+    sql: `
+CREATE TABLE submission_attempts (
+  command_id TEXT PRIMARY KEY REFERENCES commands(id),
+  session_id TEXT NOT NULL,
+  assignment_revision INTEGER NOT NULL CHECK (assignment_revision >= 1),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  space_id TEXT NOT NULL REFERENCES development_spaces(id),
+  source_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  target_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  source_branch TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  start_head TEXT NOT NULL,
+  target_head TEXT NOT NULL,
+  remote_name TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  commit_message TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'local_saved', 'pushed', 'completed', 'attention')),
+  source_commit TEXT,
+  submission_id TEXT REFERENCES submissions(id),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_submission_attempts_space_state
+  ON submission_attempts(space_id, state, updated_at DESC);
+CREATE INDEX idx_submission_attempts_session
+  ON submission_attempts(session_id, updated_at DESC);
 `,
   },
 ];

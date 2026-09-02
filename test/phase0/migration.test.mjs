@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
   );
   db.close();
 });
@@ -403,7 +403,7 @@ test('legacy version 2 marker is repaired when identity columns are absent', (t)
   repaired.close();
 });
 
-test('version 12 database upgrades to version 15 with repository_identity backfilled and new tables created', (t) => {
+test('version 12 database upgrades through current schema with repository identity backfilled', (t) => {
   const dbPath = fixture(t, 'migration-v12');
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
@@ -559,7 +559,7 @@ test('version 12 database upgrades to version 15 with repository_identity backfi
   upgraded.close();
 });
 
-test('version 8 database upgrades to version 15 preserving existing assignments', (t) => {
+test('version 8 database upgrades through current schema preserving existing assignments', (t) => {
   const dbPath = fixture(t, 'migration-v8');
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
@@ -634,7 +634,7 @@ test('version 8 database upgrades to version 15 preserving existing assignments'
   upgraded.close();
 });
 
-test('version 4 database upgrades to version 16 preserving projects', (t) => {
+test('version 4 database upgrades through current schema preserving projects', (t) => {
   const dbPath = fixture(t, 'migration-v4');
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
@@ -677,7 +677,7 @@ test('version 4 database upgrades to version 16 preserving projects', (t) => {
   upgraded.close();
 });
 
-test('version 15 database upgrades to version 16 creating empty_folder_grants table and indexes', (t) => {
+test('version 15 database upgrades through current schema creating empty_folder_grants', (t) => {
   const dbPath = fixture(t, 'migration-v15');
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
@@ -703,7 +703,7 @@ test('version 15 database upgrades to version 16 creating empty_folder_grants ta
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 16);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
 
   // Verify empty_folder_grants table exists
   const cols = upgraded.prepare('PRAGMA table_info(empty_folder_grants)').all().map((r) => r.name);
@@ -733,6 +733,25 @@ test('version 15 database upgrades to version 16 creating empty_folder_grants ta
     /CHECK constraint failed/i,
   );
 
+  upgraded.close();
+});
+
+test('version 16 database upgrades to version 17 creating durable submission attempts', (t) => {
+  const dbPath = fixture(t, 'migration-v16');
+  const legacy = openCockpitDatabase(dbPath);
+  legacy.exec('PRAGMA user_version = 16');
+  legacy.prepare('DELETE FROM schema_migrations WHERE version = 17').run();
+  legacy.exec('DROP TABLE submission_attempts');
+  legacy.close();
+
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 17);
+  const columns = upgraded.prepare('PRAGMA table_info(submission_attempts)').all()
+    .map((row) => row.name);
+  assert.ok(columns.includes('command_id'));
+  assert.ok(columns.includes('state'));
+  assert.ok(columns.includes('source_commit'));
+  assert.ok(columns.includes('submission_id'));
   upgraded.close();
 });
 
