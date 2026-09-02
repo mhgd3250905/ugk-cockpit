@@ -569,7 +569,7 @@ function App() {
             <div className="brand-title-wrap">
               <span className="brand-mark" aria-hidden="true">■</span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha.18</span>
+              <span className="badge badge-version">v0.1.0-alpha.19</span>
             </div>
             <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
           </div>

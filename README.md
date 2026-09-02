@@ -4,7 +4,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.18` — 主界面项目卡片收敛为紧凑概览；点击项目后按需打开大尺寸运行详情，以最新在上的 `init / progress / relay / handoff` 节点时间线展示工作过程，并只在有证据时附带 Git 分支与提交信息。时间线提供克制的入场与微交互动效，同时完整支持减少动态效果设置。
+`0.1.0-alpha.19` — Windows 系统文件夹选择器由旧版 WinForms FolderBrowserDialog 升级为原生 COM `IFileOpenDialog`（开启 `FOS_PICKFOLDERS`、`FOS_FORCEFILESYSTEM` 与 `FOS_PATHMUSTEXIST` 模式），提供标准文件资源管理器导航体验，支持稳定 Client GUID 位置记忆，并通过纯 ASCII Unicode 转义根除 Windows PowerShell 5.1 环境下的中文字符乱码问题；保持置顶宿主窗口、非错误取消与标准输出契约不变。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
