@@ -266,7 +266,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
         coherence: row.baseline_coherence ?? 'unknown',
         observedAt: row.baseline_observed_at ?? null,
       } : null,
-      summary: row.adopted_note || row.task_id || row.goal || '接入项目与基线',
+      summary: row.task_id || row.goal || truncateLegacyNote(row.adopted_note, 80) || '接入项目与基线',
       note: row.adopted_note || null,
       nextSessionFocus: null,
       currentState: row.adopted_note || null,

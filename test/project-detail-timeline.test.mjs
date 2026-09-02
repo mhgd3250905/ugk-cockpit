@@ -66,6 +66,8 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
 
   // Step 2: Init assignment and adopt
   const targetTask = '构建时间线详情弹窗';
+  const initCurrentState = '接入前已经完成数据层摸排、接口约束核对和历史记录整理；当前工作区保留既有改动，后续只处理时间线详情弹窗并补齐验证证据。历史截图、发布记录和其他项目内容均保持原样，不在本次工作范围内，也不会为了得到干净状态而被清理或覆盖。';
+  assert.ok(initCurrentState.length > 80);
   const assignRes = await post(service, `/api/v1/projects/${registered.projectId}/assignments`, {
     clientRequestId: 'req-assign-1',
     agent: 'Codex',
@@ -81,7 +83,7 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
     initCode,
     clientRequestId: 'req-init-1',
     currentTask: targetTask,
-    currentState: '开始接入，基线干净',
+    currentState: initCurrentState,
     mcpWorkingDirectory: root,
   });
   assert.equal(initRes.status, 200);
@@ -312,7 +314,9 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
 
   assert.equal(items[3].kind, 'init');
   assert.equal(items[3].typeLabel, '接入项目');
-  assert.equal(items[3].summary, '开始接入，基线干净');
+  assert.equal(items[3].summary, targetTask);
+  assert.equal(items[3].currentState, initCurrentState);
+  assert.equal(items[3].note, initCurrentState);
   assert.equal(items[3].git.branch, 'main');
   assert.ok(items[3].git.head);
   assert.equal(items[3].git.coherence, 'coherent');

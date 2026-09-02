@@ -24,6 +24,7 @@
 - `0.1.0-alpha.23`：新增 `$cockpit-closeout` 阶段收束检查点；它只核对已知阶段 delta、确定的 canonical 对齐项和必要验证，并以本地 commit SHA 记录一个非终态 progress 检查点，不因该 commit 重复记录。relay 准备只复用已知未对齐项，completed handoff 在同一手动工作流中必须先执行或复用对当前 HEAD 仍有效的 closeout；三者均须用户显式触发。
 - `0.1.0-alpha.24`：收紧 `$cockpit-closeout` 的两阶段门禁；Preflight 必须从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现并核对当前 canonical source，完整核对 tracked/untracked 归属并绑定验证证据到 source state；来源、归属或证据无法证明时 fail closed，成功报告分开 Agent alignment 与 MCP-verified Git/session 事实。
 - `0.1.0-alpha.25`：前端改为深色优先控制台视觉，提供「亮色 / 暗色 / 跟随系统」三档手动切换与 localStorage 持久化。色值全量转换为语义设计令牌，状态色收敛为左侧色条与徽标；项目卡片改为紧凑三行结构，时间线收敛节点色与强调形状，中文字重规范为 400/600/700 并禁用负字距；首绘前同步脚本注入主题与 color-scheme，Vite 构建版本号自 package.json 自动派生。
+- `0.1.0-alpha.26`：补齐 INIT 节点的规范化展示，以接入时的工作目标作为摘要，完整 currentState 收入“查看接入状态”折叠区；历史记录无需迁移即可避免长段文字占满时间线，并继续保留基线 Git 证据。
 - 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；closeout、relay 与 handoff 都只在用户显式动作中执行，`completed` handoff 的选择可伴随 closeout。closeout 先通过只读 Preflight，再处理确定性对齐问题。
 
 ## 产品方向：晨间工作简报

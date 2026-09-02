@@ -1187,6 +1187,7 @@ function TimelineNode({ item, index }) {
   ].filter(([, values]) => Array.isArray(values) && values.length > 0);
   const relayInfo = getRelayStateInfo(item);
   const isRelayOrHandoff = item.kind === 'relay' || item.kind === 'handoff';
+  const hasCollapsibleContext = isRelayOrHandoff || item.kind === 'init';
   const hasCounts = isRelayOrHandoff && (
     (item.completedItems?.length > 0) ||
     (item.pendingItems?.length > 0) ||
@@ -1275,10 +1276,14 @@ function TimelineNode({ item, index }) {
           <div className="timeline-next-focus"><span>下一步</span>{item.nextSessionFocus}</div>
         )}
 
-        {isRelayOrHandoff ? (
+        {hasCollapsibleContext ? (
           hasContextDetails && (
             <details className="timeline-details-accordion">
-              <summary>{item.kind === 'relay' ? '查看接力上下文' : '查看交接详情'}</summary>
+              <summary>{item.kind === 'relay'
+                ? '查看接力上下文'
+                : item.kind === 'handoff'
+                  ? '查看交接详情'
+                  : '查看接入状态'}</summary>
               <div className="timeline-details-content">
                 {item.currentState && item.currentState !== item.summary && (
                   <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
