@@ -22,7 +22,8 @@
 - `0.1.0-alpha.21`：progress 改为一句摘要加结构化详情，服务端在事件发生时采集并固化分支/HEAD；旧 note 原文保留并折叠展示，不对历史 Git 状态作事后推断。
 - `0.1.0-alpha.22`：RELAY/HANDOFF 默认收束为摘要、状态、Git、下一步和数量概览，完整上下文按需展开；新 RELAY 固化服务端 Git 证据，并修复 INIT/HANDOFF 可信快照被误标为未确认的问题。
 - `0.1.0-alpha.23`：新增 `$cockpit-closeout` 阶段收束检查点；它只核对已知阶段 delta、确定的 canonical 对齐项和必要验证，并以本地 commit SHA 记录一个非终态 progress 检查点，不因该 commit 重复记录。relay 准备只复用已知未对齐项，completed handoff 在同一手动工作流中必须先执行或复用对当前 HEAD 仍有效的 closeout；三者均须用户显式触发。
-- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；closeout、relay 与 handoff 都只在用户显式动作中执行，`completed` handoff 的选择可伴随 closeout。
+- `0.1.0-alpha.24`：收紧 `$cockpit-closeout` 的两阶段门禁；Preflight 必须从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现并核对当前 canonical source，完整核对 tracked/untracked 归属并绑定验证证据到 source state；来源、归属或证据无法证明时 fail closed，成功报告分开 Agent alignment 与 MCP-verified Git/session 事实。
+- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；closeout、relay 与 handoff 都只在用户显式动作中执行，`completed` handoff 的选择可伴随 closeout。closeout 先通过只读 Preflight，再处理确定性对齐问题。
 
 ## 产品方向：晨间工作简报
 
@@ -75,7 +76,7 @@
 - 存在尚未交接的旧会话：保持“会话已接入”，展示最近确认节点；只有用户显式 relay、handoff 或 takeover 才转换状态；
 - 代码位置身份变化：停止，要求用户重新选择，绝不自动重绑。
 
-消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。阶段需要收束时，用户可显式调用 `$cockpit-closeout`：AI 只核对当前阶段 delta，修正确定的 canonical 对齐项，运行必要验证，并记录指向本地 commit SHA 的一个非终态 progress 检查点，不因该 commit 再额外记录。上下文堆积时，用户可显式调用 `$cockpit-relay`：准备只复用已知事实和本阶段已观察到的未对齐项，不扫描全仓、运行测试、修文档或创建 commit；新聊天调用 `ugk_work_resume` 继续同一工作会话，恢复模式不执行对齐检查。只有用户显式选择结束阶段时，才通过 `$cockpit-handoff` 收束；选择 `completed` 时在同一手动 handoff 工作流中先执行或复用对当前 HEAD 仍有效的完整 closeout，`blocked`/`abandoned` 不要求 closeout。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
+消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。阶段需要收束时，用户可显式调用 `$cockpit-closeout`：AI 先从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现当前 canonical source，再核对当前阶段 delta、完整 tracked/untracked 归属和绑定到 source state 的验证证据；Preflight 通过后才修正确定的对齐项、运行必要验证，并记录指向本地 commit SHA 的一个非终态 progress 检查点，不因该 commit 再额外记录。来源、归属或证据无法证明时只报告并停止。上下文堆积时，用户可显式调用 `$cockpit-relay`：准备只复用已知事实和本阶段已观察到的未对齐项，不扫描全仓、运行测试、修文档或创建 commit；新聊天调用 `ugk_work_resume` 继续同一工作会话，恢复模式不执行对齐检查。只有用户显式选择结束阶段时，才通过 `$cockpit-handoff` 收束；选择 `completed` 时在同一手动 handoff 工作流中先执行或复用对当前 HEAD 仍有效的完整 closeout，`blocked`/`abandoned` 不要求 closeout。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
 
 ### 5. 结束工作
 

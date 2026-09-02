@@ -1,29 +1,78 @@
 ---
 name: cockpit-closeout
-description: 用户显式要求收束当前 Cockpit 阶段时，对已知阶段 delta 做有限对齐、验证并记录指向本地 commit SHA 的非终态检查点。
+description: 用户显式要求收束当前 Cockpit 阶段时，先以可证明的 Preflight 发现并核对与阶段 delta 相关的 canonical 来源、完整工作区归属和验证证据，再有限修正、验证并记录指向本地 commit SHA 的非终态检查点。
 ---
 
 # UGK Cockpit 阶段收束
 
-本 Skill 只能由用户显式调用（`$cockpit-closeout`），或作为用户明确选择 `outcome: "completed"` 的同一手动 handoff 工作流的伴随前置执行。它负责把当前阶段的事实收束到一个可核对的本地 `commit SHA`，但不结束 Cockpit session，也不自动触发交接；不后台或定时运行。
+本 Skill 只能由用户显式调用（`$cockpit-closeout`），或作为用户明确选择 `outcome: "completed"` 的同一手动 handoff 工作流的伴随前置执行。它不后台或定时运行，不结束 Cockpit session，不自动 relay/handoff，也不把普通完成、commit 或测试通过当作收束授权。
 
-## 前置条件
+## 硬门槛：两阶段且顺序不可交换
 
-只在已有 `active` Cockpit session 且掌握最近一次成功 MCP 返回的可信 `sessionId` 和 `revision` 时工作。`sessionId` 与 `revision` 不得猜测、从旧消息拼接或自行递增；缺任一项时停止实际收束，只向用户报告需要先接入或恢复会话。
+所有 closeout 必须严格经过：
 
-还必须能明确说明本阶段基线、canonical 文档/配置/记录、收束范围和改动归属。任一项不明，或当前工作区含无法归属的用户改动时，停止实际收束并给出只读报告；不替用户猜测、不覆盖或清理这些改动。
+```text
+阶段一：Preflight（只读发现与证据绑定）
+    ↓ 全部通过；任何失败都 fail closed
+阶段二：Alignment / Closeout（只修正确定问题、验证、形成或复用 HEAD）
+    ↓ 无未解决问题且 SHA 已核对
+唯一一次非终态 ugk_work_progress
+```
 
-## 收束流程
+阶段一完成前禁止编辑、`git add`、commit、创建空提交或调用 `ugk_work_progress`。Preflight 可以发现确定的 alignment finding，但不能在发现阶段顺手修改；只有来源、范围、归属和证据都可证明时，才可进入阶段二。任一事实缺失、来源无法判定、状态输出被截断或改动无法归属，都必须停止，只作只读失败报告，不编辑、不暂存、不 commit、不 progress。
 
-1. 只核对当前阶段 delta 和已知事实。使用显式工作目录、有界输出的 Git/文件检查，确认当前 `HEAD`、已知改动和目标 canonical 文件；只在当前已授权项目/工作副本内工作，不得扫描或修改当前项目之外的其他项目/仓库。
-2. 只修正可由基线、canonical 来源和当前事实确定的对齐问题，例如已知的文档、配置或记录不一致。不要顺手重构、升级依赖、补建台账，或修改实现来迎合不确定的记录。secrets、凭据、API token、日志/构建产物和不明用户改动不得读取、暂存或提交。
-3. 仅运行与本次确定性改动直接相关的必要验证。验证失败、范围扩大、归属不明或发现新的未解释变化时停止，不把阶段说成已收束。
-4. 若有确定且已归属的改动，只用明确文件路径暂存并创建本地 commit；不得使用全量暂存。提交后读取并核对 `HEAD` 的完整 SHA。不要 `reset`、`checkout`、`stash`、清理、merge、tag、push 或发布到远端。
-5. 若本阶段没有改动且当前 `HEAD` 已有仍有效的验证证据，直接复用该 `HEAD`，不得创建空提交。若没有有效证据，只补做必要验证；验证仍不成立时停止。
+## 阶段一：Preflight
 
-## 记录非终态检查点
+按下面顺序检查，并在成功报告中逐项列出实际结果。不要用“选中的文件里 grep 没有结果”代替来源发现或对齐结论。
 
-只有已经得到并核对有效 `commit SHA` 后，才调用一次 `ugk_work_progress` 记录收束检查点；这是 closeout 唯一的 progress 记录。不要因为 closeout 创建或复用的 commit 再额外触发通用 `$cockpit-progress`。若环境已对同一 closeout commit 记录了可信进展，直接复用该记录及其最新 `revision`，不再调用 progress、不要重复记录，也不得猜 revision。请求使用最近成功 MCP 返回的 `revision` 作为 `expectedRevision`，不得自行递增；生成新的非空 `clientRequestId`，并保持以下非终态字段：
+### 1. Session、授权范围和基线
+
+- 只在已有 `active` Cockpit session 且掌握最近一次成功 MCP 返回的可信 `sessionId` 和 `revision` 时工作。二者不得猜测、从旧消息拼接或自行递增；缺任一项就停止实际收束。
+- 通过当前已授权项目/工作副本和显式工作目录工作；不得读取、扫描或修改其他项目/仓库。先以 `git rev-parse --show-toplevel` 确认当前仓库边界。
+- 明确一句 `收束 scope`：本阶段要收束的用户目标、代码/配置/文档/发布记录范围，以及明确不纳入的事项。scope 无法从用户请求、session 上下文或项目入口可靠确定时 fail closed。
+- 还必须能明确说明本阶段基线、canonical 文档/配置/记录、收束范围和改动归属；任一项不明时只作只读失败报告。
+- 明确 `baseline` 的完整 SHA、可核对的 ref（若有）和选择依据，例如 session/init 返回的阶段基线或用户明确指定的阶段起点。用 `git rev-parse --verify <ref>^{commit}` 核对引用；确认 baseline 是当前 `HEAD` 的祖先。不能用“最近一个看起来像基线的 commit”替代依据，也不能凭空选 SHA。
+- 明确当前 `HEAD` 的完整 SHA，并以同一 baseline 计算有限的 `stage delta`（当前阶段 delta），例如 `git log --oneline <baseline>..HEAD`、`git diff --name-status <baseline>..HEAD`；记录提交、路径类别和范围，不把整个历史当作本阶段 delta。baseline 不可核对、不是祖先或 delta 关系不清时 fail closed。
+
+### 2. Canonical discovery：一跳、有界、区分当前与历史
+
+canonical discovery 必须从当前授权项目自身的入口开始，不能从 Agent 预设文件名开始：
+
+1. 先读取仓库根目录的适用 `AGENTS.md`，以及受影响路径上最近且实际适用的项目级 `AGENTS.md`；再读取根 `README.md`，若根 README 不存在，只能使用这些入口明确指定的等价入口。只读入口中明确声明的项目约定，不能借此扩大任务范围。
+2. 只从这些入口中提取与本阶段 delta 相关的明确声明，例如“当前事实源”“唯一事实源”“版本台账”“发布记录”“配置说明”或同义表述，以及它们直接指向的路径。沿明确声明只追踪一跳，解析实际路径后读取该文件；不要递归跟随二级链接，也不要要求全仓扫描。
+3. 对每个实际检查的路径记录 `current` 或 `archive/history` 及判定依据。archive/history 只能作为背景，不能冒充当前 canonical；同一主题同时有多个候选且入口没有消歧时 fail closed。缺失、不可读、链接无法解析、没有与 delta 相关的 canonical 声明，或无法判定哪一个是当前来源时，均 fail closed。
+4. 将 stage delta 的每个可能改变当前事实的主题（代码行为、配置、版本、发布/运维记录等）映射到已发现的 canonical source，并实际核对当前事实。成功时列出所有实际检查过的 canonical 相对路径、类别、current/archive 判定和核对结果；不能因为某个候选文件没有匹配文本，就推断“全部 canonical 已对齐”。
+
+不得为完成 discovery 扫描全仓、读取 secrets、凭据、API token、浏览器 profile、日志或构建产物，也不得把某个具体业务项目文件名硬编码成通用规则。
+
+### 3. 完整工作区状态与改动归属
+
+- 必须执行一次完整的 `git status --porcelain=v1 --untracked-files=all`。不得先过滤 `??`、只看 tracked 文件、截取前 N 行或以输出截断后的子集宣称“全部已核对”；命令输出若超过安全上限或无法解析完整，立即 fail closed。
+- 对每一条 tracked/staged/unstaged/deleted/renamed/untracked 状态按路径做类别和数量统计，并标注归属：本次 Agent、已由 session/init 明确记录的阶段前用户改动、或其他已明确授权来源。只使用路径/类别/数量核对归属，不读取文件内容；敏感或不明路径保持不读。
+- 每一条改动都必须有可证明的归属和处理方式（保留、只修正、明确不纳入等）。任何无法归属、当前检查未覆盖、状态检查期间新增或无法解释的项都 fail closed；不得猜测为当前 Agent，也不得清理、覆盖或为了得到干净状态而 reset/checkout/stash。
+
+### 4. 验证证据绑定到 source state
+
+为每项测试、静态检查、构建或发布核对记录：命令（含必要参数）、结果、执行时间/来源，以及它对应的 source state（完整 commit SHA 或明确的工作树状态）。不默认运行昂贵的全量检查，只运行与本次确定性对齐直接相关的必要验证。
+
+复用父提交或早先的证据时，必须证明证据仍适用于当前 `HEAD`：核对证据对应 SHA，检查其到当前 `HEAD` 的有限 delta，并说明这些变化不影响该验证；无法证明就重新运行相关验证。存在证据之后的未提交改动时，除非能证明验证覆盖同一工作树状态，否则不能复用。已有构建产物、远程截图或发布页面只能按其实际强度作为外部观察，不能写成当前 HEAD 的测试/构建证明。
+
+### 5. Preflight 成功报告
+
+Preflight 报告必须包含以下字段，缺任一字段不得进入阶段二：`baseline`（SHA、ref、选择依据）、`HEAD`、`stage delta`、`收束 scope`、`改动归属`、实际检查过的 canonical source 路径及 current/archive 判定、完整 tracked/untracked 分类与数量、验证命令/结果/source state/适用性，以及待处理的 alignment findings。只报告实际检查过的路径和证据，不用概括性“已全部核对”掩盖遗漏。
+
+## 阶段二：Alignment / Closeout
+
+1. 只处理由已核对的 baseline、canonical source 和当前事实共同确定的 alignment finding（确定的 canonical 对齐问题）。可确定的文档、配置或记录修正可以修改；不确定的语义、缺少来源或需要重构/升级依赖/补建台账的事项不得顺手处理，记录为未解决并停止。
+2. 修改后重新核对受影响 canonical source、相关验证和完整工作区状态。任何新出现且未解释的路径、归属变化、验证失败或预期之外的 HEAD 变化都要停止；不要把“测试通过”当作文档已对齐的证据。
+3. 有确定且已归属的改动时，只用明确文件路径暂存并创建本地 commit，提交后用 `git rev-parse HEAD` 核对完整 SHA；不得全量暂存。若本阶段没有改动且当前 `HEAD` 已有仍有效的验证证据，仅当证据绑定到该 SHA 时复用它，不得创建空提交。不要 `reset`、`checkout`、`stash`、清理、merge、push、tag 或 release。
+4. 只有 alignment findings 已清零、必要验证成功、工作区状态与归属重新核对、且已形成或复用有效 `commit SHA`，才可进入 progress。未解决确定性 finding、无法证明的 finding 和未覆盖项都不满足门槛。
+
+## 唯一一次非终态 progress
+
+只有阶段二完成并核对有效 `commit SHA` 后，才调用一次 `ugk_work_progress`，这是 closeout 唯一的 progress 记录。不要因为 closeout 创建或复用的 commit 再额外触发通用 `$cockpit-progress`。如果环境已经对同一 closeout commit 记录了可信进展，直接复用该记录及其最新 `revision`，不再调用 progress、不要重复记录，也不得猜 revision。
+
+请求必须使用最近成功 MCP 返回的值，不得自行递增 `expectedRevision`，并生成新的非空唯一 `clientRequestId`：
 
 ```json
 {
@@ -33,16 +82,27 @@ description: 用户显式要求收束当前 Cockpit 阶段时，对已知阶段 
   "status": "working",
   "summary": "阶段收束检查点 commit:<已核对的完整 SHA>",
   "details": [
-    "<本次核对或必要验证的事实>",
-    "<复用 HEAD 或修正的 canonical 对齐项>"
+    "baseline/HEAD/stage delta/scope：<Preflight 结果>",
+    "canonical sources 与 current/archive 判定：<实际相对路径和结果>",
+    "完整 tracked/untracked 分类与归属：<路径类别/数量摘要>",
+    "验证证据及 source state：<命令、结果、适用性>",
+    "Agent-reported alignment：<修正或确认无 finding>"
   ]
 }
 ```
 
-`status` 只能是 `working` 或 `in_progress`，不得用它伪造终态。MCP 返回失败、revision 冲突、结果不确定或未形成 `commit SHA` 时，不得记录成功，也不得向用户声称完整收束；传输结果不确定时用同一个 `clientRequestId` 重试完全相同的请求，不要再次提交。成功后仅报告 commit SHA、验证事实和新的 revision，等待用户另行选择下一步。
+请求的 `details` 只能提交 Agent 已完成的 Preflight/Alignment 事实，不得预填、猜测或声称任何尚未返回的 MCP-verified 值。工具成功返回后，用户报告才把两类事实分开：`Agent-reported alignment` 只描述 Agent 实际发现、修正和验证的内容；`MCP-verified Git/session` 只描述 `ugk_work_progress` 实际返回的 session/revision/status/服务端 Git 事实，不能让 MCP 响应替 Agent 证明文档语义对齐。`status` 只能是 `working` 或 `in_progress`，不得伪造终态。MCP 返回失败、revision 冲突、字段缺失或结果不确定时，不得宣称成功；传输结果不确定时用同一个 `clientRequestId` 重试完全相同的请求，不要再次提交。
 
-阶段完成、commit 成功、测试通过或上下文堆积都不能隐式触发本 Skill；本 Skill 成功后保持 session active，不自动 relay 或 handoff。它不创建或强制台账仓库，不管理账号或秘密，也不执行外部写入。
+向用户展示成功结果时使用两个独立小节：
 
-## 失败报告
+## Agent-reported alignment
 
-停止时说明：发生了什么、代码是否受影响、哪些事实或范围无法证明，以及推荐的安全下一步。MCP 报错或不可用时，明确说明无法连接或启用 `ugk-cockpit` 本地 MCP，并不要声称已记录检查点。保留所有现有改动；不要为了得到 SHA 而创建空提交、猜测归属或放宽边界。
+列出实际核对的 canonical 路径、alignment finding 的修正或“无 finding”结论、验证及其 source state；不要把 MCP 返回当作文档语义证据。
+
+## MCP-verified Git/session
+
+只列工具实际返回的 `sessionId`、`revision`、非终态 `status` 及服务端 HEAD/coherence 等 Git/session 事实；缺少工具成功标志就不能写成已记录。
+
+## 失败报告与边界
+
+fail closed 时说明：发生了什么、代码是否受影响、哪个门槛或事实无法证明、已发现的路径/数量范围，以及推荐的安全下一步。缺少 active session、MCP 不可用、canonical 无法判定、完整状态未覆盖、归属不明或证据失效时，都只向用户报告，不编辑、commit 或 progress。保留所有既有改动；不读/存 secrets、凭据、API token、浏览器 profile、日志或构建产物；不后台扫描，不跨授权仓库，不自动 relay 或 handoff，不 push/tag/release。

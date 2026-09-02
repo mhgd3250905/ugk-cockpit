@@ -114,6 +114,82 @@ test('cockpit-closeout is explicit, bounded, and records one non-terminal progre
   assert.doesNotMatch(instructions, /ugk_work_handoff/);
 });
 
+test('cockpit-closeout gates edits behind a fail-closed canonical preflight', () => {
+  const instructions = readFileSync(
+    path.join(repositoryRoot, 'skills', 'cockpit-closeout', 'SKILL.md'),
+    'utf8',
+  );
+  const preflightStart = instructions.indexOf('## 阶段一：Preflight');
+  const alignmentStart = instructions.indexOf('## 阶段二：Alignment / Closeout');
+  assert.ok(preflightStart >= 0);
+  assert.ok(alignmentStart > preflightStart);
+
+  const preflight = instructions.slice(preflightStart, alignmentStart);
+  assert.match(instructions, /两阶段/);
+  assert.match(preflight, /只读/);
+  assert.match(instructions, /编辑.*git add.*commit.*ugk_work_progress/);
+  assert.match(preflight, /baseline.*完整 SHA.*选择依据/);
+  assert.match(preflight, /git rev-parse --verify/);
+  assert.match(preflight, /stage delta/);
+  assert.match(preflight, /git log --oneline/);
+  assert.match(preflight, /git diff --name-status/);
+  assert.match(preflight, /AGENTS\.md/);
+  assert.match(preflight, /根 `README\.md`/);
+  assert.match(preflight, /当前事实源.*版本台账.*发布记录.*配置说明/);
+  assert.match(preflight, /一跳/);
+  assert.match(preflight, /current.*archive\/history/);
+  assert.match(preflight, /无法判定.*fail closed/);
+  assert.match(preflight, /不得.*全仓扫描|不要.*全仓扫描/);
+  assert.match(preflight, /git status --porcelain=v1 --untracked-files=all/);
+  assert.match(preflight, /不得先过滤 `\?\?`/);
+  assert.match(preflight, /输出若超过安全上限或无法解析完整.*fail closed/);
+  assert.match(preflight, /每一条.*untracked/);
+  assert.match(preflight, /无法归属.*fail closed/);
+  assert.match(preflight, /source state/);
+  assert.match(preflight, /复用父提交.*证明/);
+  assert.match(preflight, /不影响该验证/);
+  assert.match(preflight, /远程截图.*不能写成当前 HEAD 的测试\/构建证明/);
+  assert.match(preflight, /完整 tracked\/untracked 分类与数量/);
+  assert.match(preflight, /缺任一字段不得进入阶段二/);
+  assert.doesNotMatch(instructions, /demo-app-version-ledger|playstore/);
+});
+
+test('cockpit-closeout success separates agent alignment from MCP-verified facts', () => {
+  const instructions = readFileSync(
+    path.join(repositoryRoot, 'skills', 'cockpit-closeout', 'SKILL.md'),
+    'utf8',
+  );
+  const successStart = instructions.indexOf('## 唯一一次非终态 progress');
+  assert.ok(successStart >= 0);
+  const success = instructions.slice(successStart);
+  const requestBlock = success.match(/```json[\s\S]*?```/)?.[0] || '';
+  assert.notEqual(requestBlock, '');
+  assert.doesNotMatch(requestBlock, /MCP-verified Git\/session/);
+  for (const field of [
+    'baseline',
+    'HEAD',
+    'stage delta',
+    'scope',
+    'canonical sources',
+    'current/archive',
+    'tracked/untracked',
+    'source state',
+    'Agent-reported alignment',
+    'MCP-verified Git/session',
+  ]) {
+    assert.match(success, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.match(success, /只有阶段二完成.*commit SHA.*才调用一次/);
+  assert.match(success, /status.*working|status.*in_progress/);
+  assert.match(success, /expectedRevision/);
+  assert.match(success, /不得自行递增/);
+  assert.match(success, /请求的 `details` 只能提交 Agent 已完成的 Preflight\/Alignment 事实/);
+  assert.match(success, /工具成功返回后，用户报告才把两类事实分开/);
+  assert.match(success, /MCP 返回失败.*不得宣称成功/);
+  assert.match(success, /同一个 `clientRequestId` 重试/);
+  assert.match(success, /不能让 MCP 响应替 Agent 证明文档语义对齐/);
+});
+
 test('progress stays non-terminal and cannot implicitly trigger relay or handoff', () => {
   const instructions = readFileSync(
     path.join(repositoryRoot, 'skills', 'cockpit-progress', 'SKILL.md'),
