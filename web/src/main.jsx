@@ -615,6 +615,110 @@ function App() {
     }
   }
 
+  async function refreshOpenProjectDetail(actionNotice = null) {
+    const current = projectDetailRef.current;
+    if (!current) return;
+    const data = await api(`/api/v1/projects/${encodeURIComponent(current.seed.id)}?limit=30&offset=0`);
+    setProjectDetail((previous) => previous ? {
+      ...previous,
+      data,
+      loading: false,
+      error: null,
+      actionNotice,
+    } : previous);
+  }
+
+  async function createDevelopmentSpaceFromDetail() {
+    const project = projectDetailRef.current?.data?.project;
+    if (!project?.git?.head) return;
+    setBusy(true);
+    try {
+      const selected = await api('/api/v1/folders/select-empty', { method: 'POST', body: '{}' });
+      if (selected.cancelled) return;
+      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/spaces`, {
+        method: 'POST',
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          grantId: selected.grantId,
+          expectedBaseHead: project.git.head,
+          name: selected.folderName || '通用开发空间',
+        }),
+      });
+      await refreshOpenProjectDetail({
+        message: `已创建 ${result.name || selected.folderName || '通用开发空间'}。`,
+        detail: '代码已放入独立工作副本；主项目和已有改动没有被覆盖。',
+      });
+    } catch (error) {
+      setProjectDetail((previous) => previous ? {
+        ...previous,
+        actionNotice: {
+          error: true,
+          message: error.message || '开发空间还没有创建。',
+          detail: error.required_action || '请保留当前目录并刷新后重试。',
+        },
+      } : previous);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function assignDevelopmentSpace(space) {
+    const project = projectDetailRef.current?.data?.project;
+    if (!project) return;
+    setBusy(true);
+    try {
+      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/assignments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientRequestId: crypto.randomUUID(),
+          agent: 'Codex',
+          mode: 'init',
+          task: `在${space.name || '开发空间'}中继续功能开发`,
+          spaceId: space.spaceId,
+        }),
+      });
+      await navigator.clipboard.writeText(result.message);
+      await refreshOpenProjectDetail({
+        message: '开发空间接入消息已复制。',
+        detail: '请把它粘贴给将在该代码位置工作的 Agent。',
+      });
+    } catch (error) {
+      setProjectDetail((previous) => previous ? {
+        ...previous,
+        actionNotice: {
+          error: true,
+          message: error.message || '还没有生成开发空间接入消息。',
+          detail: error.required_action || '请刷新当前项目后重试。',
+        },
+      } : previous);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyIntegrationPrompt(submission) {
+    if (!submission.reviewPrompt) return;
+    try {
+      await navigator.clipboard.writeText(submission.reviewPrompt);
+      setProjectDetail((previous) => previous ? {
+        ...previous,
+        actionNotice: {
+          message: '审核提示词已复制。',
+          detail: '请把它粘贴给主项目中的 Agent；平台会规范记录领取、审核与合并回执。',
+        },
+      } : previous);
+    } catch {
+      setProjectDetail((previous) => previous ? {
+        ...previous,
+        actionNotice: {
+          error: true,
+          message: '无法自动写入剪贴板。',
+          detail: '请展开审核提示词并手动复制。',
+        },
+      } : previous);
+    }
+  }
+
   function handleProjectAction(project) {
     const statusReason = getProjectStatusReason(project);
     if (isActionDisabled(statusReason)) return;
@@ -881,6 +985,10 @@ function App() {
           onClose={closeProjectDetail}
           onRetry={() => openProjectDetail(projectDetail.seed)}
           onLoadOlder={loadOlderTimeline}
+          busy={busy}
+          onCreateSpace={createDevelopmentSpaceFromDetail}
+          onAssignSpace={assignDevelopmentSpace}
+          onCopyReviewPrompt={copyIntegrationPrompt}
         />
       )}
     </div>
@@ -1011,7 +1119,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder }) {
+function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
   const modalRef = useFocusTrap(true, onClose);
   const project = state.data?.project ?? state.seed;
   const statusReason = getProjectStatusReason(project);
@@ -1066,6 +1174,11 @@ function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder }) {
               loadingMore={state.loadingMore}
               loadError={state.error}
               onLoadOlder={onLoadOlder}
+              actionNotice={state.actionNotice}
+              busy={busy}
+              onCreateSpace={onCreateSpace}
+              onAssignSpace={onAssignSpace}
+              onCopyReviewPrompt={onCopyReviewPrompt}
             />
           )}
         </div>
@@ -1097,8 +1210,8 @@ function DetailErrorState({ notice, onRetry }) {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder }) {
-  const { project, timeline } = data;
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
+  const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const git = project.git ?? {};
   const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
   const revision = project.activeWork?.revision ?? project.activeRun?.revision ?? null;
@@ -1137,6 +1250,80 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder }) {
           {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
         </dl>
       </details>
+
+      {actionNotice && (
+        <div className={`detail-action-notice${actionNotice.error ? ' is-error' : ''}`} role="status">
+          <strong>{actionNotice.message}</strong>
+          {actionNotice.detail && <span>{actionNotice.detail}</span>}
+        </div>
+      )}
+
+      <section className="workspace-section" aria-labelledby="workspace-title">
+        <div className="workspace-heading">
+          <div>
+            <span className="timeline-overline">DEVELOPMENT SPACES</span>
+            <h3 id="workspace-title">功能开发空间</h3>
+            <p>每个空间独立承载一项功能；你只需选择一个空文件夹。</p>
+          </div>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onCreateSpace} disabled={busy}>
+            {busy ? '正在处理…' : '新建开发空间'}
+          </button>
+        </div>
+        {developmentSpaces.length === 0 ? (
+          <p className="workspace-empty">还没有开发空间。需要并行做功能时再创建即可。</p>
+        ) : (
+          <div className="workspace-list">
+            {developmentSpaces.map((space) => (
+              <article className="workspace-card" key={space.spaceId}>
+                <div>
+                  <strong>{space.name}</strong>
+                  <span>{space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已接入主项目，可稍后整理' : '可以继续开发'}</span>
+                </div>
+                {space.status === 'ready' && (
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => onAssignSpace(space)} disabled={busy}>
+                    复制接入消息
+                  </button>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="review-section" aria-labelledby="review-title">
+        <div className="workspace-heading">
+          <div>
+            <span className="timeline-overline">MAIN REVIEW</span>
+            <h3 id="review-title">主项目待办</h3>
+            <p>功能送达后，从这里复制标准审核提示词。</p>
+          </div>
+        </div>
+        {submissions.length === 0 ? (
+          <p className="workspace-empty">当前没有等待处理的功能。</p>
+        ) : (
+          <div className="workspace-list">
+            {submissions.map((submission) => (
+              <article className="workspace-card review-card" key={submission.submissionId}>
+                <div>
+                  <strong>{submission.title || submission.spaceName}</strong>
+                  <span>{submission.status === 'pending' ? '等待 main 审核' : submission.status === 'claimed' ? '审核进行中' : submission.status === 'integrated' ? '已接入主项目' : submission.status === 'approved' ? '审核通过，等待接入' : '需要查看审核结果'}</span>
+                </div>
+                {submission.reviewPrompt && (
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => onCopyReviewPrompt(submission)}>
+                    复制审核提示词
+                  </button>
+                )}
+                {submission.reviewPrompt && (
+                  <details className="review-prompt-fallback">
+                    <summary>手动复制</summary>
+                    <pre>{submission.reviewPrompt}</pre>
+                  </details>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="timeline-section" aria-labelledby="timeline-title">
         <div className="timeline-heading">

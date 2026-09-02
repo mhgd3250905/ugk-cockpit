@@ -1338,6 +1338,113 @@ summary:focus-visible {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.workspace-section,
+.review-section {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.workspace-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.workspace-heading h3 {
+  margin: 3px 0 2px;
+  font-size: 18px;
+}
+
+.workspace-heading p,
+.workspace-empty {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.workspace-empty {
+  padding: 14px;
+  border: 1px dashed var(--border-card);
+  border-radius: var(--radius-control);
+  background: var(--surface-sunken);
+}
+
+.workspace-list {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+}
+
+.workspace-card > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-card strong {
+  color: var(--ink-primary);
+}
+
+.workspace-card span {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.review-card {
+  flex-wrap: wrap;
+}
+
+.review-prompt-fallback {
+  width: 100%;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.review-prompt-fallback pre {
+  overflow: auto;
+  max-height: 220px;
+  white-space: pre-wrap;
+  padding: 12px;
+  color: var(--ink-secondary);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-control);
+}
+
+.detail-action-notice {
+  display: grid;
+  gap: 3px;
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--state-active-border);
+  border-radius: var(--radius-control);
+  background: var(--state-active-bg);
+  color: var(--state-active-text);
+}
+
+.detail-action-notice span {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.detail-action-notice.is-error {
+  border-color: var(--state-attention-border);
+  background: var(--state-attention-bg);
+  color: var(--state-attention-text);
+}
+
 .timeline-overline {
   color: var(--accent-text);
   font-family: var(--font-mono);

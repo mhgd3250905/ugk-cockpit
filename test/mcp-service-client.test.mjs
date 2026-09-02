@@ -54,6 +54,26 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
     currentState: '功能完成一半',
     mcpWorkingDirectory: 'E:\\fixture\\active-project',
   });
+
+  await handlers.ugk_integration_begin({
+    sessionId: 'session-1', clientRequestId: 'review-begin', expectedRevision: 2,
+    submissionId: 'sub-1', expectedSubmissionRevision: 0,
+  });
+  assert.equal(calls[5].url, 'http://127.0.0.1:41737/api/v1/mcp/integration/begin');
+
+  await handlers.ugk_integration_review({
+    sessionId: 'session-1', clientRequestId: 'review-result', expectedRevision: 2,
+    submissionId: 'sub-1', claimId: 'claim-1', expectedClaimRevision: 0,
+    verdict: 'approved', summary: '通过', findings: [], checks: [],
+  });
+  assert.equal(calls[6].url, 'http://127.0.0.1:41737/api/v1/mcp/integration/review');
+
+  await handlers.ugk_integration_merge({
+    sessionId: 'session-1', clientRequestId: 'merge', expectedRevision: 2,
+    submissionId: 'sub-1', claimId: 'claim-1', expectedSubmissionRevision: 2,
+    expectedClaimRevision: 1, summary: '合入主项目',
+  });
+  assert.equal(calls[7].url, 'http://127.0.0.1:41737/api/v1/mcp/integration/merge');
 });
 
 test('MCP service errors expose the public service message without leaking response details', async () => {

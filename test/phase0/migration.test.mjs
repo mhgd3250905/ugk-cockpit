@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
   );
   db.close();
 });
@@ -740,18 +740,38 @@ test('version 16 database upgrades to version 17 creating durable submission att
   const dbPath = fixture(t, 'migration-v16');
   const legacy = openCockpitDatabase(dbPath);
   legacy.exec('PRAGMA user_version = 16');
-  legacy.prepare('DELETE FROM schema_migrations WHERE version = 17').run();
+  legacy.prepare('DELETE FROM schema_migrations WHERE version >= 17').run();
+  legacy.exec('DROP TABLE integration_attempts');
   legacy.exec('DROP TABLE submission_attempts');
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 17);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
   const columns = upgraded.prepare('PRAGMA table_info(submission_attempts)').all()
     .map((row) => row.name);
   assert.ok(columns.includes('command_id'));
   assert.ok(columns.includes('state'));
   assert.ok(columns.includes('source_commit'));
   assert.ok(columns.includes('submission_id'));
+  upgraded.close();
+});
+
+test('version 17 database upgrades to version 18 creating durable integration attempts', (t) => {
+  const dbPath = fixture(t, 'migration-v17');
+  const legacy = openCockpitDatabase(dbPath);
+  legacy.exec('PRAGMA user_version = 17');
+  legacy.prepare('DELETE FROM schema_migrations WHERE version = 18').run();
+  legacy.exec('DROP TABLE integration_attempts');
+  legacy.close();
+
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
+  const columns = upgraded.prepare('PRAGMA table_info(integration_attempts)').all()
+    .map((row) => row.name);
+  assert.ok(columns.includes('submission_id'));
+  assert.ok(columns.includes('claim_id'));
+  assert.ok(columns.includes('integrated_commit'));
+  assert.ok(columns.includes('external_integration'));
   upgraded.close();
 });
 

@@ -115,6 +115,62 @@ export const TOOLS = [
     }
   },
   {
+    name: 'ugk_integration_begin',
+    description: 'Begin review of one fixed development-space submission from an active main-project session; never call implicitly',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        clientRequestId: { type: 'string' },
+        expectedRevision: { type: 'integer', minimum: 1 },
+        submissionId: { type: 'string' },
+        expectedSubmissionRevision: { type: 'integer', minimum: 0 }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'submissionId', 'expectedSubmissionRevision'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_integration_review',
+    description: 'Record the main Agent review verdict and evidence for the fixed claimed submission; never call implicitly',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        clientRequestId: { type: 'string' },
+        expectedRevision: { type: 'integer', minimum: 1 },
+        submissionId: { type: 'string' },
+        claimId: { type: 'string' },
+        expectedClaimRevision: { type: 'integer', minimum: 0 },
+        verdict: { type: 'string', enum: ['approved', 'changes_requested', 'rejected'] },
+        summary: { type: 'string', minLength: 1, maxLength: 1000 },
+        findings: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, maxItems: 20 },
+        checks: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, maxItems: 20 }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'submissionId', 'claimId', 'expectedClaimRevision', 'verdict', 'summary', 'findings', 'checks'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_integration_merge',
+    description: 'After an approved fixed-SHA review, safely fast-forward and normally push main with a durable receipt; never call implicitly',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string' },
+        clientRequestId: { type: 'string' },
+        expectedRevision: { type: 'integer', minimum: 1 },
+        submissionId: { type: 'string' },
+        claimId: { type: 'string' },
+        expectedSubmissionRevision: { type: 'integer', minimum: 0 },
+        expectedClaimRevision: { type: 'integer', minimum: 0 },
+        summary: { type: 'string', minLength: 1, maxLength: 1000 }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'submissionId', 'claimId', 'expectedSubmissionRevision', 'expectedClaimRevision', 'summary'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'ugk_work_finish',
     description: 'Only call after the user explicitly asks to end the current phase; complete the active session with an outcome and summary',
     inputSchema: {
@@ -563,6 +619,44 @@ function validateSubmitArgs(args) {
   return null;
 }
 
+function validateIntegrationArgs(args, operation) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return 'Arguments must be an object';
+  const common = ['sessionId', 'clientRequestId', 'expectedRevision', 'submissionId'];
+  const allowed = operation === 'begin'
+    ? [...common, 'expectedSubmissionRevision']
+    : operation === 'review'
+      ? [...common, 'claimId', 'expectedClaimRevision', 'verdict', 'summary', 'findings', 'checks']
+      : [...common, 'claimId', 'expectedSubmissionRevision', 'expectedClaimRevision', 'summary'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowed.includes(key)) return `Unexpected property: ${key}`;
+  }
+  for (const key of ['sessionId', 'clientRequestId', 'submissionId']) {
+    if (typeof args[key] !== 'string' || !args[key].trim()) return `Missing or invalid required field: ${key}`;
+  }
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) return 'Missing or invalid required field: expectedRevision';
+  if (operation !== 'begin' && (typeof args.claimId !== 'string' || !args.claimId.trim())) return 'Missing or invalid required field: claimId';
+  if (operation !== 'review' && (!Number.isInteger(args.expectedSubmissionRevision) || args.expectedSubmissionRevision < 0)) {
+    return 'Missing or invalid required field: expectedSubmissionRevision';
+  }
+  if (operation !== 'begin' && (!Number.isInteger(args.expectedClaimRevision) || args.expectedClaimRevision < 0)) {
+    return 'Missing or invalid required field: expectedClaimRevision';
+  }
+  if (operation === 'review') {
+    if (!['approved', 'changes_requested', 'rejected'].includes(args.verdict)) return 'Missing or invalid required field: verdict';
+    for (const key of ['findings', 'checks']) {
+      if (!Array.isArray(args[key]) || args[key].length > 20
+        || args[key].some((item) => typeof item !== 'string' || !item.trim() || item.length > 500)) {
+        return `Missing or invalid required field: ${key}`;
+      }
+    }
+  }
+  if (operation !== 'begin' && (typeof args.summary !== 'string' || !args.summary.trim() || args.summary.length > 1000)) {
+    return 'Missing or invalid required field: summary';
+  }
+  return null;
+}
+
 function validateFinishArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
@@ -841,6 +935,12 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateProgressArgs(toolArgs);
       } else if (toolName === 'ugk_work_submit') {
         validationError = validateSubmitArgs(toolArgs);
+      } else if (toolName === 'ugk_integration_begin') {
+        validationError = validateIntegrationArgs(toolArgs, 'begin');
+      } else if (toolName === 'ugk_integration_review') {
+        validationError = validateIntegrationArgs(toolArgs, 'review');
+      } else if (toolName === 'ugk_integration_merge') {
+        validationError = validateIntegrationArgs(toolArgs, 'merge');
       } else if (toolName === 'ugk_work_finish') {
         validationError = validateFinishArgs(toolArgs);
       } else if (toolName === 'ugk_work_handoff') {

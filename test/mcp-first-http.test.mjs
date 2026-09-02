@@ -19,6 +19,12 @@ async function post(service, pathname, body) {
   });
 }
 
+async function get(service, pathname) {
+  return fetch(`http://${service.host}:${service.port}${pathname}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+}
+
 test('existing Agent initializes the registered project, continues, and hands off', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-mcp-first-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
@@ -540,6 +546,18 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   });
   assert.deepEqual(await submitReplay.json(), submitted);
 
+  const detailAfterSubmitRes = await get(service, `/api/v1/projects/${projectId}`);
+  assert.equal(detailAfterSubmitRes.status, 200);
+  const detailAfterSubmit = await detailAfterSubmitRes.json();
+  assert.equal(detailAfterSubmit.developmentSpaces.length, 1);
+  assert.equal(detailAfterSubmit.submissions.length, 1);
+  const reviewPrompt = detailAfterSubmit.submissions[0].reviewPrompt;
+  assert.match(reviewPrompt, /ugk_integration_begin/);
+  assert.match(reviewPrompt, /ugk_integration_review/);
+  assert.match(reviewPrompt, /ugk_integration_merge/);
+  assert.doesNotMatch(reviewPrompt, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+  assert.doesNotMatch(reviewPrompt, /token\s*:/i);
+
   // 12. Verify main worktree assignments still work independently
   const mainAssignRes = await post(service, `/api/v1/projects/${projectId}/assignments`, {
     clientRequestId: 'main-assign-req-1',
@@ -576,4 +594,48 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   const mainInitialized = await mainInitRes.json();
   assert.equal(mainInitialized.status, 'active');
   assert.notEqual(mainInitialized.sessionId, sessionId);
+
+  const integrationBeginRes = await post(service, '/api/v1/mcp/integration/begin', {
+    sessionId: mainInitialized.sessionId,
+    clientRequestId: 'integration-begin-1',
+    expectedRevision: mainInitialized.revision,
+    submissionId: submitted.submissionId,
+    expectedSubmissionRevision: 0,
+  });
+  assert.equal(integrationBeginRes.status, 200, await integrationBeginRes.clone().text());
+  const integrationBegin = await integrationBeginRes.json();
+  assert.equal(integrationBegin.status, 'reviewing');
+
+  const integrationReviewRes = await post(service, '/api/v1/mcp/integration/review', {
+    sessionId: mainInitialized.sessionId,
+    clientRequestId: 'integration-review-1',
+    expectedRevision: mainInitialized.revision,
+    submissionId: submitted.submissionId,
+    claimId: integrationBegin.claimId,
+    expectedClaimRevision: integrationBegin.claimRevision,
+    verdict: 'approved',
+    summary: '审核通过',
+    findings: [],
+    checks: ['端到端测试通过'],
+  });
+  assert.equal(integrationReviewRes.status, 200, await integrationReviewRes.clone().text());
+  const integrationReview = await integrationReviewRes.json();
+  assert.equal(integrationReview.verdict, 'approved');
+
+  const integrationMergeRes = await post(service, '/api/v1/mcp/integration/merge', {
+    sessionId: mainInitialized.sessionId,
+    clientRequestId: 'integration-merge-1',
+    expectedRevision: mainInitialized.revision,
+    submissionId: submitted.submissionId,
+    claimId: integrationBegin.claimId,
+    expectedSubmissionRevision: integrationReview.submissionRevision,
+    expectedClaimRevision: integrationReview.claimRevision,
+    summary: '审核通过并接入主项目',
+  });
+  assert.equal(integrationMergeRes.status, 200, await integrationMergeRes.clone().text());
+  const integrationMerged = await integrationMergeRes.json();
+  assert.equal(integrationMerged.status, 'integrated');
+  assert.equal(integrationMerged.pushed, true);
+  assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), submitted.sourceCommit);
+  assert.equal(execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: remotePath, encoding: 'utf8' }).trim(), submitted.sourceCommit);
 });

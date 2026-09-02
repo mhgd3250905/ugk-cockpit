@@ -25,11 +25,17 @@ import {
   revalidateEmptyDirectory,
 } from '../core/path-guard.mjs';
 import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
-import { readDevelopmentSpace } from '../core/spaces.mjs';
+import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
+import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { submitDevelopmentSpace } from '../core/submission-service.mjs';
+import {
+  beginIntegrationReview,
+  mergeApprovedSubmission,
+  recordSessionIntegrationReview,
+} from '../core/integration-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
 import { serveWebAsset } from './web-assets.mjs';
@@ -565,6 +571,84 @@ const PUBLIC_ERRORS = {
     impact: '平台没有自动清理、回退或覆盖代码。',
     requiredAction: '请查看开发空间状态并重试；若持续失败，请人工核对 Git 状态。',
   },
+  MAIN_SESSION_REQUIRED: {
+    status: 409,
+    message: '这项审核必须从主项目的 AI 工作会话开始。',
+    impact: '没有领取审核，也没有修改任何代码。',
+    requiredAction: '请在主项目中开启或继续一条 AI 工作会话，再粘贴审核提示词。',
+  },
+  SUBMISSION_NOT_REVIEWABLE: {
+    status: 409,
+    message: '这个功能当前不在可领取审核的状态。',
+    impact: '没有重复领取，也没有修改代码。',
+    requiredAction: '请刷新项目页，查看它当前的审核结果或处理人。',
+  },
+  SUBMISSION_ALREADY_CLAIMED: {
+    status: 409,
+    message: '这个功能已经由另一条主项目会话领取审核。',
+    impact: '没有启动第二次审核，也没有修改代码。',
+    requiredAction: '请回到项目页查看当前审核者；过期后平台才允许重新领取。',
+  },
+  MAIN_HAS_CHANGES: {
+    status: 409,
+    message: '主项目当前有尚未保存的本地改动。',
+    impact: '平台没有覆盖这些改动，也没有执行合并。',
+    requiredAction: '请先确认并处理主项目自己的改动，再重新审核或合并。',
+  },
+  MAIN_BRANCH_CHANGED: {
+    status: 409,
+    message: '主项目当前不在送审时记录的工作线上。',
+    impact: '平台没有切换工作线，也没有执行合并。',
+    requiredAction: '请确认主项目代码位置和当前工作线后重新开始审核。',
+  },
+  TARGET_HEAD_STALE: {
+    status: 409,
+    message: '主项目在送审后已经向前变化。',
+    impact: '平台没有自动 rebase、reset 或覆盖新代码。',
+    requiredAction: '请刷新待办，重新评估这个功能与最新主项目的兼容性。',
+  },
+  SOURCE_NOT_FAST_FORWARD: {
+    status: 409,
+    message: '这个功能不能安全地直接接入当前主项目。',
+    impact: '平台没有改写历史，也没有执行合并。',
+    requiredAction: '请人工处理分支差异并重新送审。',
+  },
+  REVIEW_APPROVAL_REQUIRED: {
+    status: 409,
+    message: '只有明确审核通过的功能才能合入主项目。',
+    impact: '没有执行合并或推送。',
+    requiredAction: '请先完成审核并记录 approved 结果。',
+  },
+  INTEGRATION_REVISION_CONFLICT: {
+    status: 409,
+    message: '审核事项刚刚发生了变化。',
+    impact: '旧请求没有覆盖最新审核状态，也没有执行合并。',
+    requiredAction: '请使用工具返回的最新 revision 重新确认。',
+  },
+  CLAIM_EXPIRED: {
+    status: 409,
+    message: '这次审核领取已经过期。',
+    impact: '审核结论没有写入，代码没有修改。',
+    requiredAction: '请从项目页重新复制审核提示词并领取。',
+  },
+  INTEGRATION_PUSH_FAILED: {
+    status: 200,
+    message: '功能已经安全接入本地主项目，但尚未推送到远端。',
+    impact: '本地主项目的新保存点保持完整；平台没有回退或重写历史。',
+    requiredAction: '请检查网络或远端权限后，用完全相同的合并请求重试。',
+  },
+  MAIN_CHANGED_AFTER_INTEGRATION: {
+    status: 409,
+    message: '本地接入完成后，主项目又发生了变化。',
+    impact: '平台没有覆盖、回退或强推这些新变化。',
+    requiredAction: '请人工确认当前主项目状态后再决定是否继续。',
+  },
+  MAIN_WORKTREE_CHANGED: {
+    status: 409,
+    message: '主项目代码位置已不是平台记录的那一份。',
+    impact: '平台已停止审核或合并，没有修改代码。',
+    requiredAction: '请回项目页重新确认代码位置。',
+  },
 };
 
 function id(prefix, value) {
@@ -606,6 +690,19 @@ function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
     '工作中可调用 `$cockpit-progress`（ugk_work_progress）记录检查点；只有用户明确要求换 AI 会话时才调用 `$cockpit-relay`（ugk_work_relay）。',
     '只有用户明确要求结束当前阶段时，才调用 `$cockpit-handoff`（ugk_work_handoff）；普通功能完成不会触发阶段结束交接。',
     '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
+  ].join('\n');
+}
+
+function integrationReviewPrompt(submission) {
+  return [
+    '请在当前主项目的 active Cockpit 会话中审核并处理这个待办。',
+    `submissionId: "${submission.submissionId}"`,
+    `expectedSubmissionRevision: ${submission.revision}`,
+    '先调用 `ugk_integration_begin` 领取并锁定审核对象；使用当前会话已有的 sessionId、最新 revision 和新的 clientRequestId，不要传路径、项目 ID、工作副本 ID 或 token。',
+    '然后只针对工具返回的固定 sourceCommit 与 targetHead 审查代码差异并运行必要验证。',
+    '审查完成后调用 `ugk_integration_review`，如实提交 verdict、summary、findings 和 checks。',
+    '只有 verdict 为 approved 时，才用 review 返回的最新 submissionRevision、claimRevision 调用 `ugk_integration_merge`。',
+    '不得自行 rebase、reset、force push、切换分支或清理开发空间；若工具返回冲突或待人工处理，停止并把影响和下一步告诉我。',
   ].join('\n');
 }
 
@@ -778,6 +875,55 @@ function validateMcpSubmitBody(body) {
       const error = new Error(`Unexpected submit property: ${key}`);
       error.code = 'INVALID_REQUEST';
       throw error;
+    }
+  }
+}
+
+function validateMcpIntegrationBody(body, operation) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'submissionId');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+    const error = new Error('Invalid integration session revision.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  const common = ['sessionId', 'clientRequestId', 'expectedRevision', 'submissionId'];
+  const allowed = operation === 'begin'
+    ? [...common, 'expectedSubmissionRevision']
+    : operation === 'review'
+      ? [...common, 'claimId', 'expectedClaimRevision', 'verdict', 'summary', 'findings', 'checks']
+      : [...common, 'claimId', 'expectedSubmissionRevision', 'expectedClaimRevision', 'summary'];
+  rejectUnexpectedMcpFields(body, new Set(allowed), `integration ${operation}`);
+  if (operation !== 'review'
+    && (!Number.isInteger(body.expectedSubmissionRevision) || body.expectedSubmissionRevision < 0)) {
+    const error = new Error('Invalid submission revision.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  if (operation !== 'begin') {
+    requireString(body, 'claimId');
+    requireString(body, 'summary');
+    if (!Number.isInteger(body.expectedClaimRevision) || body.expectedClaimRevision < 0
+      || body.summary.length > 1000) {
+      const error = new Error('Invalid integration review fields.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+  if (operation === 'review') {
+    if (!['approved', 'changes_requested', 'rejected'].includes(body.verdict)) {
+      const error = new Error('Invalid integration verdict.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    for (const key of ['findings', 'checks']) {
+      if (!Array.isArray(body[key]) || body[key].length > 20
+        || body[key].some((item) => typeof item !== 'string' || !item.trim() || item.length > 500)) {
+        const error = new Error(`Invalid integration ${key}.`);
+        error.code = 'INVALID_REQUEST';
+        throw error;
+      }
     }
   }
 }
@@ -1467,10 +1613,48 @@ export async function createCockpitHttpServer({
           sendError(response, 'PROJECT_NOT_FOUND');
           return;
         }
+        const developmentSpaces = listDevelopmentSpaces(db, { projectId }).map((space) => ({
+          spaceId: space.spaceId,
+          name: space.name || '通用开发空间',
+          status: space.status,
+          statusReason: space.statusReason,
+          revision: space.revision,
+          createdAt: space.createdAt,
+          updatedAt: space.updatedAt,
+        }));
+        const submissions = listSubmissions(db, { projectId }).map((submission) => ({
+          submissionId: submission.submissionId,
+          spaceId: submission.spaceId,
+          spaceName: submission.spaceName || '通用开发空间',
+          title: submission.title,
+          description: submission.description,
+          status: submission.status,
+          statusReason: submission.statusReason,
+          revision: submission.revision,
+          sourceCommit: submission.sourceCommit,
+          targetHead: submission.targetHead,
+          activeClaim: submission.activeClaim ? {
+            claimId: submission.activeClaim.claimId,
+            status: submission.activeClaim.status,
+            expiresAt: submission.activeClaim.expiresAt,
+          } : null,
+          latestReceipt: submission.latestReceipt ? {
+            receiptId: submission.latestReceipt.receiptId,
+            outcome: submission.latestReceipt.outcome,
+            integratedCommit: submission.latestReceipt.integratedCommit,
+          } : null,
+          reviewPrompt: ['pending', 'claimed'].includes(submission.status)
+            ? integrationReviewPrompt(submission)
+            : null,
+          createdAt: submission.createdAt,
+          updatedAt: submission.updatedAt,
+        }));
         sendJson(response, 200, {
           ok: true,
           refreshedAt: new Date().toISOString(),
           ...detail,
+          developmentSpaces,
+          submissions,
         });
         return;
       }
@@ -1996,6 +2180,55 @@ export async function createCockpitHttpServer({
             },
           });
         }
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/begin') {
+        const body = await readJson(request);
+        validateMcpIntegrationBody(body, 'begin');
+        const result = await beginIntegrationReview(db, {
+          ...body,
+          commandId: id('integration_begin', `${body.sessionId}:${body.clientRequestId}`),
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: { sessionId: body.sessionId, revision: body.expectedRevision },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/review') {
+        const body = await readJson(request);
+        validateMcpIntegrationBody(body, 'review');
+        const result = await recordSessionIntegrationReview(db, {
+          ...body,
+          commandId: id('integration_review', `${body.sessionId}:${body.clientRequestId}`),
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: { sessionId: body.sessionId, revision: body.expectedRevision },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/merge') {
+        const body = await readJson(request);
+        validateMcpIntegrationBody(body, 'merge');
+        const result = await mergeApprovedSubmission(db, {
+          ...body,
+          commandId: id('integration_merge', `${body.sessionId}:${body.clientRequestId}`),
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: {
+            sessionId: body.sessionId,
+            revision: body.expectedRevision,
+            localIntegrated: Boolean(result.localIntegrated),
+            pushed: Boolean(result.pushed),
+            retryable: Boolean(result.retryable),
+            integratedCommit: result.integratedCommit ?? null,
+          },
+        });
         return;
       }
 

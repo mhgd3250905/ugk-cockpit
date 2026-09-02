@@ -9,12 +9,15 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 9 tools and no path/projectId/worktreeId/token', () => {
+test('TOOLS definition contains the required 12 tools and no path/projectId/worktreeId/token', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
     'ugk_work_accept',
     'ugk_work_progress',
     'ugk_work_submit',
+    'ugk_integration_begin',
+    'ugk_integration_review',
+    'ugk_integration_merge',
     'ugk_work_finish',
     'ugk_work_handoff',
     'ugk_work_begin',
@@ -128,7 +131,7 @@ test('dispatchMessage handles initialize, ping, tools/list, and notifications', 
 });
 
 test('dispatchMessage accurately forwards tool calls to handlers once with exact arguments', async () => {
-  const callCounts = { accept: 0, progress: 0, submit: 0, finish: 0, handoff: 0, begin: 0, init: 0 };
+  const callCounts = { accept: 0, progress: 0, submit: 0, integrationBegin: 0, integrationReview: 0, integrationMerge: 0, finish: 0, handoff: 0, begin: 0, init: 0 };
   const receivedArgs = {};
 
   const handlers = {
@@ -146,6 +149,21 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
       callCounts.submit += 1;
       receivedArgs.submit = args;
       return { submissionId: 'sub-1', localSaved: true, pushed: true };
+    },
+    ugk_integration_begin: async (args) => {
+      callCounts.integrationBegin += 1;
+      receivedArgs.integrationBegin = args;
+      return { claimId: 'claim-1', claimRevision: 0 };
+    },
+    ugk_integration_review: async (args) => {
+      callCounts.integrationReview += 1;
+      receivedArgs.integrationReview = args;
+      return { verdict: args.verdict, claimRevision: 1 };
+    },
+    ugk_integration_merge: async (args) => {
+      callCounts.integrationMerge += 1;
+      receivedArgs.integrationMerge = args;
+      return { receiptId: 'receipt-1', pushed: true };
     },
     ugk_work_finish: async (args) => {
       callCounts.finish += 1;
@@ -281,6 +299,38 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.deepEqual(JSON.parse(submitRes.result.content[0].text), {
     submissionId: 'sub-1', localSaved: true, pushed: true,
   });
+
+  const integrationBeginPayload = {
+    sessionId: 'sess-100', clientRequestId: 'review-begin-1', expectedRevision: 2,
+    submissionId: 'sub-1', expectedSubmissionRevision: 0,
+  };
+  await dispatchMessage({ jsonrpc: '2.0', id: 112, method: 'tools/call', params: {
+    name: 'ugk_integration_begin', arguments: integrationBeginPayload,
+  } }, { handlers });
+  assert.strictEqual(callCounts.integrationBegin, 1);
+  assert.deepEqual(receivedArgs.integrationBegin, integrationBeginPayload);
+
+  const integrationReviewPayload = {
+    sessionId: 'sess-100', clientRequestId: 'review-result-1', expectedRevision: 2,
+    submissionId: 'sub-1', claimId: 'claim-1', expectedClaimRevision: 0,
+    verdict: 'approved', summary: '审核通过', findings: [], checks: ['tests passed'],
+  };
+  await dispatchMessage({ jsonrpc: '2.0', id: 113, method: 'tools/call', params: {
+    name: 'ugk_integration_review', arguments: integrationReviewPayload,
+  } }, { handlers });
+  assert.strictEqual(callCounts.integrationReview, 1);
+  assert.deepEqual(receivedArgs.integrationReview, integrationReviewPayload);
+
+  const integrationMergePayload = {
+    sessionId: 'sess-100', clientRequestId: 'merge-1', expectedRevision: 2,
+    submissionId: 'sub-1', claimId: 'claim-1', expectedSubmissionRevision: 2,
+    expectedClaimRevision: 1, summary: '审核通过并接入主项目',
+  };
+  await dispatchMessage({ jsonrpc: '2.0', id: 114, method: 'tools/call', params: {
+    name: 'ugk_integration_merge', arguments: integrationMergePayload,
+  } }, { handlers });
+  assert.strictEqual(callCounts.integrationMerge, 1);
+  assert.deepEqual(receivedArgs.integrationMerge, integrationMergePayload);
 
   // Call ugk_work_finish
   const finishPayload = {
@@ -537,6 +587,19 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
     assert.strictEqual(res.result.isError, true);
     assert.match(res.result.content[0].text, /Forbidden property|Unexpected property/i);
   }
+
+  const integrationWithPath = await dispatchMessage({
+    jsonrpc: '2.0', id: 'integration-path', method: 'tools/call',
+    params: {
+      name: 'ugk_integration_begin',
+      arguments: {
+        sessionId: 's1', clientRequestId: 'review-1', expectedRevision: 2,
+        submissionId: 'sub-1', expectedSubmissionRevision: 0, path: 'E:\\forged',
+      },
+    },
+  }, { handlers });
+  assert.strictEqual(integrationWithPath.result.isError, true);
+  assert.match(integrationWithPath.result.content[0].text, /Forbidden property/);
 
   for (const field of ['gitBranch', 'gitHead', 'gitCoherence', 'path', 'projectId', 'worktreeId']) {
     const res = await dispatchMessage({

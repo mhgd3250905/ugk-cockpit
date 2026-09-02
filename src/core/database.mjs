@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 17;
+export const SUPPORTED_SCHEMA_VERSION = 18;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -591,6 +591,42 @@ CREATE INDEX idx_submission_attempts_space_state
   ON submission_attempts(space_id, state, updated_at DESC);
 CREATE INDEX idx_submission_attempts_session
   ON submission_attempts(session_id, updated_at DESC);
+`,
+  },
+  {
+    version: 18,
+    name: 'integration-attempts',
+    sql: `
+CREATE TABLE integration_attempts (
+  command_id TEXT PRIMARY KEY REFERENCES commands(id),
+  session_id TEXT NOT NULL,
+  session_revision INTEGER NOT NULL CHECK (session_revision >= 1),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  space_id TEXT REFERENCES development_spaces(id),
+  submission_id TEXT NOT NULL REFERENCES submissions(id),
+  submission_revision INTEGER NOT NULL CHECK (submission_revision >= 0),
+  claim_id TEXT NOT NULL REFERENCES integration_claims(id),
+  claim_revision INTEGER NOT NULL CHECK (claim_revision >= 0),
+  target_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  target_branch TEXT NOT NULL,
+  target_head TEXT NOT NULL,
+  source_commit TEXT NOT NULL,
+  remote_name TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'local_integrated', 'pushed', 'completed', 'attention')),
+  integrated_commit TEXT,
+  external_integration INTEGER NOT NULL DEFAULT 0 CHECK (external_integration IN (0, 1)),
+  receipt_id TEXT REFERENCES integration_receipts(id),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_integration_attempts_submission_state
+  ON integration_attempts(submission_id, state, updated_at DESC);
+CREATE INDEX idx_integration_attempts_session
+  ON integration_attempts(session_id, updated_at DESC);
 `,
   },
 ];
