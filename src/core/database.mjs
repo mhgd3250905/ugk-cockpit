@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 12;
+export const SUPPORTED_SCHEMA_VERSION = 15;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -390,6 +390,154 @@ CREATE INDEX idx_relays_assignment_created ON relays(assignment_id, created_at D
         db.exec('ALTER TABLE relays ADD COLUMN git_observed_at TEXT;');
       }
     },
+  },
+  {
+    version: 13,
+    name: 'project-repository-identity-and-development-spaces',
+    sql: `
+ALTER TABLE projects ADD COLUMN repository_identity TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE development_spaces (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  worktree_id TEXT NOT NULL UNIQUE REFERENCES worktrees(id),
+  status TEXT NOT NULL CHECK (status IN (
+    'ready', 'active', 'busy', 'integrating', 'archived', 'paused',
+    'awaiting_review', 'attention', 'missing', 'cleanup_ready'
+  )),
+  status_reason TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  archived_at TEXT
+) STRICT;
+
+CREATE INDEX idx_development_spaces_project_status
+  ON development_spaces(project_id, status, updated_at DESC);
+CREATE INDEX idx_projects_repository_identity
+  ON projects(repository_identity);
+`,
+    apply(db) {
+      db.prepare(`
+        UPDATE projects
+        SET repository_identity = (
+          SELECT repository_identity FROM worktrees WHERE worktrees.id = projects.worktree_id
+        )
+        WHERE worktree_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM worktrees WHERE worktrees.id = projects.worktree_id)
+          AND (repository_identity = '' OR repository_identity IS NULL);
+      `).run();
+    },
+  },
+  {
+    version: 14,
+    name: 'submissions-and-integrations',
+    sql: `
+CREATE TABLE submissions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  space_id TEXT REFERENCES development_spaces(id),
+  source_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  target_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  source_branch TEXT NOT NULL,
+  source_commit TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  target_head TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'pending', 'claimed', 'approved', 'integrated', 'rejected', 'cancelled', 'failed', 'conflict',
+    'changes_requested', 'stale', 'merging', 'merged', 'withdrawn', 'push_failed', 'blocked', 'unknown'
+  )),
+  status_reason TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  closed_at TEXT
+) STRICT;
+
+CREATE TABLE integration_claims (
+  id TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL REFERENCES submissions(id),
+  claimant TEXT NOT NULL,
+  source_commit TEXT NOT NULL,
+  target_head TEXT NOT NULL,
+  target_worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  status TEXT NOT NULL CHECK (status IN ('active', 'released', 'completed', 'failed', 'cancelled', 'timed_out')),
+  status_reason TEXT NOT NULL DEFAULT '',
+  review_verdict TEXT CHECK (review_verdict IN ('approved', 'changes_requested', 'rejected')),
+  review_summary TEXT NOT NULL DEFAULT '',
+  review_payload_json TEXT NOT NULL DEFAULT '{}',
+  reviewed_at TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  released_at TEXT
+) STRICT;
+
+CREATE TABLE integration_receipts (
+  id TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL REFERENCES submissions(id),
+  claim_id TEXT REFERENCES integration_claims(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  space_id TEXT REFERENCES development_spaces(id),
+  source_commit TEXT NOT NULL,
+  target_head TEXT NOT NULL,
+  integrated_commit TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('integrated', 'rejected', 'conflict', 'failed', 'cancelled')),
+  summary TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX idx_integration_claims_active_submission
+  ON integration_claims(submission_id) WHERE status = 'active';
+
+CREATE INDEX idx_submissions_project_status
+  ON submissions(project_id, status, updated_at DESC);
+CREATE INDEX idx_submissions_space
+  ON submissions(space_id);
+CREATE INDEX idx_integration_claims_submission
+  ON integration_claims(submission_id, created_at DESC);
+CREATE INDEX idx_integration_receipts_submission
+  ON integration_receipts(submission_id, created_at DESC);
+CREATE INDEX idx_integration_receipts_project
+  ON integration_receipts(project_id, created_at DESC);
+
+CREATE TRIGGER integration_receipts_append_only_update
+BEFORE UPDATE ON integration_receipts
+BEGIN
+  SELECT RAISE(ABORT, 'integration_receipts are append-only');
+END;
+
+CREATE TRIGGER integration_receipts_append_only_delete
+BEFORE DELETE ON integration_receipts
+BEGIN
+  SELECT RAISE(ABORT, 'integration_receipts are append-only');
+END;
+`,
+  },
+  {
+    version: 15,
+    name: 'repository-locks',
+    sql: `
+CREATE TABLE repository_locks (
+  repository_identity TEXT PRIMARY KEY,
+  lock_id TEXT NOT NULL UNIQUE,
+  holder TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  command_id TEXT REFERENCES commands(id)
+) STRICT;
+
+CREATE INDEX idx_repository_locks_expiry ON repository_locks(expires_at);
+`,
   },
 ];
 
