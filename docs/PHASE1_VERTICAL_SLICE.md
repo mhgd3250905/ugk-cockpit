@@ -25,7 +25,8 @@
 - `0.1.0-alpha.24`：收紧 `$cockpit-closeout` 的两阶段门禁；Preflight 必须从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现并核对当前 canonical source，完整核对 tracked/untracked 归属并绑定验证证据到 source state；来源、归属或证据无法证明时 fail closed，成功报告分开 Agent alignment 与 MCP-verified Git/session 事实。
 - `0.1.0-alpha.25`：前端改为深色优先控制台视觉，提供「亮色 / 暗色 / 跟随系统」三档手动切换与 localStorage 持久化。色值全量转换为语义设计令牌，状态色收敛为左侧色条与徽标；项目卡片改为紧凑三行结构，时间线收敛节点色与强调形状，中文字重规范为 400/600/700 并禁用负字距；首绘前同步脚本注入主题与 color-scheme，Vite 构建版本号自 package.json 自动派生。
 - `0.1.0-alpha.26`：补齐 INIT 节点的规范化展示，以接入时的工作目标作为摘要，完整 currentState 收入“查看接入状态”折叠区；历史记录无需迁移即可避免长段文字占满时间线，并继续保留基线 Git 证据。
-- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；closeout、relay 与 handoff 都只在用户显式动作中执行，`completed` handoff 的选择可伴随 closeout。closeout 先通过只读 Preflight，再处理确定性对齐问题。
+- `0.1.0-alpha.27`：交付平台持有的多开发空间生命周期。用户从项目详情选择空目录创建通用功能空间，空间会话通过 `$cockpit-submit` 显式保存并普通 push；主项目待办提供一键复制审核提示词，以固定 SHA、独占 claim、revision CAS 驱动领取、审核和 `ff-only` 接入。接入的本地保存、远端 push 与不可变回执可从崩溃或网络失败恢复，平台不自动 rebase、reset、force push 或清理空间。
+- 当前小步：多开发空间闭环已可用，继续补充真实项目可用性验证与后续安全整理入口；清理或删除工作副本仍不在默认动作内。
 
 ## 产品方向：晨间工作简报
 
@@ -104,7 +105,7 @@
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_handoff`；阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress，也不新增后端工具。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
+- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

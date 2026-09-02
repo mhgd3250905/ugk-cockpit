@@ -4,7 +4,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.26` — INIT 接入节点改为以工作目标作为简短标题，完整接入状态按需展开；历史长文本无需迁移即可收束显示，同时保留接入基线、AI 与 Git 证据。
+`0.1.0-alpha.27` — 新增平台持有的多开发空间闭环：用户选择空目录创建独立功能空间，Agent 显式送审后由主项目领取、审核并以 `ff-only` 安全接入；全过程提供幂等恢复、revision CAS、普通 push 与不可变回执。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
@@ -20,8 +20,10 @@ Phase 0 已验证的基础能力继续保留：
 - 崩溃边界恢复，不产生“幽灵完成”。
 - Windows 路径授权、junction/symlink 逃逸拒绝。
 - 本地服务单实例锁。
+- 同仓库多工作副本分别持有唯一写入会话，送审与主项目接入使用仓库级短锁串行化。
+- 主项目只接入固定 source/target 代码保存点；不自动 rebase、reset、force push 或清理开发空间。
 
-自动化测试只使用系统临时目录中的夹具。用户明确打开项目文件夹后，产品读取必要的 Git 状态；用户确认后才登记到工作简报。产品不会修改、提交、上传或删除项目文件。
+自动化测试只使用系统临时目录中的夹具。用户明确打开项目文件夹后，产品读取必要的 Git 状态；用户确认后才登记到工作简报。普通查看和接入不会修改项目文件；只有用户显式创建开发空间、调用 `$cockpit-submit` 或要求主项目执行已审核接入时，平台才执行对应的受管 Git 动作，且不会自动清理或删除工作副本。
 
 ## 启动本地预览
 
@@ -46,7 +48,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit
 
 ## 配套 Skills
 
-仓库内置五个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；`completed` handoff 的选择可伴随执行 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。
+仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；`completed` handoff 的选择可伴随执行 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 安装到当前用户的 Codex：
 
@@ -69,6 +71,6 @@ MCP 后端未新增生产依赖。
 
 ## 面向用户的首版目标
 
-Phase 1 会交付最小网页闭环：添加未知项目、查看首页、开始或继续 AI 工作、结束并生成接手记录、处理未登记改动。普通路径不会要求用户填写项目 ID、worktree、JSON 或 Git 命令。
+Phase 1 会交付最小网页闭环：添加未知项目、查看首页、开始或继续 AI 工作、创建独立功能开发空间、送交主项目审核、规范接入并生成回执、结束并生成接手记录、处理未登记改动。普通路径不会要求用户填写项目 ID、worktree、分支、JSON 或 Git 命令。
 
 详见 [路线图](docs/ROADMAP.md) 和 [产品语言规范](docs/PRODUCT_LANGUAGE.md)。
