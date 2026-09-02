@@ -75,5 +75,10 @@ export function createServiceHandlers({
       mcpWorkingDirectory: workingDirectory,
     }),
     ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
+    ugk_work_relay: (arguments_) => call('/api/v1/mcp/work/relay', arguments_),
+    ugk_work_resume: (arguments_) => call('/api/v1/mcp/work/resume', {
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
+    }),
   };
 }

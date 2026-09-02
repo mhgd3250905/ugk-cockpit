@@ -13,7 +13,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
 export const TOOLS = [
   {
     name: 'ugk_work_accept',
-    description: 'Accept a work dispatch and initialize or resume an AI session',
+    description: 'Only call after the user explicitly instructs accepting this dispatch and provides its code; initialize or resume the AI session',
     inputSchema: {
       type: 'object',
       properties: {
@@ -32,7 +32,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_progress',
-    description: 'Report progress and state updates for an active session',
+    description: 'The only MCP operation eligible for implicit invocation: record non-terminal progress and state updates for an active session',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,7 +52,7 @@ export const TOOLS = [
         status: {
           type: 'string',
           enum: PROGRESS_STATUSES,
-          description: 'Non-terminal progress only. Use finish or handoff to end the session.'
+          description: 'Non-terminal progress only; this operation never ends the phase or creates a handoff.'
         },
         note: {
           type: 'string',
@@ -65,7 +65,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_finish',
-    description: 'Complete an active session with outcome and summary',
+    description: 'Only call after the user explicitly asks to end the current phase; complete the active session with an outcome and summary',
     inputSchema: {
       type: 'object',
       properties: {
@@ -109,7 +109,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_handoff',
-    description: 'Record session handoff details for the next agent session',
+    description: 'Only call after the user explicitly asks to end the current phase; record terminal handoff details for the next agent session',
     inputSchema: {
       type: 'object',
       properties: {
@@ -213,7 +213,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_begin',
-    description: 'Begin work on an accepted session by specifying task details',
+    description: 'Only call after the user explicitly instructs beginning work; begin an accepted session by specifying task details',
     inputSchema: {
       type: 'object',
       properties: {
@@ -241,7 +241,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_init',
-    description: 'Initialize the current project as an active Cockpit session without changing project files',
+    description: 'Only call after the user explicitly instructs initialization; initialize the current project as an active Cockpit session without changing project files',
     inputSchema: {
       type: 'object',
       properties: {
@@ -263,6 +263,104 @@ export const TOOLS = [
         }
       },
       required: ['initCode', 'clientRequestId', 'currentTask', 'currentState'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_work_relay',
+    description: 'Only call when the user explicitly asks to switch AI conversations; prepare a non-terminal one-time conversation relay while keeping the same active Cockpit session and write lease',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The identifier of the active work session'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'Idempotency key / client request identifier'
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Expected optimistic concurrency revision number'
+        },
+        nextSessionFocus: {
+          type: 'string',
+          description: 'Recommended focus area for the next AI conversation'
+        },
+        summary: {
+          type: 'string',
+          description: 'Summary of work completed or encountered'
+        },
+        currentState: {
+          type: 'string',
+          description: 'Current state of the project/task'
+        },
+        completedItems: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of completed items'
+        },
+        pendingItems: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of pending items'
+        },
+        decisions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of key decisions'
+        },
+        artifactRefs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of artifact references or paths'
+        },
+        risks: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of identified risks or caveats'
+        },
+        suggestedSkills: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of suggested skills for the next conversation'
+        }
+      },
+      required: [
+        'sessionId',
+        'clientRequestId',
+        'expectedRevision',
+        'nextSessionFocus',
+        'summary',
+        'currentState',
+        'completedItems',
+        'pendingItems',
+        'decisions',
+        'artifactRefs',
+        'risks',
+        'suggestedSkills'
+      ],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_work_resume',
+    description: 'Only call when the user explicitly instructs resuming with a provided continueCode; consume a one-time conversation relay code and continue the same active Cockpit session',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        continueCode: {
+          type: 'string',
+          description: 'One-time relay code returned by ugk_work_relay'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'Idempotency key / client request identifier'
+        }
+      },
+      required: ['continueCode', 'clientRequestId'],
       additionalProperties: false
     }
   }
@@ -479,6 +577,71 @@ function validateInitArgs(args) {
   return null;
 }
 
+function validateRelayArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowedKeys = [
+    'sessionId',
+    'clientRequestId',
+    'expectedRevision',
+    'nextSessionFocus',
+    'summary',
+    'currentState',
+    'completedItems',
+    'pendingItems',
+    'decisions',
+    'artifactRefs',
+    'risks',
+    'suggestedSkills'
+  ];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (typeof args.expectedRevision !== 'number'
+    || !Number.isInteger(args.expectedRevision)
+    || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  for (const field of ['nextSessionFocus', 'summary', 'currentState']) {
+    if (typeof args[field] !== 'string' || args[field].trim() === '') {
+      return `Missing or invalid required field: ${field} (must be non-empty string)`;
+    }
+  }
+  for (const field of HANDOFF_ARRAY_FIELDS) {
+    if (!isStringArray(args[field])) {
+      return `Missing or invalid required field: ${field} (must be an array of strings)`;
+    }
+  }
+  return null;
+}
+
+function validateResumeArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!['continueCode', 'clientRequestId'].includes(key)) {
+      return `Unexpected property: ${key}`;
+    }
+  }
+  if (typeof args.continueCode !== 'string' || args.continueCode.trim() === '') {
+    return 'Missing or invalid required field: continueCode (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  return null;
+}
+
 export async function dispatchMessage(message, { handlers = {}, stderr = null } = {}) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     return {
@@ -580,6 +743,10 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateBeginArgs(toolArgs);
       } else if (toolName === 'ugk_work_init') {
         validationError = validateInitArgs(toolArgs);
+      } else if (toolName === 'ugk_work_relay') {
+        validationError = validateRelayArgs(toolArgs);
+      } else if (toolName === 'ugk_work_resume') {
+        validationError = validateResumeArgs(toolArgs);
       } else {
         return {
           jsonrpc: '2.0',

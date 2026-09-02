@@ -1272,6 +1272,7 @@ export function readSessionContext(db, sessionId) {
   if (!isNonEmptyString(sessionId)) return { ok: false, code: 'INVALID_REQUEST' };
   const assignment = db.prepare(`
     SELECT assignments.*, projects.name AS project_name, projects.authorized_root,
+           projects.stage AS project_stage,
            worktrees.canonical_path, worktrees.repository_identity,
            worktrees.identity_fingerprint
     FROM assignments

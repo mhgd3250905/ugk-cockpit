@@ -1,11 +1,15 @@
 ---
 name: cockpit-handoff
-description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP；仅 cockpitVerified:true 才报告交接成功。
+description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP；必须用户显式要求，仅 cockpitVerified:true 才报告交接成功。
 ---
 
 # UGK Cockpit 交接
 
-阶段结束时使用 `ugk_work_handoff`，从当前已知事实整理下一次可直接读取的紧凑交接。不要自动 commit、清理、覆盖或改写项目文件；MCP 会负责最终状态采集、权限、CAS revision、事务和幂等。
+本 Skill 必须由用户显式调用。只有当前用户明确要求结束或交接 Cockpit 阶段时才可调用 `ugk_work_handoff`，从当前已知事实整理下一次可直接读取的紧凑交接。
+
+普通功能完成、任务完成、Git commit、测试通过、上下文堆积或对话轮次增加都必须保持 active 状态，绝对不能由 AI 自行推断或隐式触发交接。如需跨聊天无缝接力，应使用 `$cockpit-relay`，不得自行 handoff。
+
+不要自动 commit、清理、覆盖或改写项目文件；MCP 会负责最终状态采集、权限、CAS revision、事务和幂等。
 
 ## 前置条件与内容
 

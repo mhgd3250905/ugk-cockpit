@@ -16,6 +16,7 @@ import {
 } from '../core/assignments.mjs';
 import { FolderGrantStore } from '../core/folder-grants.mjs';
 import { createHandoff, readLatestHandoff } from '../core/handoffs.mjs';
+import { createRelay, resumeRelay } from '../core/relays.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
 import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
@@ -255,10 +256,70 @@ const PUBLIC_ERRORS = {
     impact: '没有写入进展，也没有修改代码。',
     requiredAction: '请先使用接手消息成功接手任务。',
   },
+  SESSION_NOT_ACTIVE: {
+    status: 409,
+    message: '这次 AI 工作会话已经不在进行中。',
+    impact: '没有创建接力，也没有修改代码。',
+    requiredAction: '请刷新项目状态，确认当前仍在使用的工作会话。',
+  },
+  RELAY_CODE_INVALID: {
+    status: 404,
+    message: '这个接力码无效。',
+    impact: '没有切换工作会话，也没有修改代码。',
+    requiredAction: '请从上一条 AI 会话复制最新的接力消息。',
+  },
+  RELAY_EXPIRED: {
+    status: 409,
+    message: '这次接力码已经过期。',
+    impact: '原 AI 工作会话仍保留其已有记录；没有创建新的会话。',
+    requiredAction: '请回到 Cockpit 确认当前会话，必要时由用户重新安排接力。',
+  },
+  RELAY_ALREADY_ACCEPTED: {
+    status: 409,
+    message: '这次接力已经被另一个 AI 会话接收。',
+    impact: '没有创建第二个工作会话，也没有释放当前写入权限。',
+    requiredAction: '请使用已经接收接力的会话继续；如需接管，请由用户明确确认。',
+  },
+  RELAY_ALREADY_WAITING: {
+    status: 409,
+    message: '这次工作会话已经在等待新的 AI 会话继续。',
+    impact: '没有创建重复接力，当前写入会话和代码都保持不变。',
+    requiredAction: '请使用 Cockpit 已生成的接力消息，或先确认当前状态。',
+  },
+  RELAY_REQUEST_CONFLICT: {
+    status: 409,
+    message: '这个接力请求编号已经用于另一份接力内容。',
+    impact: '原有接力记录和代码都没有被覆盖。',
+    requiredAction: '请生成新的 clientRequestId，并确认最新 revision。',
+  },
+  RELAY_REVISION_CONFLICT: {
+    status: 409,
+    message: '这次接力对应的工作状态刚刚发生了变化。',
+    impact: '没有覆盖新的进展，工作会话和写入权限保持原状。',
+    requiredAction: '请读取最新 revision 后重新记录接力。',
+  },
+  RELAY_BINDING_MISMATCH: {
+    status: 409,
+    message: '当前 AI 会话所在的代码位置与接力记录不一致。',
+    impact: '没有接受接力，也没有修改代码或项目绑定。',
+    requiredAction: '请在原项目目录中重试，不要手动改写路径绑定。',
+  },
+  RELAY_TTL_TOO_LONG: {
+    status: 400,
+    message: '接力码有效期超过安全上限。',
+    impact: '没有创建接力，也没有修改代码。',
+    requiredAction: '请使用较短的有效期后重试。',
+  },
 };
 
 function id(prefix, value) {
   return `${prefix}_${createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
+}
+
+function relayContinueCode(apiToken, sessionId, clientRequestId) {
+  return createHmac('sha256', apiToken)
+    .update(`relay:${sessionId}:${clientRequestId}`)
+    .digest('base64url');
 }
 
 function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
@@ -269,7 +330,8 @@ function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
       `一次性 initCode: "${dispatchCode}"。`,
       target ? `当前目标：${target}` : '当前没有额外目标，请按当前对话继续工作。',
       '成功后直接进入 working；不要清理、覆盖或重置已有改动。',
-      '后续用 `$cockpit-progress` 记录有效检查点，阶段结束时用 `$cockpit-handoff` 生成标准交接手册。',
+      '后续可用 `$cockpit-progress` 自动记录有效检查点；只有用户明确要求换 AI 会话时才调用 `$cockpit-relay`。',
+      '只有用户明确要求结束当前阶段时，才用 `$cockpit-handoff` 生成标准交接手册；普通功能完成不会触发阶段结束交接。',
       '如果 Agent 不支持这个 Skill，可改用 UGK Cockpit MCP 完成同一 init；不要传路径或本地 token。',
       '如果工具报告项目不匹配或已有写入会话，请停止并告诉用户，不要强行接管。',
     ].join('\n');
@@ -286,7 +348,8 @@ function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
   return [
     `请使用 UGK Cockpit MCP 接手这项任务：${task}`,
     `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
-    '工作中调用 ugk_work_progress；结束时优先调用 ugk_work_handoff 生成标准交接手册。',
+    '工作中可调用 `$cockpit-progress`（ugk_work_progress）记录检查点；只有用户明确要求换 AI 会话时才调用 `$cockpit-relay`（ugk_work_relay）。',
+    '只有用户明确要求结束当前阶段时，才调用 `$cockpit-handoff`（ugk_work_handoff）；普通功能完成不会触发阶段结束交接。',
     '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
   ].join('\n');
 }
@@ -445,6 +508,89 @@ function validateMcpInitBody(body) {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+}
+
+function validRelayItems(value, { stringsOnly = false } = {}) {
+  return Array.isArray(value)
+    && value.length <= 100
+    && value.every((item) => {
+      if (typeof item === 'string') return item.length <= 4000;
+      return !stringsOnly && item !== null && typeof item === 'object' && !Array.isArray(item);
+    });
+}
+
+const MCP_RELAY_KEYS = new Set([
+  'sessionId',
+  'clientRequestId',
+  'expectedRevision',
+  'nextSessionFocus',
+  'summary',
+  'currentState',
+  'completedItems',
+  'pendingItems',
+  'decisions',
+  'artifactRefs',
+  'risks',
+  'suggestedSkills',
+]);
+
+const MCP_RESUME_KEYS = new Set([
+  'continueCode',
+  'clientRequestId',
+  // The stdio adapter adds this binding-only field before calling HTTP.
+  'mcpWorkingDirectory',
+]);
+
+function rejectUnexpectedMcpFields(body, allowedKeys, operation) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    const error = new Error(`Invalid ${operation} request.`);
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  for (const field of Object.keys(body)) {
+    if (!allowedKeys.has(field)) {
+      const error = new Error(`Unexpected ${operation} property: ${field}`);
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+}
+
+function validateMcpRelayBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_RELAY_KEYS, 'relay');
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+    const error = new Error('Invalid relay expectedRevision.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  const textFields = ['nextSessionFocus', 'summary', 'currentState'];
+  const listFields = [
+    'completedItems',
+    'pendingItems',
+    'decisions',
+    'artifactRefs',
+    'risks',
+    'suggestedSkills',
+  ];
+  if (
+    textFields.some((field) => typeof body[field] !== 'string'
+      || body[field].trim() === ''
+      || body[field].length > 20_000)
+    || listFields.some((field) => !validRelayItems(body[field], { stringsOnly: field === 'artifactRefs' }))
+  ) {
+    const error = new Error('Invalid relay request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
+function validateMcpResumeBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_RESUME_KEYS, 'resume');
+  requireString(body, 'continueCode');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'mcpWorkingDirectory');
 }
 
 function validateMcpFinishBody(body) {
@@ -1189,6 +1335,50 @@ export async function createCockpitHttpServer({
           preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
           latestHandoff,
           message: '当前项目已接入 Cockpit；已有改动已作为接入基线保留。',
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/relay') {
+        const body = await readJson(request);
+        validateMcpRelayBody(body);
+        const result = createRelay(db, {
+          ...body,
+          // Derive the one-time secret from the persistent service token so a
+          // lost HTTP response can be safely retried with the same payload.
+          // Only its digest is persisted by the core relay implementation.
+          continueCode: relayContinueCode(token, body.sessionId, body.clientRequestId),
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: {
+            session_id: body.sessionId,
+            relay_id: result.relayId ?? null,
+            revision: result.revision ?? null,
+          },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/resume') {
+        const body = await readJson(request);
+        validateMcpResumeBody(body);
+        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        const result = resumeRelay(db, {
+          ...body,
+          projectId: working.project.id,
+          worktreeId: working.project.worktree_id,
+          canonicalPath: working.observation.canonicalPath,
+          repositoryIdentity: working.observation.repositoryIdentity,
+          worktreeIdentity: working.observation.worktreeIdentity,
+        });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: {
+            session_id: result.sessionId ?? null,
+            relay_id: result.relayId ?? null,
+            revision: result.revision ?? null,
+          },
         });
         return;
       }

@@ -8,4 +8,4 @@ dependencies:
       value: "ugk-cockpit"
       description: "UGK Cockpit 本地 MCP"
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

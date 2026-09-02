@@ -9,7 +9,7 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 6 tools and no path/projectId/worktreeId', () => {
+test('TOOLS definition contains the required 8 tools and no path/projectId/worktreeId', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
     'ugk_work_accept',
@@ -17,7 +17,9 @@ test('TOOLS definition contains the required 6 tools and no path/projectId/workt
     'ugk_work_finish',
     'ugk_work_handoff',
     'ugk_work_begin',
-    'ugk_work_init'
+    'ugk_work_init',
+    'ugk_work_relay',
+    'ugk_work_resume'
   ]);
   assert.deepEqual(
     TOOLS.find((tool) => tool.name === 'ugk_work_handoff').inputSchema.properties.outcome.enum,
@@ -26,6 +28,20 @@ test('TOOLS definition contains the required 6 tools and no path/projectId/workt
   assert.deepEqual(
     TOOLS.find((tool) => tool.name === 'ugk_work_progress').inputSchema.properties.status.enum,
     ['working', 'in_progress']
+  );
+
+  const descriptions = Object.fromEntries(TOOLS.map((tool) => [tool.name, tool.description]));
+  assert.match(descriptions.ugk_work_progress, /only.*eligible for implicit/i);
+  assert.match(descriptions.ugk_work_accept, /explicitly.*code/i);
+  assert.match(descriptions.ugk_work_begin, /explicitly instructs beginning/i);
+  assert.match(descriptions.ugk_work_init, /explicitly instructs initialization/i);
+  assert.match(descriptions.ugk_work_resume, /explicitly.*continueCode/i);
+  assert.match(descriptions.ugk_work_relay, /explicitly asks to switch AI conversations/i);
+  assert.match(descriptions.ugk_work_finish, /explicitly asks to end the current phase/i);
+  assert.match(descriptions.ugk_work_handoff, /explicitly asks to end the current phase/i);
+  assert.match(
+    TOOLS.find((tool) => tool.name === 'ugk_work_progress').inputSchema.properties.status.description,
+    /never ends the phase|never.*handoff/i,
   );
 
   for (const tool of TOOLS) {

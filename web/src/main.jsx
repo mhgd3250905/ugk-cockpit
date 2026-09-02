@@ -40,6 +40,12 @@ const STATUS = {
     detail: '最近进展和结束交接会自动回到这里。',
     action: '查看进展',
   },
+  relay_waiting: {
+    eyebrow: '接力已准备',
+    title: '等待新会话继续',
+    detail: '接力记录已经保存；原工作会话和写入权限仍保持 active，不会重新发起 init。',
+    action: '等待新会话继续',
+  },
   agent_waiting: {
     eyebrow: '已经接上上下文',
     title: 'AI 已读取上次交接，等待你的安排',
@@ -409,11 +415,13 @@ function PriorityCard({ project, onAssign }) {
       <button
         className="primary-button"
         onClick={() => onAssign(project)}
-        disabled={['active_work', 'agent_waiting'].includes(project.statusReason)}
+        disabled={['active_work', 'relay_waiting', 'agent_waiting'].includes(project.statusReason)}
       >
         {project.statusReason === 'active_work'
           ? 'AI 正在工作'
-          : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
+          : (project.statusReason === 'relay_waiting'
+            ? '等待新会话继续'
+            : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI'))}
       </button>
     </section>
   );
@@ -439,11 +447,13 @@ function ProjectCard({ project, onAssign }) {
       <div className="card-actions">
         <button
           onClick={() => onAssign(project)}
-          disabled={['active_work', 'agent_waiting'].includes(project.statusReason)}
+          disabled={['active_work', 'relay_waiting', 'agent_waiting'].includes(project.statusReason)}
         >
           {project.statusReason === 'active_work'
             ? 'AI 正在工作'
-            : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
+            : (project.statusReason === 'relay_waiting'
+              ? '等待新会话继续'
+              : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI'))}
         </button>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>

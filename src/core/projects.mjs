@@ -312,12 +312,25 @@ export function readDashboard(db) {
     ORDER BY created_at DESC, sequence DESC, id DESC
     LIMIT 1
   `);
+  const activeRelayQuery = db.prepare(`
+    SELECT id, session_id, revision, next_session_focus,
+           summary, expires_at, created_at
+    FROM relays
+    WHERE session_id = ? AND state = 'active' AND expires_at > ?
+    ORDER BY created_at DESC, sequence DESC, id DESC
+    LIMIT 1
+  `);
+  const nowAt = Date.now();
   return rows.map((row) => {
     const assignment = activeAssignmentQuery.get(row.id) ?? null;
     const lastProgress = assignment ? lastProgressQuery.get(assignment.id) ?? null : null;
     const latestHandoff = latestHandoffQuery.get(row.id) ?? null;
+    const activeRelay = assignment?.session_id
+      ? activeRelayQuery.get(assignment.session_id, nowAt) ?? null
+      : null;
     const isWaiting = assignment?.status === 'accepted' && !row.active_run_id;
     const isWorking = Boolean(row.active_run_id || assignment?.status === 'active');
+    const isRelayWaiting = Boolean(isWorking && activeRelay);
     const lastWork = row.last_run_id ? {
       runId: row.last_run_id,
       agentClaim: row.last_agent_claim,
@@ -337,7 +350,9 @@ export function readDashboard(db) {
           ? 'paused'
           : (row.coherence !== 'coherent' || row.has_changes ? 'attention' : 'ready')),
       statusReason: isWorking
-        ? (row.run_health === 'recovery_uncertain' ? 'run_may_be_interrupted' : 'active_work')
+        ? (isRelayWaiting
+          ? 'relay_waiting'
+          : (row.run_health === 'recovery_uncertain' ? 'run_may_be_interrupted' : 'active_work'))
         : (isWaiting
           ? 'agent_waiting'
           : (assignment?.status === 'pending'
@@ -402,6 +417,15 @@ export function readDashboard(db) {
         revision: row.run_revision,
         leaseGeneration: row.lease_generation,
         startedAt: row.run_started_at,
+      } : null,
+      activeRelay: activeRelay ? {
+        relayId: activeRelay.id,
+        sessionId: activeRelay.session_id,
+        revision: activeRelay.revision,
+        nextSessionFocus: activeRelay.next_session_focus,
+        summary: activeRelay.summary,
+        expiresAt: activeRelay.expires_at,
+        createdAt: activeRelay.created_at,
       } : null,
       lastHandoff: lastWork,
       lastWork,

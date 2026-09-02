@@ -32,7 +32,7 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 }
 ```
 
-`status` 只能使用非终态的 `working` 或 `in_progress`；结束会话使用 `ugk_work_handoff`，不要用 progress 伪造终态。
+`status` 只能使用非终态的 `working` 或 `in_progress`，不要用 progress 伪造终态。只有用户明确要求结束当前 Cockpit 阶段时，才改用 `$cockpit-handoff`（`ugk_work_handoff`）；功能完成、commit、测试通过或上下文堆积都不能由 AI 自行推断为结束。只有用户明确要求换聊天继续时，才改用 `$cockpit-relay`，不要因上下文长度自动接力。
 
 成功后只把 MCP 返回的 `revision` 作为下一次 `expectedRevision`，不自行递增或猜测。没有 active session、没有可信的 session/revision，或请求失败时不要调用或声称已记录；显式场景下向用户说明需要先接入/恢复会话。
 

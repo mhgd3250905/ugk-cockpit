@@ -55,7 +55,9 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(assignment.task, explicitTarget);
   assert.match(assignment.message, /\$cockpit-init/);
   assert.match(assignment.message, /\$cockpit-progress/);
+  assert.match(assignment.message, /\$cockpit-relay/);
   assert.match(assignment.message, /\$cockpit-handoff/);
+  assert.match(assignment.message, /只有用户明确要求结束/);
   assert.equal(assignment.message.includes('ugk_work_begin'), false);
   assert.equal(assignment.message.includes(`当前目标：${explicitTarget}`), true);
   assert.equal(assignment.message.includes(root), false);

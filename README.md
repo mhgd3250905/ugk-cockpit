@@ -4,13 +4,13 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.12` — Skill-first 接入：空项目、新任务和已有开发统一通过 `$cockpit-init` 建立工作会话；`$cockpit-progress` 记录有效检查点，`$cockpit-handoff` 生成经 Cockpit 验证的标准交接。三个 Skill 可安装到 Agent，网页不再要求用户选择 accept/begin 流程。
+`0.1.0-alpha.13` — 加入非终态会话接力：用户显式调用 `$cockpit-relay` 后，旧聊天生成一次性 `continueCode`，新聊天恢复同一 active session、revision 链和写入权限，不重新 init，也不结束项目阶段。四个 Skill 可安装到 Agent；只有 `$cockpit-progress` 可以在有效检查点后隐式调用。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
 项目卡片现在统一通过 init 指令“交给 AI”：空项目、刚派发的新任务和已经开发到一半的项目使用同一入口。Agent 调用 `$cockpit-init` 后，Skill 通过 MCP 建立 active session；Cockpit 将调用时的代码状态作为接入基线，保留全部已有改动，并在存在标准交接手册时一并返回最近上下文。接入前的改动不会被自动归属给 Agent。
 
-工作中的 AI 可通过 `$cockpit-progress` 主动记录进展；成功 commit、改变 `HEAD` 的 merge/rebase/cherry-pick、发布 tag 等有效 Git 检查点也会尽量自动记录，`status`、`diff`、`log`、`add` 和失败命令不会制造噪声。阶段结束时使用 `$cockpit-handoff` 生成下一次可直接读取的标准交接手册。Cockpit 生成的短期接入消息不含本地路径和 API token。
+工作中的 AI 可通过 `$cockpit-progress` 主动记录进展；成功 commit、改变 `HEAD` 的 merge/rebase/cherry-pick、发布 tag 等有效 Git 检查点也会尽量自动记录，`status`、`diff`、`log`、`add` 和失败命令不会制造噪声。需要换聊天但继续同一阶段时，用户显式调用 `$cockpit-relay`；只有用户显式要求结束阶段时，才调用 `$cockpit-handoff` 生成标准交接手册。功能完成、测试通过、Git commit 或上下文堆积都不会自动结束阶段。Cockpit 生成的短期接入与接力消息不含本地路径和 API token。
 
 Phase 0 已验证的基础能力继续保留：
 
@@ -46,7 +46,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit
 
 ## 配套 Skills
 
-仓库内置三个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-handoff`。它们把 session、revision、幂等请求号和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。
+仓库内置四个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`init`、`relay`、`handoff` 都必须由用户显式调用；`progress` 是唯一允许在有效检查点后自动触发的动作。
 
 安装到当前用户的 Codex：
 

@@ -11,7 +11,8 @@
 - `0.1.0-alpha.3`：以“文件资源管理器当前唯一打开的文件夹”为可靠主路径；原生选择器失联时 30 秒内安全返回，不再无限卡住。
 - `0.1.0-alpha.4`：恢复真正的逐项目手动选择；选择器使用置顶的独立交互 helper，不扫描工作区、不自动导入项目。
 - `0.1.0-alpha.12`：提供 `$cockpit-init`、`$cockpit-progress`、`$cockpit-handoff` 三个配套 Skill，网页新入口统一生成 initCode。
-- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回，不再要求普通用户理解 accept/begin 两段流程。
+- `0.1.0-alpha.13`：新增 `$cockpit-relay`、`ugk_work_relay` 与 `ugk_work_resume`，让用户显式把上下文接到新聊天，同时保持原 active session、revision 链和写入权限。
+- 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；relay 与 handoff 分别只在用户显式要求换聊天或结束阶段时调用。
 
 ## 产品方向：晨间工作简报
 
@@ -64,11 +65,11 @@
 - 上次未正常结束：显示“可能已中断”，提供继续或整理记录；
 - 代码位置身份变化：停止，要求用户重新选择，绝不自动重绑。
 
-消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后直接显示“正在工作”；最近交接存在时在 init 结果中返回。工作中通过 `$cockpit-progress` 报告里程碑，阶段结束通过 `$cockpit-handoff` 收束。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
+消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后直接显示“正在工作”；最近交接存在时在 init 结果中返回。工作中通过 `$cockpit-progress` 报告里程碑。上下文堆积时，用户可显式调用 `$cockpit-relay`：旧聊天调用 `ugk_work_relay` 生成一次性接力消息，新聊天调用 `ugk_work_resume` 继续同一工作会话。只有用户显式要求结束阶段时，才通过 `$cockpit-handoff` 收束。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
 
 ### 5. 结束工作
 
-AI 通过 `ugk_work_handoff` 选择：`已完成`、`卡住了`、`稍后继续`，提交标准交接字段、建议技能和文件引用。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
+用户明确要求结束当前阶段后，AI 才通过 `ugk_work_handoff` 选择：`已完成`、`卡住了`、`稍后继续`，提交标准交接字段、建议技能和文件引用。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
 
 如果出现外部代码保存点、未归属改动、工作线变化或检查中状态变化，不能显示“已完成”，必须解释原因并给出安全动作。
 
@@ -90,7 +91,7 @@ AI 通过 `ugk_work_handoff` 选择：`已完成`、`卡住了`、`稍后继续`
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_handoff`；`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码或 session 解析项目和代码位置；
+- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_handoff`；`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

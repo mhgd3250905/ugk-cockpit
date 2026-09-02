@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 9;
+export const SUPPORTED_SCHEMA_VERSION = 10;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -301,6 +301,46 @@ BEFORE DELETE ON handoffs
 BEGIN
   SELECT RAISE(ABORT, 'handoffs are append-only');
 END;
+`,
+  },
+  {
+    version: 10,
+    name: 'conversation-relays',
+    sql: `
+CREATE TABLE relays (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL CHECK (sequence >= 1),
+  assignment_id TEXT NOT NULL REFERENCES assignments(id),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  session_id TEXT NOT NULL,
+  run_id TEXT REFERENCES runs(id),
+  client_request_id TEXT NOT NULL,
+  expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+  revision INTEGER NOT NULL CHECK (revision >= expected_revision),
+  next_session_focus TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  current_state TEXT NOT NULL,
+  completed_items TEXT NOT NULL,
+  pending_items TEXT NOT NULL,
+  decisions TEXT NOT NULL,
+  artifact_refs TEXT NOT NULL,
+  risks TEXT NOT NULL,
+  suggested_skills TEXT NOT NULL,
+  code_hash TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL CHECK (state IN ('active', 'accepted', 'expired')),
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  accepted_at TEXT,
+  accepted_client_request_id TEXT,
+  accepted_revision INTEGER,
+  UNIQUE(session_id, client_request_id),
+  UNIQUE(session_id, sequence)
+) STRICT;
+CREATE INDEX idx_relays_session_state ON relays(session_id, state, created_at DESC);
+CREATE INDEX idx_relays_project_state ON relays(project_id, state, created_at DESC);
+CREATE INDEX idx_relays_expiry ON relays(state, expires_at);
+CREATE INDEX idx_relays_assignment_created ON relays(assignment_id, created_at DESC, id DESC);
 `,
   },
 ];

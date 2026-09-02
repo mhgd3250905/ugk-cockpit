@@ -1,0 +1,11 @@
+interface:
+  display_name: "Cockpit 接力"
+  short_description: "在活动会话中准备非终态接力，或在新会话中凭 continueCode 恢复工作"
+  default_prompt: "使用 $cockpit-relay 准备会话接力或恢复已有接力。"
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ugk-cockpit"
+      description: "UGK Cockpit 本地 MCP"
+policy:
+  allow_implicit_invocation: false
