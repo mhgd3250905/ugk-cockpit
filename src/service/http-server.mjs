@@ -263,11 +263,14 @@ function id(prefix, value) {
 
 function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
   if (mode === 'init') {
+    const target = typeof task === 'string' && task.trim() ? task.trim() : null;
     return [
-      '请使用 UGK Cockpit MCP 把当前正在进行的开发接入工作台。',
-      `调用 ugk_work_init(initCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号, currentTask: 你正在完成的目标, currentState: 当前进展摘要)。`,
-      '成功返回 sessionId 和 revision 后继续开发；不要清理、覆盖或重置已有改动。',
-      '后续用 ugk_work_progress 报告进展，结束时用 ugk_work_handoff 生成标准交接手册。',
+      '请使用 `$cockpit-init` 把当前项目接入 UGK Cockpit，并在成功后直接开始工作。',
+      `一次性 initCode: "${dispatchCode}"。`,
+      target ? `当前目标：${target}` : '当前没有额外目标，请按当前对话继续工作。',
+      '成功后直接进入 working；不要清理、覆盖或重置已有改动。',
+      '后续用 `$cockpit-progress` 记录有效检查点，阶段结束时用 `$cockpit-handoff` 生成标准交接手册。',
+      '如果 Agent 不支持这个 Skill，可改用 UGK Cockpit MCP 完成同一 init；不要传路径或本地 token。',
       '如果工具报告项目不匹配或已有写入会话，请停止并告诉用户，不要强行接管。',
     ].join('\n');
   }
@@ -866,7 +869,9 @@ export async function createCockpitHttpServer({
           .digest('base64url');
         const task = body.mode === 'handoff'
           ? '读取最后一次交接并等待用户安排'
-          : (body.mode === 'init' ? '接入当前正在进行的开发' : body.task.trim());
+          : (body.mode === 'init'
+            ? (body.task?.trim() || '接入项目并继续当前对话中的工作')
+            : body.task.trim());
         const result = createAssignment(db, {
           commandId: id('assignment_create', `${projectId}:${body.clientRequestId}`),
           assignmentId,
@@ -964,13 +969,13 @@ export async function createCockpitHttpServer({
           assignmentId: assignment.id,
           agent: assignment.agent_id,
           mode: 'init',
-          task: '接入当前正在进行的开发',
+          task: assignment.task_id,
           expiresAt: grant.expiresAt,
           message: assignmentDispatchMessage({
             mode: 'init',
             dispatchCode,
             agent: assignment.agent_id,
-            task: '接入当前正在进行的开发',
+            task: assignment.task_id,
           }),
         });
         return;
@@ -1131,6 +1136,7 @@ export async function createCockpitHttpServer({
           sendError(response, accepted.code);
           return;
         }
+        const latestHandoff = readLatestHandoff(db, accepted.projectId);
         const started = startWriteRun(db, {
           commandId: id('mcp_init_run', `${accepted.grantId}:${body.clientRequestId}`),
           runId: accepted.sessionId,
@@ -1181,7 +1187,8 @@ export async function createCockpitHttpServer({
           leaseGeneration: started.leaseGeneration,
           baselineAt: started.startedAt,
           preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
-          message: '当前开发已接入 Cockpit；已有改动已作为接入基线保留。',
+          latestHandoff,
+          message: '当前项目已接入 Cockpit；已有改动已作为接入基线保留。',
         });
         return;
       }

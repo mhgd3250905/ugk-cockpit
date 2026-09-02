@@ -241,7 +241,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_init',
-    description: 'Adopt work already in progress into a Cockpit session without changing project files',
+    description: 'Initialize the current project as an active Cockpit session without changing project files',
     inputSchema: {
       type: 'object',
       properties: {
@@ -255,11 +255,11 @@ export const TOOLS = [
         },
         currentTask: {
           type: 'string',
-          description: 'Concise description of the work currently in progress'
+          description: 'Concise description of the current or intended work'
         },
         currentState: {
           type: 'string',
-          description: 'Concise current progress and relevant context'
+          description: 'Concise starting state, progress, and relevant context'
         }
       },
       required: ['initCode', 'clientRequestId', 'currentTask', 'currentState'],

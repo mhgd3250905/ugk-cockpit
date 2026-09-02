@@ -4,13 +4,13 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.11` — Agent-first 接入：隔离型 MCP 客户端可安全连接；进展保持非终态，交接手册、Run 与 AI 会话原子收束并支持幂等重试；已生成的 init 指令可重新打开、选择 Agent/阶段并复制。
+`0.1.0-alpha.12` — Skill-first 接入：空项目、新任务和已有开发统一通过 `$cockpit-init` 建立工作会话；`$cockpit-progress` 记录有效检查点，`$cockpit-handoff` 生成经 Cockpit 验证的标准交接。三个 Skill 可安装到 Agent，网页不再要求用户选择 accept/begin 流程。
 
 当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
-项目卡片现在可以“交给 AI”：默认让 AI 读取最后一次标准交接手册并等待用户安排，此时不取得写入权限；用户给出明确任务后，AI 才通过 MCP 开始可写工作。Cockpit 生成的短期接手消息不含本地路径和 API token；AI 可回传进度，并在结束时生成下一次可直接读取的标准交接手册。
+项目卡片现在统一通过 init 指令“交给 AI”：空项目、刚派发的新任务和已经开发到一半的项目使用同一入口。Agent 调用 `$cockpit-init` 后，Skill 通过 MCP 建立 active session；Cockpit 将调用时的代码状态作为接入基线，保留全部已有改动，并在存在标准交接手册时一并返回最近上下文。接入前的改动不会被自动归属给 Agent。
 
-如果 Agent 已经在项目里开发，项目卡片可生成一次性 init 指令。Agent 调用 `ugk_work_init` 后，Cockpit 将调用时的代码状态作为接入基线，保留全部已有改动并创建正式 session；接入前的改动不会被自动归属给 Agent。
+工作中的 AI 可通过 `$cockpit-progress` 主动记录进展；成功 commit、改变 `HEAD` 的 merge/rebase/cherry-pick、发布 tag 等有效 Git 检查点也会尽量自动记录，`status`、`diff`、`log`、`add` 和失败命令不会制造噪声。阶段结束时使用 `$cockpit-handoff` 生成下一次可直接读取的标准交接手册。Cockpit 生成的短期接入消息不含本地路径和 API token。
 
 Phase 0 已验证的基础能力继续保留：
 
@@ -43,6 +43,18 @@ npm run mcp
 ```
 
 Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit\src\mcp\main.mjs`。本仓库只提供配置片段，不会自动修改用户级 Agent 配置。
+
+## 配套 Skills
+
+仓库内置三个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-handoff`。它们把 session、revision、幂等请求号和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。
+
+安装到当前用户的 Codex：
+
+```powershell
+npm run install:skills:codex
+```
+
+安装器发现同名 Skill 时默认拒绝覆盖；确认这些目录可以更新后可执行 `npm run install:skills:codex -- --force`。其他兼容 `SKILL.md` 的 Agent 可运行 `node scripts/install-cockpit-skills.mjs --target <技能目录>` 指定自己的技能根目录；首版不会猜测或自动修改其他 Agent 的用户配置。
 
 ## 本地验证
 

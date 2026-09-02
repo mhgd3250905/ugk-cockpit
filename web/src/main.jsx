@@ -77,7 +77,6 @@ function App() {
   const [notice, setNotice] = useState(null);
   const [handoffProject, setHandoffProject] = useState(null);
   const [handoffAgent, setHandoffAgent] = useState('Codex');
-  const [handoffMode, setHandoffMode] = useState('handoff');
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
 
@@ -167,13 +166,14 @@ function App() {
     }
   }
 
-  function openHandoff(project, initialMode = 'handoff') {
+  function openHandoff(project) {
     setHandoffProject(project);
-    setHandoffAgent(initialMode === 'init' && project.pendingAssignment?.agent
+    setHandoffAgent(project.pendingAssignment?.mode === 'adopt' && project.pendingAssignment?.agent
       ? project.pendingAssignment.agent
       : 'Codex');
-    setHandoffMode(initialMode);
-    setHandoffGoal('');
+    setHandoffGoal(project.pendingAssignment?.mode === 'adopt'
+      ? (project.pendingAssignment.task ?? '')
+      : '');
     setDispatch(null);
     setNotice(null);
   }
@@ -203,7 +203,7 @@ function App() {
   }
 
   async function createHandoff() {
-    if (handoffMode === 'init' && handoffProject.pendingAssignment?.mode === 'adopt') {
+    if (handoffProject.pendingAssignment?.mode === 'adopt') {
       await reissueInit(handoffProject, handoffAgent);
       return;
     }
@@ -214,8 +214,8 @@ function App() {
         body: JSON.stringify({
           clientRequestId: crypto.randomUUID(),
           agent: handoffAgent,
-          mode: handoffMode,
-          task: handoffMode === 'task' ? handoffGoal.trim() : '',
+          mode: 'init',
+          task: handoffGoal.trim(),
         }),
       });
       setDispatch(result);
@@ -236,9 +236,7 @@ function App() {
     await navigator.clipboard.writeText(dispatch.message);
     setNotice({
       title: '接手消息已复制。',
-      detail: handoffMode === 'init'
-        ? `把它发送给正在开发这个项目的 ${handoffAgent}；成功 init 后页面会显示正在工作。`
-        : `把它发送给 ${handoffAgent}；成功接手前页面会保持“等待接手”。`,
+      detail: `把它发送给 ${handoffAgent}；成功接入后页面会显示正在工作。`,
       actionLabel: '知道了',
       retry: () => setNotice(null),
     });
@@ -343,32 +341,23 @@ function App() {
                     <option>Antigravity</option>
                   </select>
                 </label>
-                <label>先让 AI 做什么
-                  <select value={handoffMode} onChange={(event) => setHandoffMode(event.target.value)}>
-                    <option value="handoff">读取上次交接，等待我的安排</option>
-                    <option value="task">带着明确任务开始工作</option>
-                    <option value="init">接入当前正在进行的开发</option>
-                  </select>
+                <label>可选目标
+                  <textarea
+                    value={handoffGoal}
+                    onChange={(event) => setHandoffGoal(event.target.value)}
+                    rows="4"
+                    maxLength="1000"
+                    placeholder="可以留空；例如：完成登录页的接口联调"
+                  />
                 </label>
-                {handoffMode === 'task' && (
-                  <label>这次要完成什么
-                    <textarea
-                      value={handoffGoal}
-                      onChange={(event) => setHandoffGoal(event.target.value)}
-                      rows="4"
-                      maxLength="1000"
-                      placeholder="一句话说明目标，例如：接通交接读取与等待状态"
-                    />
-                  </label>
-                )}
               </>
             ) : (
               <>
                 <p className="safety-copy">
-                  {handoffMode === 'init' ? '接入指令已创建。' : '任务已创建。'}
+                  接入指令已创建。
                   复制下面的消息给 {handoffAgent}，MCP 成功后首页会自动更新。
                 </p>
-                <label>接手消息
+                <label>接入消息
                   <textarea className="dispatch-message" value={dispatch.message} readOnly rows="9" />
                 </label>
                 <small>接手码将在 {formatTime(dispatch.expiresAt)} 前有效；消息里不包含项目路径或本地 API token。</small>
@@ -381,9 +370,9 @@ function App() {
                 <button
                   className="primary-button"
                   onClick={createHandoff}
-                  disabled={busy || (handoffMode === 'task' && !handoffGoal.trim())}
+                  disabled={busy}
                 >
-                  {busy ? '正在创建…' : (handoffMode === 'init' ? '生成 init 指令' : '生成接手消息')}
+                  {busy ? '正在创建…' : '生成接入指令'}
                 </button>
               ) : (
                 <button className="primary-button" onClick={copyDispatchMessage}>复制接手消息</button>
@@ -455,17 +444,6 @@ function ProjectCard({ project, onAssign }) {
           {project.statusReason === 'active_work'
             ? 'AI 正在工作'
             : (project.statusReason === 'agent_waiting' ? '等待你的安排' : '交给 AI')}
-        </button>
-        <button
-          className="text-button"
-          onClick={() => onAssign(project, 'init')}
-          disabled={[
-            'active_work',
-            'agent_waiting',
-          ].includes(project.statusReason)
-            || (project.statusReason === 'assignment_waiting' && project.pendingAssignment?.mode !== 'adopt')}
-        >
-          接入正在工作的 AI
         </button>
         <details><summary>技术详情</summary><code>{project.path}</code></details>
       </div>

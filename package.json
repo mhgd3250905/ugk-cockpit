@@ -1,6 +1,6 @@
 {
   "name": "ugk-cockpit",
-  "version": "0.1.0-alpha.11",
+  "version": "0.1.0-alpha.12",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,7 @@
   "scripts": {
     "serve": "npm run build:web && node src/main.mjs",
     "mcp": "node src/mcp/main.mjs",
+    "install:skills:codex": "node scripts/install-cockpit-skills.mjs",
     "dev:web": "vite",
     "build:web": "vite build",
     "test": "node --test --test-concurrency=1",

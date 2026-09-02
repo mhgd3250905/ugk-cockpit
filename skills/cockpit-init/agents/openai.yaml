@@ -1,0 +1,11 @@
+interface:
+  display_name: "Cockpit 初始化"
+  short_description: "为当前项目接入 UGK Cockpit 会话并安全进入工作状态"
+  default_prompt: "使用 $cockpit-init 接入当前项目并开始工作。"
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ugk-cockpit"
+      description: "UGK Cockpit 本地 MCP"
+policy:
+  allow_implicit_invocation: true

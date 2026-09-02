@@ -1,0 +1,11 @@
+interface:
+  display_name: "Cockpit 进展"
+  short_description: "在活动会话中记录有效检查点并同步 UGK Cockpit 进度"
+  default_prompt: "使用 $cockpit-progress 记录刚完成的有效检查点。"
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ugk-cockpit"
+      description: "UGK Cockpit 本地 MCP"
+policy:
+  allow_implicit_invocation: true

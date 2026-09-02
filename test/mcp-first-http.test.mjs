@@ -42,15 +42,22 @@ test('existing Agent initializes the registered project, continues, and hands of
     rmSync(root, { recursive: true, force: true });
   });
   writeFileSync(path.join(root, 'WIP.md'), 'half-finished work\n');
+  const explicitTarget = '验证 MCP init 闭环';
   const assignmentResponse = await post(
     service,
     `/api/v1/projects/${project.projectId}/assignments`,
-    { clientRequestId: 'create-assignment-1', agent: 'Codex', mode: 'init', task: '' },
+    { clientRequestId: 'create-assignment-1', agent: 'Codex', mode: 'init', task: explicitTarget },
   );
   assert.equal(assignmentResponse.status, 201, await assignmentResponse.clone().text());
   const assignment = await assignmentResponse.json();
   const initCode = assignment.message.match(/initCode: "([^"]+)"/)?.[1];
   assert.ok(initCode);
+  assert.equal(assignment.task, explicitTarget);
+  assert.match(assignment.message, /\$cockpit-init/);
+  assert.match(assignment.message, /\$cockpit-progress/);
+  assert.match(assignment.message, /\$cockpit-handoff/);
+  assert.equal(assignment.message.includes('ugk_work_begin'), false);
+  assert.equal(assignment.message.includes(`当前目标：${explicitTarget}`), true);
   assert.equal(assignment.message.includes(root), false);
   assert.equal(assignment.message.includes(TOKEN), false);
   const reissueResponse = await post(
@@ -66,6 +73,9 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(reissued.agent, 'ZCode');
   assert.ok(reissuedInitCode);
   assert.notEqual(reissuedInitCode, initCode);
+  assert.equal(reissued.task, explicitTarget);
+  assert.equal(reissued.message.includes(`当前目标：${explicitTarget}`), true);
+  assert.equal(reissued.message.includes('ugk_work_begin'), false);
   const pendingDashboard = await (await fetch(
     `http://${service.host}:${service.port}/api/v1/dashboard`,
     { headers: { authorization: `Bearer ${TOKEN}` } },
@@ -74,11 +84,12 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(pendingDashboard.projects[0].activeRun, null);
   assert.equal(pendingDashboard.projects[0].pendingAssignment.mode, 'adopt');
   assert.equal(pendingDashboard.projects[0].pendingAssignment.agent, 'ZCode');
+  assert.equal(pendingDashboard.projects[0].pendingAssignment.task, explicitTarget);
 
   const initResponse = await post(service, '/api/v1/mcp/work/init', {
     initCode: reissuedInitCode,
     clientRequestId: 'init-1',
-    currentTask: '验证 MCP init 闭环',
+    currentTask: explicitTarget,
     currentState: '核心功能完成一半，继续开发',
     mcpWorkingDirectory: root,
   });
@@ -87,6 +98,8 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(initialized.status, 'active');
   assert.equal(initialized.revision, 2);
   assert.equal(initialized.preexistingChangesPreserved, true);
+  assert.equal(Object.hasOwn(initialized, 'latestHandoff'), true);
+  assert.equal(initialized.latestHandoff, null);
 
   const progressResponse = await post(service, '/api/v1/mcp/work/progress', {
     sessionId: initialized.sessionId,
