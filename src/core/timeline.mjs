@@ -1,0 +1,495 @@
+function parseJson(encoded, fallback) {
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Read the reverse-chronological timeline of work events for a project.
+ * Fixed node semantics:
+ * - 'init': Project adoption & baseline
+ * - 'progress': Meaningful checkpoints/progress notes
+ * - 'relay': Mid-session conversational relays
+ * - 'handoff': Stage completion handoffs
+ */
+export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = {}) {
+  const handoffRows = db.prepare(`
+    SELECT h.id, h.sequence, h.assignment_id, h.project_id, h.worktree_id,
+           h.session_id, h.run_id, h.client_request_id, h.expected_revision, h.revision,
+           h.next_session_focus, h.summary, h.current_state, h.completed_items,
+           h.pending_items, h.decisions, h.artifact_refs, h.risks, h.suggested_skills,
+           h.body_markdown, h.created_at,
+           a.agent_id, a.task_id,
+           s.head AS snapshot_head, s.branch AS snapshot_branch
+    FROM handoffs h
+    LEFT JOIN assignments a ON a.id = h.assignment_id
+    LEFT JOIN snapshots s ON (s.run_id = h.session_id OR s.run_id = h.run_id) AND s.phase = 'final'
+    WHERE h.project_id = ?
+  `).all(projectId);
+
+  const handoffSessionIds = new Set(handoffRows.map((r) => r.session_id).filter(Boolean));
+  const handoffRunIds = new Set(handoffRows.map((r) => r.run_id).filter(Boolean));
+
+  const receiptRows = db.prepare(`
+    SELECT hr.id AS receipt_id, hr.run_id, hr.outcome, hr.summary, hr.next_step,
+           hr.payload_json, hr.created_at,
+           r.agent_claim, r.goal, r.revision, r.created_at AS run_created_at, r.finished_at,
+           s.head AS snapshot_head, s.branch AS snapshot_branch
+    FROM handoff_receipts hr
+    JOIN runs r ON r.id = hr.run_id
+    JOIN projects p ON p.worktree_id = r.worktree_id
+    LEFT JOIN snapshots s ON s.run_id = r.id AND s.phase = 'final'
+    WHERE p.id = ?
+  `).all(projectId).filter((r) => !handoffSessionIds.has(r.run_id) && !handoffRunIds.has(r.run_id));
+
+  const relayRows = db.prepare(`
+    SELECT rel.id, rel.sequence, rel.assignment_id, rel.project_id, rel.worktree_id,
+           rel.session_id, rel.run_id, rel.client_request_id, rel.expected_revision,
+           rel.revision, rel.next_session_focus, rel.summary, rel.current_state,
+           rel.completed_items, rel.pending_items, rel.decisions, rel.artifact_refs,
+           rel.risks, rel.suggested_skills, rel.state, rel.created_at,
+           a.agent_id, a.task_id,
+           r.agent_claim
+    FROM relays rel
+    LEFT JOIN assignments a ON a.id = rel.assignment_id
+    LEFT JOIN runs r ON r.id = rel.session_id OR r.id = rel.run_id
+    WHERE rel.project_id = ?
+  `).all(projectId);
+
+  const progressRows = db.prepare(`
+    SELECT pe.id, pe.assignment_id, pe.session_id, pe.client_request_id,
+           pe.expected_revision, pe.revision, pe.status, pe.note, pe.created_at,
+           a.agent_id, a.task_id,
+           r.agent_claim
+    FROM progress_events pe
+    JOIN assignments a ON a.id = pe.assignment_id
+    LEFT JOIN runs r ON r.id = pe.session_id
+    WHERE a.project_id = ?
+      AND pe.status NOT IN ('adopted', 'completed', 'blocked', 'abandoned', 'failed', 'cancelled')
+  `).all(projectId);
+
+  const assignmentRows = db.prepare(`
+    SELECT a.id AS assignment_id, a.agent_id, a.task_id, a.scope_json, a.status AS assignment_status,
+           a.session_id, a.revision AS assignment_revision, a.accepted_at, a.created_at,
+           pe.note AS adopted_note, pe.created_at AS adopted_at,
+           s.head AS baseline_head, s.branch AS baseline_branch,
+           r.agent_claim, r.goal, r.created_at AS run_created_at
+    FROM assignments a
+    LEFT JOIN progress_events pe ON pe.assignment_id = a.id AND pe.status = 'adopted'
+    LEFT JOIN snapshots s ON (s.run_id = a.session_id OR s.run_id = a.id) AND s.phase = 'baseline'
+    LEFT JOIN runs r ON r.id = a.session_id
+    WHERE a.project_id = ? AND (a.status != 'pending' OR a.session_id IS NOT NULL OR pe.id IS NOT NULL)
+  `).all(projectId);
+
+  const initSessionIds = new Set(assignmentRows.map((r) => r.session_id).filter(Boolean));
+
+  const standaloneRuns = db.prepare(`
+    SELECT r.id AS run_id, r.agent_claim, r.goal, r.created_at, r.revision,
+           s.head AS baseline_head, s.branch AS baseline_branch
+    FROM runs r
+    JOIN projects p ON p.worktree_id = r.worktree_id
+    LEFT JOIN snapshots s ON s.run_id = r.id AND s.phase = 'baseline'
+    WHERE p.id = ?
+  `).all(projectId).filter((r) => !initSessionIds.has(r.run_id));
+
+  const handoffItems = handoffRows.map((row) => ({
+    id: row.id,
+    kind: 'handoff',
+    typeLabel: '阶段交接',
+    timestamp: row.created_at,
+    agent: row.agent_id || null,
+    revision: row.revision ?? 1,
+    sequence: row.sequence ?? 1,
+    git: (row.snapshot_branch || row.snapshot_head) ? {
+      branch: row.snapshot_branch ?? null,
+      head: row.snapshot_head ?? null,
+      shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
+    } : null,
+    summary: row.summary,
+    note: null,
+    nextSessionFocus: row.next_session_focus || null,
+    currentState: row.current_state || null,
+    completedItems: parseJson(row.completed_items, []),
+    pendingItems: parseJson(row.pending_items, []),
+    decisions: parseJson(row.decisions, []),
+    artifactRefs: parseJson(row.artifact_refs, []),
+    risks: parseJson(row.risks, []),
+    suggestedSkills: parseJson(row.suggested_skills, []),
+    bodyMarkdown: row.body_markdown || null,
+  }));
+
+  const receiptItems = receiptRows.map((row) => ({
+    id: `receipt_${row.receipt_id}`,
+    kind: 'handoff',
+    typeLabel: '阶段交接',
+    timestamp: row.created_at || row.finished_at || row.run_created_at,
+    agent: row.agent_claim || null,
+    revision: row.revision ?? 1,
+    sequence: 1,
+    git: (row.snapshot_branch || row.snapshot_head) ? {
+      branch: row.snapshot_branch ?? null,
+      head: row.snapshot_head ?? null,
+      shortHead: row.snapshot_head ? row.snapshot_head.slice(0, 7) : null,
+    } : null,
+    summary: row.summary,
+    note: null,
+    nextSessionFocus: row.next_step || null,
+    currentState: null,
+    completedItems: [],
+    pendingItems: [],
+    decisions: [],
+    artifactRefs: [],
+    risks: [],
+    suggestedSkills: [],
+    bodyMarkdown: null,
+  }));
+
+  const relayItems = relayRows.map((row) => ({
+    id: row.id,
+    kind: 'relay',
+    typeLabel: '聊天接力',
+    timestamp: row.created_at,
+    agent: row.agent_id || row.agent_claim || null,
+    revision: row.revision ?? 1,
+    sequence: row.sequence ?? 1,
+    git: null,
+    summary: row.summary,
+    note: null,
+    nextSessionFocus: row.next_session_focus || null,
+    currentState: row.current_state || null,
+    completedItems: parseJson(row.completed_items, []),
+    pendingItems: parseJson(row.pending_items, []),
+    decisions: parseJson(row.decisions, []),
+    artifactRefs: parseJson(row.artifact_refs, []),
+    risks: parseJson(row.risks, []),
+    suggestedSkills: parseJson(row.suggested_skills, []),
+    bodyMarkdown: null,
+  }));
+
+  const progressItems = progressRows.map((row) => ({
+    id: row.id,
+    kind: 'progress',
+    typeLabel: '工作进展',
+    timestamp: row.created_at,
+    agent: row.agent_id || row.agent_claim || null,
+    revision: row.revision ?? 1,
+    sequence: row.revision ?? 1,
+    git: null,
+    summary: row.note,
+    note: row.note,
+    nextSessionFocus: null,
+    currentState: null,
+    completedItems: [],
+    pendingItems: [],
+    decisions: [],
+    artifactRefs: [],
+    risks: [],
+    suggestedSkills: [],
+    bodyMarkdown: null,
+  }));
+
+  const initItems = [
+    ...assignmentRows.map((row) => ({
+      id: `init_${row.assignment_id}`,
+      kind: 'init',
+      typeLabel: '接入项目',
+      timestamp: row.adopted_at || row.accepted_at || row.run_created_at || row.created_at,
+      agent: row.agent_id || row.agent_claim || null,
+      revision: 1,
+      sequence: 1,
+      git: (row.baseline_branch || row.baseline_head) ? {
+        branch: row.baseline_branch ?? null,
+        head: row.baseline_head ?? null,
+        shortHead: row.baseline_head ? row.baseline_head.slice(0, 7) : null,
+      } : null,
+      summary: row.adopted_note || row.task_id || row.goal || '接入项目与基线',
+      note: row.adopted_note || null,
+      nextSessionFocus: null,
+      currentState: row.adopted_note || null,
+      completedItems: [],
+      pendingItems: [],
+      decisions: [],
+      artifactRefs: [],
+      risks: [],
+      suggestedSkills: [],
+      bodyMarkdown: null,
+    })),
+    ...standaloneRuns.map((row) => ({
+      id: `init_run_${row.run_id}`,
+      kind: 'init',
+      typeLabel: '接入项目',
+      timestamp: row.created_at,
+      agent: row.agent_claim || null,
+      revision: 1,
+      sequence: 1,
+      git: (row.baseline_branch || row.baseline_head) ? {
+        branch: row.baseline_branch ?? null,
+        head: row.baseline_head ?? null,
+        shortHead: row.baseline_head ? row.baseline_head.slice(0, 7) : null,
+      } : null,
+      summary: row.goal || '接入项目与基线',
+      note: null,
+      nextSessionFocus: null,
+      currentState: null,
+      completedItems: [],
+      pendingItems: [],
+      decisions: [],
+      artifactRefs: [],
+      risks: [],
+      suggestedSkills: [],
+      bodyMarkdown: null,
+    })),
+  ];
+
+  const allItems = [
+    ...initItems,
+    ...progressItems,
+    ...relayItems,
+    ...handoffItems,
+    ...receiptItems,
+  ];
+
+  // Track branch switches chronologically
+  allItems.sort((a, b) => {
+    const timeA = new Date(a.timestamp).getTime();
+    const timeB = new Date(b.timestamp).getTime();
+    if (timeA !== timeB) return timeA - timeB;
+    const revA = Number(a.revision ?? 0);
+    const revB = Number(b.revision ?? 0);
+    if (revA !== revB) return revA - revB;
+    const seqA = Number(a.sequence ?? 0);
+    const seqB = Number(b.sequence ?? 0);
+    if (seqA !== seqB) return seqA - seqB;
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  let previousBranch = null;
+  for (const item of allItems) {
+    if (item.git?.branch) {
+      if (previousBranch && previousBranch !== item.git.branch) {
+        item.git.branchChanged = true;
+        item.git.previousBranch = previousBranch;
+      } else {
+        item.git.branchChanged = false;
+      }
+      previousBranch = item.git.branch;
+    }
+  }
+
+  // Reverse chronological sort (newest first)
+  allItems.sort((a, b) => {
+    const timeA = new Date(a.timestamp).getTime();
+    const timeB = new Date(b.timestamp).getTime();
+    if (timeB !== timeA) return timeB - timeA;
+    const revA = Number(a.revision ?? 0);
+    const revB = Number(b.revision ?? 0);
+    if (revB !== revA) return revB - revA;
+    const seqA = Number(a.sequence ?? 0);
+    const seqB = Number(b.sequence ?? 0);
+    if (seqB !== seqA) return seqB - seqA;
+    return String(b.id).localeCompare(String(a.id));
+  });
+
+  const total = allItems.length;
+  const paged = allItems.slice(offset, offset + limit);
+  const hasMore = offset + paged.length < total;
+
+  return {
+    total,
+    offset,
+    limit,
+    hasMore,
+    items: paged,
+  };
+}
+
+/**
+ * Read the full detail of a project for the dialog view, including header metadata and timeline.
+ */
+export function readProjectDetail(db, projectId, options = {}) {
+  const row = db.prepare(`
+    SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
+           projects.last_observed_at, projects.status, projects.status_reason,
+           projects.created_at, projects.updated_at,
+           worktrees.canonical_path, worktrees.repository_identity, worktrees.identity_fingerprint,
+           observations.head AS obs_head, observations.branch AS obs_branch,
+           observations.has_changes AS obs_has_changes, observations.coherence AS obs_coherence,
+           runs.id AS active_run_id, runs.agent_claim, runs.goal,
+           runs.health AS run_health, runs.last_heartbeat_at,
+           runs.revision AS run_revision, runs.lease_generation,
+           runs.created_at AS run_started_at,
+           last_runs.id AS last_run_id,
+           last_runs.agent_claim AS last_agent_claim,
+           last_runs.goal AS last_goal,
+           last_runs.lifecycle AS last_outcome,
+           last_runs.finished_at,
+           receipts.summary AS last_summary,
+           receipts.next_step AS last_next_step
+    FROM projects
+    JOIN worktrees ON worktrees.id = projects.worktree_id
+    LEFT JOIN project_observations AS observations
+      ON observations.id = (
+        SELECT id FROM project_observations
+        WHERE project_id = projects.id
+        ORDER BY observed_at DESC, id DESC LIMIT 1
+      )
+    LEFT JOIN runs ON runs.worktree_id = worktrees.id AND runs.lifecycle = 'active'
+    LEFT JOIN runs AS last_runs ON last_runs.id = (
+      SELECT id FROM runs AS history
+      WHERE history.worktree_id = worktrees.id
+        AND history.lifecycle IN ('completed', 'blocked', 'abandoned')
+      ORDER BY history.finished_at DESC, history.id DESC LIMIT 1
+    )
+    LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
+    WHERE projects.id = ?
+  `).get(projectId);
+
+  if (!row) return null;
+
+  const activeAssignment = db.prepare(`
+    SELECT * FROM assignments
+    WHERE project_id = ? AND status IN ('pending', 'accepted', 'active')
+    ORDER BY updated_at DESC, id DESC LIMIT 1
+  `).get(projectId) ?? null;
+
+  const lastProgress = activeAssignment ? db.prepare(`
+    SELECT status, note, revision, created_at FROM progress_events
+    WHERE assignment_id = ? ORDER BY revision DESC, id DESC LIMIT 1
+  `).get(activeAssignment.id) ?? null : null;
+
+  const latestHandoff = db.prepare(`
+    SELECT id, summary, next_session_focus, body_markdown, created_at
+    FROM handoffs
+    WHERE project_id = ?
+    ORDER BY created_at DESC, sequence DESC, id DESC
+    LIMIT 1
+  `).get(projectId) ?? null;
+
+  const nowAt = Date.now();
+  const activeRelay = activeAssignment?.session_id ? db.prepare(`
+    SELECT id, session_id, revision, next_session_focus,
+           summary, expires_at, created_at
+    FROM relays
+    WHERE session_id = ? AND state = 'active' AND expires_at > ?
+    ORDER BY created_at DESC, sequence DESC, id DESC
+    LIMIT 1
+  `).get(activeAssignment.session_id, nowAt) ?? null : null;
+
+  const isWaiting = activeAssignment?.status === 'accepted' && !row.active_run_id;
+  const isWorking = Boolean(row.active_run_id || activeAssignment?.status === 'active');
+  const isRelayWaiting = Boolean(isWorking && activeRelay);
+
+  const lastWork = row.last_run_id ? {
+    runId: row.last_run_id,
+    agentClaim: row.last_agent_claim,
+    goal: row.last_goal,
+    outcome: row.last_outcome,
+    summary: row.last_summary,
+    nextStep: row.last_next_step,
+    finishedAt: row.finished_at,
+  } : null;
+
+  const project = {
+    id: row.id,
+    name: row.name,
+    stage: row.stage,
+    status: isWorking
+      ? 'active'
+      : (row.stage === 'paused'
+        ? 'paused'
+        : (row.obs_coherence !== 'coherent' || row.obs_has_changes ? 'attention' : 'ready')),
+    statusReason: isWorking
+      ? (isRelayWaiting ? 'relay_waiting' : 'active_work')
+      : (isWaiting
+        ? 'agent_waiting'
+        : (activeAssignment?.status === 'pending'
+          ? 'assignment_waiting'
+          : (row.obs_coherence !== 'coherent'
+            ? 'status_check_incomplete'
+            : (row.obs_has_changes ? 'preexisting_changes' : 'ready_to_start')))),
+    lastObservedAt: row.last_observed_at,
+    path: row.canonical_path,
+    authorizedRoot: row.authorized_root,
+    git: {
+      head: row.obs_head ?? null,
+      shortHead: row.obs_head ? row.obs_head.slice(0, 7) : null,
+      branch: row.obs_branch ?? null,
+      hasChanges: Boolean(row.obs_has_changes),
+      coherence: row.obs_coherence ?? 'unknown',
+    },
+    currentAgent: activeAssignment?.agent_id || row.agent_claim || row.last_agent_claim || null,
+    currentGoal: activeAssignment?.task_id || row.goal || row.last_goal || null,
+    lastHandoffManual: latestHandoff ? {
+      id: latestHandoff.id,
+      summary: latestHandoff.summary,
+      nextSessionFocus: latestHandoff.next_session_focus,
+      markdown: latestHandoff.body_markdown,
+      createdAt: latestHandoff.created_at,
+    } : null,
+    pendingAssignment: activeAssignment?.status === 'pending' ? {
+      id: activeAssignment.id,
+      agent: activeAssignment.agent_id,
+      task: activeAssignment.task_id,
+      mode: (() => {
+        try {
+          return JSON.parse(activeAssignment.scope_json).mode ?? null;
+        } catch {
+          return null;
+        }
+      })(),
+      expiresAt: db.prepare(`
+        SELECT expires_at FROM dispatch_grants
+        WHERE assignment_id = ? AND state = 'active'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(activeAssignment.id)?.expires_at ?? null,
+    } : null,
+    waitingAgent: isWaiting ? {
+      assignmentId: activeAssignment.id,
+      sessionId: activeAssignment.session_id,
+      agent: activeAssignment.agent_id,
+      task: activeAssignment.task_id,
+      revision: activeAssignment.revision,
+      acceptedAt: activeAssignment.accepted_at,
+    } : null,
+    activeWork: isWorking && activeAssignment ? {
+      assignmentId: activeAssignment.id,
+      sessionId: activeAssignment.session_id,
+      agent: activeAssignment.agent_id,
+      task: activeAssignment.task_id,
+      revision: activeAssignment.revision,
+      lastActivityAt: activeAssignment.last_heartbeat_at ?? activeAssignment.accepted_at,
+      lastProgress: lastProgress ? {
+        status: lastProgress.status,
+        note: lastProgress.note,
+        revision: lastProgress.revision,
+        createdAt: lastProgress.created_at,
+      } : null,
+    } : null,
+    activeRun: row.active_run_id ? {
+      id: row.active_run_id,
+      agentClaim: row.agent_claim,
+      goal: row.goal,
+      health: row.run_health,
+      lastActivityAt: row.last_heartbeat_at,
+      revision: row.run_revision,
+      leaseGeneration: row.lease_generation,
+      startedAt: row.run_started_at,
+    } : null,
+    activeRelay: activeRelay ? {
+      relayId: activeRelay.id,
+      sessionId: activeRelay.session_id,
+      revision: activeRelay.revision,
+      nextSessionFocus: activeRelay.next_session_focus,
+      summary: activeRelay.summary,
+      expiresAt: activeRelay.expires_at,
+      createdAt: activeRelay.created_at,
+    } : null,
+    lastHandoff: lastWork,
+    lastWork,
+  };
+
+  const timeline = readProjectTimeline(db, projectId, options);
+  return { project, timeline };
+}

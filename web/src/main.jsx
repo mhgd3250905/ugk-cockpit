@@ -60,6 +60,13 @@ const STAGES = {
   paused: '暂时放下',
 };
 
+const TIMELINE_KINDS = {
+  init: { code: 'INIT', label: '接入项目' },
+  progress: { code: 'PROGRESS', label: '工作进展' },
+  relay: { code: 'RELAY', label: '聊天接力' },
+  handoff: { code: 'HANDOFF', label: '阶段交接' },
+};
+
 const api = createApiClient({
   fetchImpl: (...args) => fetch(...args),
   storage: localStorage,
@@ -235,6 +242,8 @@ function App() {
   const [handoffAgent, setHandoffAgent] = useState('Codex');
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
+  const [projectDetail, setProjectDetail] = useState(null);
+  const detailRequestRef = useRef(0);
 
   async function refresh({ successNotice = null } = {}) {
     try {
@@ -439,6 +448,72 @@ function App() {
     openHandoff(project);
   }
 
+  async function openProjectDetail(project) {
+    const requestId = ++detailRequestRef.current;
+    setProjectDetail({ seed: project, data: null, loading: true, loadingMore: false, error: null });
+    try {
+      const data = await api(`/api/v1/projects/${encodeURIComponent(project.id)}?limit=30&offset=0`);
+      if (detailRequestRef.current !== requestId) return;
+      setProjectDetail({ seed: project, data, loading: false, loadingMore: false, error: null });
+    } catch (error) {
+      if (detailRequestRef.current !== requestId) return;
+      setProjectDetail({
+        seed: project,
+        data: null,
+        loading: false,
+        loadingMore: false,
+        error: createErrorNotice(error, {
+          message: '暂时没有读到项目运行详情。',
+          impact: '项目代码和已有工作记录不受影响。',
+          requiredAction: '请确认本机服务已更新，然后重试读取。',
+        }),
+      });
+    }
+  }
+
+  function closeProjectDetail() {
+    detailRequestRef.current += 1;
+    setProjectDetail(null);
+  }
+
+  async function loadOlderTimeline() {
+    const detail = projectDetail;
+    const timeline = detail?.data?.timeline;
+    if (!detail || !timeline?.hasMore || detail.loadingMore) return;
+    setProjectDetail((current) => current ? { ...current, loadingMore: true } : current);
+    try {
+      const page = await api(
+        `/api/v1/projects/${encodeURIComponent(detail.seed.id)}/timeline?limit=30&offset=${timeline.items.length}`
+      );
+      setProjectDetail((current) => {
+        if (!current || current.seed.id !== detail.seed.id || !current.data) return current;
+        return {
+          ...current,
+          loadingMore: false,
+          data: {
+            ...current.data,
+            timeline: {
+              ...current.data.timeline,
+              total: page.total,
+              hasMore: page.hasMore,
+              items: [...current.data.timeline.items, ...page.items],
+            },
+          },
+        };
+      });
+    } catch (error) {
+      setProjectDetail((current) => current ? {
+        ...current,
+        loadingMore: false,
+        error: createErrorNotice(error, {
+          message: '更早的节点暂时没有加载出来。',
+          impact: '已显示的记录和项目代码不受影响。',
+          requiredAction: '稍后可以再次尝试加载。',
+        }),
+      } : current);
+    }
+  }
+
   const projects = dashboard?.projects ?? [];
 
   const stats = useMemo(() => {
@@ -494,7 +569,7 @@ function App() {
             <div className="brand-title-wrap">
               <span className="brand-mark" aria-hidden="true">■</span>
               <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">v0.1.0-alpha</span>
+              <span className="badge badge-version">v0.1.0-alpha.18</span>
             </div>
             <p className="brand-tagline">本机 AI 项目控制台 · Local-First Mission Control</p>
           </div>
@@ -560,7 +635,7 @@ function App() {
       </header>
 
       <main className="control-content">
-        {notice && !selection && !handoffProject && (
+        {notice && !selection && !handoffProject && !projectDetail && (
           <NoticeBanner notice={notice} busy={busy} />
         )}
 
@@ -591,6 +666,7 @@ function App() {
                           key={project.id}
                           project={project}
                           onAction={handleProjectAction}
+                          onOpen={openProjectDetail}
                         />
                       ))}
                     </div>
@@ -625,6 +701,15 @@ function App() {
           onClose={() => { setHandoffProject(null); setNotice(null); setDispatch(null); }}
           onCreate={createHandoff}
           onCopy={copyDispatchMessage}
+        />
+      )}
+
+      {projectDetail && (
+        <ProjectDetailModal
+          state={projectDetail}
+          onClose={closeProjectDetail}
+          onRetry={() => openProjectDetail(projectDetail.seed)}
+          onLoadOlder={loadOlderTimeline}
         />
       )}
     </div>
@@ -699,110 +784,300 @@ function EmptyState({ busy, onChoose }) {
   );
 }
 
-function ProjectCard({ project, onAction }) {
+function ProjectCard({ project, onAction, onOpen }) {
   const statusReason = getProjectStatusReason(project);
   const copy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const actionLabel = getActionLabel(statusReason);
   const isDisabled = isActionDisabled(statusReason);
   const theme = getProjectTheme(project);
+  const agent = project.activeWork?.agent
+    ?? project.waitingAgent?.agent
+    ?? project.pendingAssignment?.agent
+    ?? project.activeRun?.agentClaim
+    ?? null;
+  const confirmedAt = project.activeWork?.lastProgress?.createdAt
+    ?? project.activeWork?.lastActivityAt
+    ?? project.lastObservedAt;
 
   return (
     <article className={`project-item-card status-theme-${theme}`}>
-      <div className="card-topline">
-        <div className="card-badges">
-          <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
-          <span className="badge badge-status">{copy.eyebrow}</span>
+      <button
+        type="button"
+        className="project-card-open"
+        onClick={() => onOpen(project)}
+        aria-label={`查看 ${project.name} 的运行详情`}
+      >
+        <div className="card-topline">
+          <div className="card-badges">
+            <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
+            <span className="badge badge-status">{copy.eyebrow}</span>
+          </div>
+          <time className="card-time">{formatTime(confirmedAt)}</time>
         </div>
-        <time className="card-time">{formatTime(project.lastObservedAt)}</time>
-      </div>
 
-      <h4 className="card-name">{project.name}</h4>
-      <div className="card-status-title">{copy.title}</div>
-      <p className="card-status-desc">{copy.detail}</p>
-
-      {project.activeWork && (
-        <div className="card-meta-box">
-          <div className="meta-line">
-            <span className="meta-tag">已接入</span>
-            <span className="meta-agent">{project.activeWork.agent}</span>
-            <span className="meta-text">{project.activeWork.task || '任务推进中'}</span>
-          </div>
-          {project.activeWork.lastProgress?.note && (
-            <div className="meta-sub progress-summary">进展：{project.activeWork.lastProgress.note}</div>
-          )}
-        </div>
-      )}
-
-      {project.activeRelay && (
-        <div className="card-meta-box">
-          <div className="meta-line">
-            <span className="meta-tag">接力等待</span>
-            <span className="meta-text">{project.activeRelay.nextSessionFocus || project.activeRelay.summary}</span>
-          </div>
-        </div>
-      )}
-
-      {project.waitingAgent && (
-        <div className="card-meta-box">
-          <div className="meta-line">
-            <span className="meta-tag">等待安排</span>
-            <span className="meta-agent">{project.waitingAgent.agent} 已就绪</span>
-          </div>
-        </div>
-      )}
-
-      {project.pendingAssignment && statusReason === 'assignment_waiting' && (
-        <div className="card-meta-box">
-          <div className="meta-line">
-            <span className="meta-tag">指定接入</span>
-            <span className="meta-agent">{project.pendingAssignment.agent}</span>
-            <span className="meta-text">{project.pendingAssignment.task || '待执行任务'}</span>
-          </div>
-        </div>
-      )}
-
-      {project.lastHandoffManual && (
-        <details className="handoff-box">
-          <summary>上次交接手册</summary>
-          <div className="handoff-body">
-            <p>{project.lastHandoffManual.summary || '已保存标准交接手册'}</p>
-            {project.lastHandoffManual.nextSessionFocus && (
-              <small>建议下一步：{project.lastHandoffManual.nextSessionFocus}</small>
-            )}
-          </div>
-        </details>
-      )}
-
-      {!project.lastHandoffManual && project.lastWork?.summary && (
-        <details className="handoff-box">
-          <summary>上次工作记录</summary>
-          <div className="handoff-body">
-            <p>{project.lastWork.summary}</p>
-            {project.lastWork.nextStep && (
-              <small>建议下一步：{project.lastWork.nextStep}</small>
-            )}
-          </div>
-        </details>
-      )}
+        <h4 className="card-name">{project.name}</h4>
+        <div className="card-status-title">{copy.title}</div>
+        <p className="card-status-desc">{copy.detail}</p>
+        <span className="card-detail-hint">查看运行详情 <span aria-hidden="true">→</span></span>
+      </button>
 
       <div className="card-actions-row">
-        <details className="tech-details">
-          <summary>技术详情</summary>
-          <code>{project.path}</code>
-        </details>
+        <span className="card-agent">{agent ? `当前 AI · ${agent}` : '当前没有 AI 会话'}</span>
         {isDisabled ? (
           <span className="read-only-action">{actionLabel}</span>
         ) : (
           <button
             type="button"
             className="btn btn-card-action"
-            onClick={() => onAction(project)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onAction(project);
+            }}
           >
             {actionLabel}
           </button>
         )}
       </div>
     </article>
+  );
+}
+
+function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder }) {
+  const modalRef = useFocusTrap(true, onClose);
+  const project = state.data?.project ?? state.seed;
+  const statusReason = getProjectStatusReason(project);
+  const statusCopy = STATUS[statusReason] ?? STATUS.ready_to_start;
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  return (
+    <div
+      className="modal-backdrop project-detail-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        ref={modalRef}
+        className={`project-detail-dialog status-theme-${getProjectTheme(project)}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="project-detail-title"
+        tabIndex="-1"
+      >
+        <header className="project-detail-header">
+          <div className="project-detail-heading">
+            <div className="detail-kicker-row">
+              <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
+              <span className="badge badge-status">{statusCopy.eyebrow}</span>
+            </div>
+            <h2 id="project-detail-title">{project.name}</h2>
+            <p>{statusCopy.title}</p>
+          </div>
+          <button type="button" className="detail-close-btn" onClick={onClose} aria-label="关闭项目详情">
+            <span aria-hidden="true">×</span>
+          </button>
+        </header>
+
+        <div className="project-detail-scroll">
+          {state.loading ? (
+            <DetailLoadingState />
+          ) : state.error && !state.data ? (
+            <DetailErrorState notice={state.error} onRetry={onRetry} />
+          ) : (
+            <ProjectDetailContent
+              data={state.data}
+              loadingMore={state.loadingMore}
+              loadError={state.error}
+              onLoadOlder={onLoadOlder}
+            />
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DetailLoadingState() {
+  return (
+    <div className="detail-loading" role="status">
+      <span className="detail-loading-line detail-loading-line-wide" />
+      <span className="detail-loading-line" />
+      <span className="detail-loading-line detail-loading-line-short" />
+      <p>正在整理项目运行详情…</p>
+    </div>
+  );
+}
+
+function DetailErrorState({ notice, onRetry }) {
+  return (
+    <div className="detail-error" role="alert">
+      <span className="detail-error-mark" aria-hidden="true">!</span>
+      <h3>{notice.message}</h3>
+      {notice.impact && <p>{notice.impact}</p>}
+      {notice.required_action && <p>{notice.required_action}</p>}
+      <button type="button" className="btn btn-secondary" onClick={onRetry}>重新读取详情</button>
+    </div>
+  );
+}
+
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder }) {
+  const { project, timeline } = data;
+  const git = project.git ?? {};
+  const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
+  const revision = project.activeWork?.revision ?? project.activeRun?.revision ?? null;
+
+  return (
+    <>
+      <section className="project-facts" aria-label="项目当前信息">
+        <div className="fact-card fact-card-git">
+          <span className="fact-label">当前代码位置</span>
+          <strong>{git.branch || '分支未记录'}</strong>
+          <span className="fact-detail">{git.shortHead ? `提交 ${git.shortHead}` : '提交未记录'}</span>
+        </div>
+        <div className="fact-card">
+          <span className="fact-label">本地文件</span>
+          <strong>{git.hasChanges ? '有尚未归属的改动' : '与最近检查一致'}</strong>
+          <span className="fact-detail">{git.coherence === 'coherent' ? '代码状态已确认' : '等待再次确认'}</span>
+        </div>
+        <div className="fact-card">
+          <span className="fact-label">当前 AI</span>
+          <strong>{project.currentAgent || '没有进行中的会话'}</strong>
+          <span className="fact-detail">{project.currentGoal || '尚未设置工作目标'}</span>
+        </div>
+        <div className="fact-card">
+          <span className="fact-label">最近确认</span>
+          <strong>{formatTime(project.lastObservedAt)}</strong>
+          <span className="fact-detail">来自 Cockpit 的只读检查</span>
+        </div>
+      </section>
+
+      <details className="project-tech-panel">
+        <summary>技术详情</summary>
+        <dl>
+          <div><dt>代码位置</dt><dd>{project.path}</dd></div>
+          <div><dt>项目 ID</dt><dd>{project.id}</dd></div>
+          {sessionId && <div><dt>会话 ID</dt><dd>{sessionId}</dd></div>}
+          {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
+        </dl>
+      </details>
+
+      <section className="timeline-section" aria-labelledby="timeline-title">
+        <div className="timeline-heading">
+          <div>
+            <span className="timeline-overline">WORK HISTORY</span>
+            <h3 id="timeline-title">运行节点</h3>
+            <p>最新确认的节点在上方；只展示有意义的工作动作。</p>
+          </div>
+          <span className="timeline-count">{timeline.total} 个节点</span>
+        </div>
+
+        {timeline.items.length === 0 ? (
+          <div className="timeline-empty">
+            <span aria-hidden="true" />
+            <h4>还没有运行节点</h4>
+            <p>项目接入 AI 后，重要进展会从这里开始记录。</p>
+          </div>
+        ) : (
+          <ol className="project-timeline" aria-label="最新在上的项目运行节点">
+            {timeline.items.map((item, index) => (
+              <TimelineNode key={`${item.kind}-${item.id}`} item={item} index={index} />
+            ))}
+          </ol>
+        )}
+
+        {loadError && timeline.items.length > 0 && (
+          <p className="timeline-load-error" role="alert">{loadError.message} 已显示的节点不受影响。</p>
+        )}
+        {timeline.hasMore && (
+          <div className="timeline-load-more">
+            <button type="button" className="btn btn-secondary" onClick={onLoadOlder} disabled={loadingMore}>
+              {loadingMore ? '正在加载…' : '加载更早记录'}
+            </button>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function TimelineNode({ item, index }) {
+  const kind = TIMELINE_KINDS[item.kind] ?? { code: 'EVENT', label: item.typeLabel || '运行节点' };
+  const detailGroups = [
+    ['已完成', item.completedItems],
+    ['待继续', item.pendingItems],
+    ['关键决定', item.decisions],
+    ['风险', item.risks],
+  ].filter(([, values]) => Array.isArray(values) && values.length > 0);
+
+  return (
+    <li
+      className={`timeline-node timeline-node-${item.kind}`}
+      style={{ '--timeline-index': Math.min(index, 9) }}
+    >
+      <div className="timeline-rail" aria-hidden="true"><span /></div>
+      <article className="timeline-bubble">
+        <header className="timeline-node-header">
+          <div className="timeline-kind-wrap">
+            <span className="timeline-kind-code">{kind.code}</span>
+            <strong>{kind.label}</strong>
+          </div>
+          <time dateTime={item.timestamp}>{formatTime(item.timestamp)}</time>
+        </header>
+
+        <div className="timeline-context-row">
+          <span className="timeline-agent">AI · {item.agent || '未记录'}</span>
+          {item.git ? (
+            <>
+              {item.git.branch && <span className="git-chip git-branch">{item.git.branch}</span>}
+              {item.git.shortHead && <span className="git-chip git-commit">{item.git.shortHead}</span>}
+            </>
+          ) : (
+            <span className="git-unrecorded">当时分支未记录</span>
+          )}
+        </div>
+
+        {item.git?.branchChanged && (
+          <div className="branch-change-note">
+            分支从 <code>{item.git.previousBranch}</code> 切换到 <code>{item.git.branch}</code>
+          </div>
+        )}
+
+        <h4>{item.summary || item.note || kind.label}</h4>
+        {item.currentState && item.currentState !== item.summary && (
+          <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
+        )}
+
+        {detailGroups.length > 0 && (
+          <div className="timeline-detail-groups">
+            {detailGroups.map(([label, values]) => (
+              <section key={label}>
+                <h5>{label}</h5>
+                <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
+              </section>
+            ))}
+          </div>
+        )}
+
+        {item.nextSessionFocus && (
+          <div className="timeline-next-focus"><span>下一步</span>{item.nextSessionFocus}</div>
+        )}
+
+        {item.bodyMarkdown && (
+          <details className="timeline-full-record">
+            <summary>查看完整交接记录</summary>
+            <pre>{item.bodyMarkdown}</pre>
+          </details>
+        )}
+      </article>
+    </li>
   );
 }
 

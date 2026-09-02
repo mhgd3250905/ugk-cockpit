@@ -20,6 +20,7 @@ import { createRelay, resumeRelay } from '../core/relays.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
 import { readDashboard, readProjectContext, registerProject } from '../core/projects.mjs';
+import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
@@ -994,6 +995,44 @@ export async function createCockpitHttpServer({
         else sendError(response, result.code, {
           commandId: body.commandId,
           extra: { project_id: result.projectId ?? null },
+        });
+        return;
+      }
+
+      const projectDetailMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
+      if (request.method === 'GET' && projectDetailMatch) {
+        const projectId = decodeURIComponent(projectDetailMatch[1]);
+        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+        const detail = readProjectDetail(db, projectId, { limit, offset });
+        if (!detail) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          refreshedAt: new Date().toISOString(),
+          ...detail,
+        });
+        return;
+      }
+
+      const projectTimelineMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/timeline$/);
+      if (request.method === 'GET' && projectTimelineMatch) {
+        const projectId = decodeURIComponent(projectTimelineMatch[1]);
+        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const timeline = readProjectTimeline(db, projectId, { limit, offset });
+        sendJson(response, 200, {
+          ok: true,
+          projectId,
+          refreshedAt: new Date().toISOString(),
+          ...timeline,
         });
         return;
       }
