@@ -86,6 +86,26 @@ function getProjectStatusReason(project) {
   return project?.statusReason ?? 'ready_to_start';
 }
 
+function getProjectTheme(project) {
+  if (project?.stage === 'paused' || project?.stage === 'maintenance') {
+    return 'paused';
+  }
+  const reason = getProjectStatusReason(project);
+  if (
+    project?.status === 'attention' ||
+    ['status_check_incomplete', 'preexisting_changes'].includes(reason)
+  ) {
+    return 'attention';
+  }
+  if (
+    project?.status === 'active' ||
+    ['active_work', 'relay_waiting', 'agent_waiting', 'assignment_waiting'].includes(reason)
+  ) {
+    return 'active';
+  }
+  return 'ready';
+}
+
 function getActionLabel(statusReason) {
   switch (statusReason) {
     case 'active_work':
@@ -421,36 +441,20 @@ function App() {
 
   const projects = dashboard?.projects ?? [];
 
-  const priority = useMemo(() => {
-    if (!projects.length) return null;
-    return (
-      projects.find((item) => item.status === 'attention')
-      ?? projects.find((item) => item.status === 'active')
-      ?? projects.find((item) => getProjectStatusReason(item) === 'agent_waiting')
-      ?? projects.find((item) => getProjectStatusReason(item) === 'assignment_waiting')
-      ?? projects[0]
-    );
-  }, [projects]);
-
-  const nonPriorityProjects = useMemo(
-    () => projects.filter((item) => item.id !== priority?.id),
-    [projects, priority]
-  );
-
   const stats = useMemo(() => {
     const total = projects.length;
-    const attentionCount = projects.filter(
-      (p) => p.status === 'attention' || ['status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(p))
-    ).length;
-    const activeCount = projects.filter(
-      (p) => p.status === 'active' || ['active_work', 'relay_waiting', 'agent_waiting', 'assignment_waiting'].includes(getProjectStatusReason(p))
-    ).length;
-    const readyCount = projects.filter(
-      (p) => p.status === 'ready' && p.stage !== 'paused' && p.stage !== 'maintenance'
-    ).length;
-    const pausedCount = projects.filter(
-      (p) => p.stage === 'paused' || p.stage === 'maintenance'
-    ).length;
+    let attentionCount = 0;
+    let activeCount = 0;
+    let readyCount = 0;
+    let pausedCount = 0;
+
+    for (const project of projects) {
+      const theme = getProjectTheme(project);
+      if (theme === 'attention') attentionCount++;
+      else if (theme === 'active') activeCount++;
+      else if (theme === 'ready') readyCount++;
+      else if (theme === 'paused') pausedCount++;
+    }
 
     return { total, attentionCount, activeCount, readyCount, pausedCount };
   }, [projects]);
@@ -461,21 +465,16 @@ function App() {
     const readyList = [];
     const pausedList = [];
 
-    for (const item of nonPriorityProjects) {
-      if (item.stage === 'paused' || item.stage === 'maintenance') {
-        pausedList.push(item);
-      } else if (
-        item.status === 'attention' ||
-        ['status_check_incomplete', 'preexisting_changes'].includes(getProjectStatusReason(item))
-      ) {
+    for (const item of projects) {
+      const theme = getProjectTheme(item);
+      if (theme === 'attention') {
         attentionList.push(item);
-      } else if (
-        item.status === 'active' ||
-        ['active_work', 'relay_waiting', 'agent_waiting', 'assignment_waiting'].includes(getProjectStatusReason(item))
-      ) {
+      } else if (theme === 'active') {
         activeList.push(item);
-      } else {
+      } else if (theme === 'ready') {
         readyList.push(item);
+      } else if (theme === 'paused') {
+        pausedList.push(item);
       }
     }
 
@@ -485,7 +484,7 @@ function App() {
       { key: 'ready', title: '准备就绪 · 可以继续', list: readyList },
       { key: 'paused', title: '日常维护与暂时放下', list: pausedList },
     ].filter((g) => g.list.length > 0);
-  }, [nonPriorityProjects]);
+  }, [projects]);
 
   return (
     <div className="mission-control-shell">
@@ -570,42 +569,36 @@ function App() {
         ) : projects.length === 0 ? (
           <EmptyState busy={busy} onChoose={() => chooseFolder()} />
         ) : (
-          <>
-            {priority && (
-              <PriorityHero project={priority} onAction={handleProjectAction} />
-            )}
+          groups.length > 0 && (
+            <section className="projects-section" aria-label="项目矩阵">
+              <div className="section-toolbar">
+                <h2 className="section-heading">全部项目</h2>
+                <span className="section-subtitle">
+                  共 {projects.length} 个项目 · 按状态分组
+                </span>
+              </div>
 
-            {groups.length > 0 && (
-              <section className="projects-section" aria-label="项目矩阵">
-                <div className="section-toolbar">
-                  <h2 className="section-heading">全部项目矩阵</h2>
-                  <span className="section-subtitle">
-                    共 {projects.length} 个项目 · 首要决策已置顶
-                  </span>
-                </div>
-
-                <div className="groups-container">
-                  {groups.map((group) => (
-                    <div key={group.key} className="status-group">
-                      <div className="group-header">
-                        <h3 className="group-title">{group.title}</h3>
-                        <span className="group-count">{group.list.length}</span>
-                      </div>
-                      <div className="group-grid">
-                        {group.list.map((project) => (
-                          <ProjectCard
-                            key={project.id}
-                            project={project}
-                            onAction={handleProjectAction}
-                          />
-                        ))}
-                      </div>
+              <div className="groups-container">
+                {groups.map((group) => (
+                  <div key={group.key} className="status-group">
+                    <div className="group-header">
+                      <h3 className="group-title">{group.title}</h3>
+                      <span className="group-count">{group.list.length}</span>
                     </div>
-                  ))}
-                </div>
-              </section>
-            )}
-          </>
+                    <div className="group-grid">
+                      {group.list.map((project) => (
+                        <ProjectCard
+                          key={project.id}
+                          project={project}
+                          onAction={handleProjectAction}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )
         )}
       </main>
 
@@ -706,111 +699,15 @@ function EmptyState({ busy, onChoose }) {
   );
 }
 
-function PriorityHero({ project, onAction }) {
-  const statusReason = getProjectStatusReason(project);
-  const copy = STATUS[statusReason] ?? STATUS.ready_to_start;
-  const actionLabel = getActionLabel(statusReason);
-  const isDisabled = isActionDisabled(statusReason);
-
-  return (
-    <section className="priority-hero-card" aria-label="置顶首要决策">
-      <div className="hero-topline">
-        <div className="hero-badges">
-          <span className="badge badge-priority-kicker">今日首要关注</span>
-          <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
-          <span className="badge badge-status">{copy.eyebrow}</span>
-        </div>
-        <time className="hero-time" title="上次观测时间">
-          更新于 {formatTime(project.lastObservedAt)}
-        </time>
-      </div>
-
-      <div className="hero-main-row">
-        <div className="hero-info">
-          <h2 className="hero-project-name">{project.name}</h2>
-          <div className="hero-status-title">{copy.title}</div>
-          <p className="hero-status-detail">{copy.detail}</p>
-        </div>
-
-        <div className="hero-action-slot">
-          {isDisabled ? (
-            <span className="read-only-action read-only-action-hero">{actionLabel}</span>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-hero-cta"
-              onClick={() => onAction(project)}
-            >
-              {actionLabel}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {(project.activeWork || project.activeRelay || project.waitingAgent || project.lastHandoffManual || project.lastWork) && (
-        <div className="hero-summary-strip">
-          {project.activeWork && (
-            <div className="summary-item">
-              <span className="summary-label">未交接会话</span>
-              <span className="summary-val">{project.activeWork.agent} · {project.activeWork.task || '任务推进中'}</span>
-              {project.activeWork.lastProgress?.note && (
-                <span className="summary-sub progress-summary">最新进展：{project.activeWork.lastProgress.note}</span>
-              )}
-            </div>
-          )}
-
-          {project.activeRelay && (
-            <div className="summary-item">
-              <span className="summary-label">接力记录</span>
-              <span className="summary-val">{project.activeRelay.nextSessionFocus || project.activeRelay.summary}</span>
-            </div>
-          )}
-
-          {project.waitingAgent && (
-            <div className="summary-item">
-              <span className="summary-label">等待安排</span>
-              <span className="summary-val">{project.waitingAgent.agent} 已接入上下文</span>
-            </div>
-          )}
-
-          {project.lastHandoffManual && (
-            <div className="summary-item">
-              <span className="summary-label">上次交接</span>
-              <span className="summary-val">{project.lastHandoffManual.summary}</span>
-              {project.lastHandoffManual.nextSessionFocus && (
-                <span className="summary-sub">建议下一步：{project.lastHandoffManual.nextSessionFocus}</span>
-              )}
-            </div>
-          )}
-
-          {!project.lastHandoffManual && project.lastWork?.summary && (
-            <div className="summary-item">
-              <span className="summary-label">上次会话</span>
-              <span className="summary-val">{project.lastWork.summary}</span>
-              {project.lastWork.nextStep && (
-                <span className="summary-sub">建议下一步：{project.lastWork.nextStep}</span>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      <details className="tech-details hero-tech-details">
-        <summary>技术详情</summary>
-        <code>{project.path}</code>
-      </details>
-    </section>
-  );
-}
-
 function ProjectCard({ project, onAction }) {
   const statusReason = getProjectStatusReason(project);
   const copy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const actionLabel = getActionLabel(statusReason);
   const isDisabled = isActionDisabled(statusReason);
+  const theme = getProjectTheme(project);
 
   return (
-    <article className={`project-item-card status-theme-${project.status}`}>
+    <article className={`project-item-card status-theme-${theme}`}>
       <div className="card-topline">
         <div className="card-badges">
           <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>

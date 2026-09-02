@@ -12,8 +12,7 @@
 Mission Control Shell
 ├── 顶部产品区：产品名、版本、本机服务状态、手动刷新、添加项目
 ├── 全局通知：发生了什么、影响、下一步和可用重试
-├── 首要关注：最需要决策的项目、真实原因、唯一主动作或只读引导
-├── 项目分组：待确认、推进中、准备就绪、维护/暂时放下
+├── 项目矩阵：待确认、工作会话、准备就绪、日常维护/暂时放下（按行动状态分组）
 └── Focus Modal：添加项目、创建或重新生成接入指令
 ```
 
@@ -21,7 +20,7 @@ Mission Control Shell
 
 ## 2. 颜色与 Design Tokens
 
-采用暖中性画布、深墨蓝文字与深橙关键动作。深色首要关注卡用于形成明确层级，但不扩展成暗黑主题。
+采用暖中性画布、深墨蓝文字与深橙关键动作。各项目卡片根据行动状态使用清晰但克制的状态背景色与左侧边框强调，不采用置顶大卡，确保每个项目恰好出现一次。
 
 ```css
 :root {
@@ -37,11 +36,18 @@ Mission Control Shell
   --accent-primary: #c2410c;
   --accent-hover: #9a3412;
   --accent-focus: rgba(194, 65, 12, 0.35);
-  --hero-bg: #172033;
   --state-attention-bg: #fff7ed;
+  --state-attention-border: #fdba74;
+  --state-attention-accent: #ea580c;
   --state-active-bg: #ecfdf5;
-  --state-ready-bg: #f0fdf4;
+  --state-active-border: #a7f3d0;
+  --state-active-accent: #10b981;
+  --state-ready-bg: #fefce8;
+  --state-ready-border: #fef08a;
+  --state-ready-accent: #ca8a04;
   --state-paused-bg: #f1ece4;
+  --state-paused-border: #e1d8ca;
+  --state-paused-accent: #94a3b8;
 }
 ```
 

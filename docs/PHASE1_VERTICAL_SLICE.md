@@ -15,6 +15,7 @@
 - `0.1.0-alpha.14`：把 cockpit-relay 准备输出固定为可原样复制的标准恢复指令，以 MCP continueMessage 为唯一事实源，摘要与复制块严格隔离，resume 自动返回已存 relayContext。
 - `0.1.0-alpha.15`：完成专业 Mission Control 前端重构，界面由真实状态驱动并支持响应式与无障碍；修复 assignment/reissue/interrupted/paused 状态下的安全问题，新增 `PRODUCT.md` 与 `DESIGN.md`。
 - `0.1.0-alpha.16`：移除 false liveness 与服务重启导致的中断推断；Dashboard 仅依据明确会话节点展示状态，服务重启不修改 active run 的 health，现存 recovery_uncertain 数据在普通界面统一作为 active work 处理。
+- `0.1.0-alpha.17`：移除 Dashboard 置顶大卡，所有项目直接进入统一行动状态分组矩阵，每个项目仅渲染一次；引入四套直观且克制的状态背景色与色彩强调边框。
 - 当前小步：Agent-first 工作闭环。空项目、新派发任务和已经开发到一半的项目都用 `ugk_work_init` 统一建立 active session；最近交接存在时随 init 返回。只有 progress 可隐式记录；relay 与 handoff 分别只在用户显式要求换聊天或结束阶段时调用。
 
 ## 产品方向：晨间工作简报
