@@ -260,9 +260,13 @@ function continueMessage(code = null) {
     return '接力记录已保存；当前会话仍保持 active。请在新的 AI 会话中调用 ugk_work_resume，并使用此前收到的一次性 continueCode；不要重新 init。';
   }
   return [
-    '接力记录已保存；当前 Cockpit 工作会话仍保持 active。',
-    '只有用户明确要求换 AI 会话时，才在新的会话中调用 `$cockpit-relay` 对应的 `ugk_work_resume`，不要重新 init。',
-    `一次性 continueCode: "${code}"。`,
+    '请在与原会话相同的项目目录中使用 `$cockpit-relay` 恢复 UGK Cockpit 接力。',
+    '',
+    `continueCode: "${code}"`,
+    '',
+    '不要重新 init，也不要清理、覆盖或重置已有改动。',
+    '恢复成功后告诉我 `sessionId` 和 `revision`，然后等待我的下一步安排。',
+    '如果 `$cockpit-relay` 不可用，请改用 UGK Cockpit MCP 的 `ugk_work_resume`；不要传路径或本地 token。',
   ].join('\n');
 }
 

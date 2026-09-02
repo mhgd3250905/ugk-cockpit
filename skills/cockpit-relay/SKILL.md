@@ -35,8 +35,9 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 
 ### 准备成功判定与报告
 
-- **仅在**工具明确返回 `relayPrepared: true` 且 `status: "awaiting_resume"`（或 `status=awaiting_resume`）时，才向用户报告接力准备成功。
-- 成功后向用户清晰给出返回的 `continueMessage` 和 `continueCode`，引导用户在新聊天中发送以继续工作。
+- **仅在**工具明确返回 `relayPrepared: true` 且 `status: "awaiting_resume"`（或 `status=awaiting_resume`），且包含非空的 `continueCode` 与 `continueMessage` 时，才向用户报告接力准备成功；缺任一字段不得宣告成功。
+- **提供标准复制块**：准备成功后，必须将 MCP 返回的 `continueMessage` 作为唯一事实源，**原样放入一个单独的 text 代码块**中输出，供用户直接完整复制到同一项目的新会话中；绝对不得要求或让用户自行拼接指令、参数或代码。
+- **摘要隔离**：会话事实摘要、当前状态、待办事项等交接信息若向用户说明，必须作为普通说明文字留在代码块之外，严禁混入或污染 `continueMessage` 复制块。
 - prepare 成功后旧聊天停止继续修改代码与操作工作区；接力保持当前 Cockpit 阶段与写入租约，不结束阶段、不自动 handoff、不自动 commit、不清理工作区。
 
 ## 模式二：恢复接力（新聊天）
@@ -54,11 +55,11 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 
 - **仅在**工具明确返回 `relayAccepted: true` 且 `status: "active"`（或 `status=active`）且具备有效的 `sessionId` 与 `revision` 时，才向用户报告恢复成功并进入工作状态。
 - 成功后使用返回的 `sessionId` 和 `revision` 作为后续调用（如 `$cockpit-progress`）的基准；接力恢复后直接继续工作，不得重新调用 `ugk_work_init`。
-- 若返回包含前序状态或交接信息，简短向用户复述并继续工作。
+- 恢复后由 MCP 返回已保存的 `relayContext`（包含 `summary`、`currentState`、`pendingItems` 等交接信息），简短向用户复述关键上下文与下一步焦点，并报告 `sessionId` 与 `revision` 后等待安排或继续工作。
 
 ## 不变量与失败处理
 
 - `clientRequestId` 必须非空且唯一。传输结果不确定时，使用相同的 ID 重发完全相同的 payload；不要换 ID 或修改 revision。
 - 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 仅包含 `continueCode` 与 `clientRequestId`，不得携带 `currentTask`、`currentState`；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
-- MCP 报错、不可用、缺少成功标志或状态不符时，向用户说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用 `ugk-cockpit` 本地 MCP。不得声称接力准备或恢复成功。
+- MCP 报错、不可用、缺少成功标志（如 `relayPrepared: true` / `status: "awaiting_resume"` / 非空 `continueCode` / 非空 `continueMessage`）或状态不符时，向用户说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用 `ugk-cockpit` 本地 MCP。缺少必要字段不得声称接力准备或恢复成功。
 - 恢复成功前不要修改代码；不得清理或重置工作区已有改动。

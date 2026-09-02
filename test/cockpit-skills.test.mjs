@@ -122,6 +122,15 @@ test('cockpit-relay defines two explicit modes and precise success reporting cri
   assert.match(instructions, /不结束.*阶段/);
   assert.match(instructions, /不重新 init/);
   assert.match(instructions, /不自动 handoff/);
+
+  // Standard copy block, summary isolation, and non-empty field requirements
+  assert.match(instructions, /text 代码块/);
+  assert.match(instructions, /唯一事实源/);
+  assert.match(instructions, /自行拼接/);
+  assert.match(instructions, /摘要隔离/);
+  assert.match(instructions, /严禁混入.*复制块/);
+  assert.match(instructions, /缺任一字段不得宣告成功/);
+  assert.match(instructions, /缺少必要字段不得声称/);
 });
 
 test('skill installer copies packages and refuses an unapproved overwrite', () => {

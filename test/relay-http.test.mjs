@@ -87,6 +87,12 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.equal(prepared.status, 'awaiting_resume');
   assert.equal(prepared.revision, initialized.revision + 1);
   assert.ok(prepared.continueCode);
+  assert.equal(typeof prepared.continueMessage, 'string');
+  assert.match(prepared.continueMessage, /\$cockpit-relay/);
+  assert.match(prepared.continueMessage, /不要重新 init/);
+  assert.match(prepared.continueMessage, /sessionId.*revision.*(?:等待.*安排|等待安排)/s);
+  assert.ok(prepared.continueMessage.includes(prepared.continueCode));
+  assert.equal(prepared.continueMessage.split(prepared.continueCode).length - 1, 1);
 
   // The HTTP payload does not carry the secret.  A retry after a lost
   // response deterministically derives the same code from the service token.
@@ -168,6 +174,10 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.equal(row.assignment_revision, resumed.revision);
   assert.equal(row.state, 'accepted');
   assert.equal(JSON.stringify(row).includes(prepared.continueCode), false);
+  assert.equal(state.prepare(`
+    SELECT count(*) AS count FROM commands
+    WHERE request_json LIKE ? OR response_json LIKE ?
+  `).get(`%${prepared.continueCode}%`, `%${prepared.continueCode}%`).count, 0);
   assert.equal(state.prepare('SELECT count(*) AS count FROM write_leases').get().count, 1);
   state.close();
 });

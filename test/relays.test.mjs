@@ -117,6 +117,20 @@ test('relay advances the same active Run/assignment, stores only a code hash, an
   assert.equal(prepared.sessionId, 'session-relay');
   assert.equal(typeof prepared.relayId, 'string');
   assert.equal(prepared.continueCode, 'relay-secret-code');
+  assert.equal(typeof prepared.continueMessage, 'string');
+  assert.equal(prepared.continueMessage, [
+    '请在与原会话相同的项目目录中使用 `$cockpit-relay` 恢复 UGK Cockpit 接力。',
+    '',
+    'continueCode: "relay-secret-code"',
+    '',
+    '不要重新 init，也不要清理、覆盖或重置已有改动。',
+    '恢复成功后告诉我 `sessionId` 和 `revision`，然后等待我的下一步安排。',
+    '如果 `$cockpit-relay` 不可用，请改用 UGK Cockpit MCP 的 `ugk_work_resume`；不要传路径或本地 token。',
+  ].join('\n'));
+  assert.equal(prepared.continueMessage.split('relay-secret-code').length - 1, 1);
+  const codeLine = prepared.continueMessage.split('\n').find((l) => l.includes('relay-secret-code'));
+  assert.ok(codeLine);
+  assert.equal(codeLine, 'continueCode: "relay-secret-code"');
 
   const state = db.prepare(`
     SELECT runs.lifecycle AS run_lifecycle, runs.revision AS run_revision,
@@ -150,6 +164,7 @@ test('relay advances the same active Run/assignment, stores only a code hash, an
     ...relayFields,
   }, { clock: 1_800_000_000_001 });
   assert.deepEqual(preparedRetry, prepared);
+  assert.equal(preparedRetry.continueMessage, prepared.continueMessage);
   assert.throws(() => createRelay(db, {
     sessionId: 'session-relay',
     clientRequestId: 'relay-create',
