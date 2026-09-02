@@ -85,6 +85,36 @@ export const TOOLS = [
     }
   },
   {
+    name: 'ugk_work_submit',
+    description: 'Only call after the user explicitly says a managed development-space task is complete and asks to save, push, and send it to the main project for review',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The identifier of the active development-space session'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'Stable idempotency key for this submission attempt'
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Latest Cockpit session revision'
+        },
+        summary: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 160,
+          description: 'Concise feature-delivery summary used for the saved change and review request'
+        }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'summary'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'ugk_work_finish',
     description: 'Only call after the user explicitly asks to end the current phase; complete the active session with an outcome and summary',
     inputSchema: {
@@ -387,7 +417,7 @@ export const TOOLS = [
   }
 ];
 
-const FORBIDDEN_KEYS = new Set(['path', 'projectId', 'worktreeId']);
+const FORBIDDEN_KEYS = new Set(['path', 'projectId', 'worktreeId', 'token']);
 
 const HANDOFF_ARRAY_FIELDS = [
   'completedItems',
@@ -506,6 +536,30 @@ function validateProgressArgs(args) {
     return 'Missing required field: at least one of summary or note is required';
   }
 
+  return null;
+}
+
+function validateSubmitArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowedKeys = ['sessionId', 'clientRequestId', 'expectedRevision', 'summary'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  if (typeof args.summary !== 'string' || args.summary.trim() === '' || args.summary.length > 160) {
+    return 'Missing or invalid required field: summary (must be non-empty string up to 160 characters)';
+  }
   return null;
 }
 
@@ -785,6 +839,8 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateAcceptArgs(toolArgs);
       } else if (toolName === 'ugk_work_progress') {
         validationError = validateProgressArgs(toolArgs);
+      } else if (toolName === 'ugk_work_submit') {
+        validationError = validateSubmitArgs(toolArgs);
       } else if (toolName === 'ugk_work_finish') {
         validationError = validateFinishArgs(toolArgs);
       } else if (toolName === 'ugk_work_handoff') {

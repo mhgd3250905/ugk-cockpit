@@ -342,10 +342,16 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-space-mcp-'));
   const root = path.join(container, 'main-repo');
   const spaceFolder = path.join(container, 'space-worktree');
+  const remotePath = path.join(container, 'remote.git');
+  execFileSync('git', ['init', '--bare', '--quiet', remotePath]);
   execFileSync('git', ['init', '-b', 'main', '--quiet', root]);
   writeFileSync(path.join(root, 'README.md'), '# Main Repo\n');
   execFileSync('git', ['add', 'README.md'], { cwd: root });
   execFileSync('git', ['-c', 'user.name=UGK Test', '-c', 'user.email=ugk@example.invalid', 'commit', '--quiet', '-m', 'initial commit'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'UGK Test'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'ugk@example.invalid'], { cwd: root });
+  execFileSync('git', ['remote', 'add', 'origin', remotePath], { cwd: root });
+  execFileSync('git', ['push', '--set-upstream', 'origin', 'main'], { cwd: root });
   const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 
   mkdirSync(spaceFolder, { recursive: true });
@@ -505,7 +511,36 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   assert.equal(resumed.status, 'active');
   assert.equal(resumed.worktreeId, spaceWorktreeId);
 
-  // 11. Verify main worktree assignments still work independently
+  // 11. Explicit submit saves all changes, pushes the managed branch, and creates main review work
+  writeFileSync(path.join(spaceFolder, 'feature.txt'), 'ready for review\n');
+  const submitRes = await post(service, '/api/v1/mcp/work/submit', {
+    sessionId,
+    clientRequestId: 'space-submit-1',
+    expectedRevision: resumed.revision,
+    summary: '完成开发空间功能',
+  });
+  assert.equal(submitRes.status, 200, await submitRes.clone().text());
+  const submitted = await submitRes.json();
+  assert.equal(submitted.ok, true);
+  assert.equal(submitted.localSaved, true);
+  assert.equal(submitted.pushed, true);
+  assert.ok(submitted.submissionId);
+  assert.equal(
+    execFileSync('git', ['rev-parse', `refs/heads/${createSpaceRes.branch}`], {
+      cwd: remotePath, encoding: 'utf8',
+    }).trim(),
+    submitted.sourceCommit,
+  );
+
+  const submitReplay = await post(service, '/api/v1/mcp/work/submit', {
+    sessionId,
+    clientRequestId: 'space-submit-1',
+    expectedRevision: resumed.revision,
+    summary: '完成开发空间功能',
+  });
+  assert.deepEqual(await submitReplay.json(), submitted);
+
+  // 12. Verify main worktree assignments still work independently
   const mainAssignRes = await post(service, `/api/v1/projects/${projectId}/assignments`, {
     clientRequestId: 'main-assign-req-1',
     agent: 'ZCode',

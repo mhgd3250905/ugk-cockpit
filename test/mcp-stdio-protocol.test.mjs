@@ -9,11 +9,12 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 8 tools and no path/projectId/worktreeId', () => {
+test('TOOLS definition contains the required 9 tools and no path/projectId/worktreeId/token', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
     'ugk_work_accept',
     'ugk_work_progress',
+    'ugk_work_submit',
     'ugk_work_finish',
     'ugk_work_handoff',
     'ugk_work_begin',
@@ -56,11 +57,13 @@ test('TOOLS definition contains the required 8 tools and no path/projectId/workt
     assert.strictEqual(props.includes('path'), false, `${tool.name} must not contain path`);
     assert.strictEqual(props.includes('projectId'), false, `${tool.name} must not contain projectId`);
     assert.strictEqual(props.includes('worktreeId'), false, `${tool.name} must not contain worktreeId`);
+    assert.strictEqual(props.includes('token'), false, `${tool.name} must not contain token`);
 
     const required = tool.inputSchema.required || [];
     assert.strictEqual(required.includes('path'), false);
     assert.strictEqual(required.includes('projectId'), false);
     assert.strictEqual(required.includes('worktreeId'), false);
+    assert.strictEqual(required.includes('token'), false);
     assert.strictEqual(tool.inputSchema.additionalProperties, false);
   }
 });
@@ -125,7 +128,7 @@ test('dispatchMessage handles initialize, ping, tools/list, and notifications', 
 });
 
 test('dispatchMessage accurately forwards tool calls to handlers once with exact arguments', async () => {
-  const callCounts = { accept: 0, progress: 0, finish: 0, handoff: 0, begin: 0, init: 0 };
+  const callCounts = { accept: 0, progress: 0, submit: 0, finish: 0, handoff: 0, begin: 0, init: 0 };
   const receivedArgs = {};
 
   const handlers = {
@@ -138,6 +141,11 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
       callCounts.progress += 1;
       receivedArgs.progress = args;
       return { revision: 2, status: 'running' };
+    },
+    ugk_work_submit: async (args) => {
+      callCounts.submit += 1;
+      receivedArgs.submit = args;
+      return { submissionId: 'sub-1', localSaved: true, pushed: true };
     },
     ugk_work_finish: async (args) => {
       callCounts.finish += 1;
@@ -258,6 +266,22 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.deepEqual(receivedArgs.progress, structuredProgressPayload);
   assert.deepEqual(JSON.parse(structuredProgRes.result.content[0].text), { revision: 2, status: 'running' });
 
+  const submitPayload = {
+    sessionId: 'sess-100',
+    clientRequestId: 'req-submit-1',
+    expectedRevision: 2,
+    summary: '完成开发空间功能',
+  };
+  const submitRes = await dispatchMessage({
+    jsonrpc: '2.0', id: 111, method: 'tools/call',
+    params: { name: 'ugk_work_submit', arguments: submitPayload },
+  }, { handlers });
+  assert.strictEqual(callCounts.submit, 1);
+  assert.deepEqual(receivedArgs.submit, submitPayload);
+  assert.deepEqual(JSON.parse(submitRes.result.content[0].text), {
+    submissionId: 'sub-1', localSaved: true, pushed: true,
+  });
+
   // Call ugk_work_finish
   const finishPayload = {
     sessionId: 'sess-100',
@@ -348,6 +372,10 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
       return { ok: true };
     },
     ugk_work_progress: async () => {
+      called = true;
+      return { ok: true };
+    },
+    ugk_work_submit: async () => {
       called = true;
       return { ok: true };
     },
@@ -494,6 +522,21 @@ test('dispatchMessage rejects disallowed parameters (path, projectId, worktreeId
   }, { handlers });
   assert.strictEqual(progressEmptyDetailsItem.result.isError, true);
   assert.match(progressEmptyDetailsItem.result.content[0].text, /details/i);
+
+  for (const field of ['path', 'projectId', 'worktreeId', 'token', 'branch', 'remote']) {
+    const res = await dispatchMessage({
+      jsonrpc: '2.0', id: `submit-disallowed-${field}`, method: 'tools/call',
+      params: {
+        name: 'ugk_work_submit',
+        arguments: {
+          sessionId: 's1', clientRequestId: 'submit-1', expectedRevision: 2,
+          summary: '完成开发', [field]: 'spoofed-value',
+        },
+      },
+    }, { handlers });
+    assert.strictEqual(res.result.isError, true);
+    assert.match(res.result.content[0].text, /Forbidden property|Unexpected property/i);
+  }
 
   for (const field of ['gitBranch', 'gitHead', 'gitCoherence', 'path', 'projectId', 'worktreeId']) {
     const res = await dispatchMessage({

@@ -29,6 +29,7 @@ import { readDevelopmentSpace } from '../core/spaces.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
+import { submitDevelopmentSpace } from '../core/submission-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
 import { serveWebAsset } from './web-assets.mjs';
@@ -480,6 +481,90 @@ const PUBLIC_ERRORS = {
     impact: '没有创建分支或开发空间，也没有修改现有代码。',
     requiredAction: '请选择与现有项目代码位置并列或完全独立的空文件夹。',
   },
+  DEVELOPMENT_SPACE_REQUIRED: {
+    status: 409,
+    message: '只有平台创建的开发空间可以送交主项目审核。',
+    impact: '没有保存、提交或上传任何新内容。',
+    requiredAction: '请在对应开发空间的 AI 会话中调用 $cockpit-submit。',
+  },
+  REVISION_CONFLICT: {
+    status: 409,
+    message: '这项工作已经有更新的状态。',
+    impact: '本次送审没有继续执行，现有代码保持不变。',
+    requiredAction: '请刷新最近一次 revision 后重新发起。',
+  },
+  PUSH_REMOTE_MISSING: {
+    status: 409,
+    message: '这个项目还没有可用的远端代码位置。',
+    impact: '没有创建新提交，也没有上传代码。',
+    requiredAction: '请先为仓库配置 origin，再使用新的送审请求。',
+  },
+  PUSH_REMOTE_AMBIGUOUS: {
+    status: 409,
+    message: '项目有多个远端位置，但没有名为 origin 的默认目标。',
+    impact: '没有创建新提交，也没有上传代码。',
+    requiredAction: '请明确配置 origin 后，使用新的送审请求。',
+  },
+  COMMIT_IDENTITY_MISSING: {
+    status: 409,
+    message: '这个仓库还没有配置本地提交者姓名和邮箱。',
+    impact: '没有创建新提交，也没有上传代码。',
+    requiredAction: '请在该仓库配置本地 user.name 和 user.email 后，用同一请求重试。',
+  },
+  NO_CHANGES_TO_SUBMIT: {
+    status: 409,
+    message: '这个开发空间没有可送审的新成果。',
+    impact: '没有创建提交或审核待办。',
+    requiredAction: '请确认功能改动已经保存在当前开发空间。',
+  },
+  GIT_FILTER_UNSUPPORTED: {
+    status: 409,
+    message: '当前版本暂不支持包含 Git filter 或 LFS 的自动送审。',
+    impact: '没有暂存、提交或上传文件。',
+    requiredAction: '请保留现状，改用人工 Git 流程并等待平台后续支持。',
+  },
+  SUBMODULE_UNSUPPORTED: {
+    status: 409,
+    message: '当前版本暂不支持包含 submodule 的自动送审。',
+    impact: '没有暂存、提交或上传文件。',
+    requiredAction: '请保留现状，改用人工 Git 流程并等待平台后续支持。',
+  },
+  COMMIT_FAILED: {
+    status: 409,
+    message: '本地成果暂时没有保存成提交。',
+    impact: '文件内容仍在开发空间中；平台没有 reset、清理或删除文件。',
+    requiredAction: '请根据 Git 提示修正后，用完全相同的送审请求重试。',
+  },
+  PUSH_FAILED: {
+    status: 200,
+    message: '本地成果已经保存，但尚未送达远端。',
+    impact: '本地提交保持完整；平台没有回退或重写历史。',
+    requiredAction: '请检查网络或远端权限后，用完全相同的送审请求重试。',
+  },
+  SOURCE_MOVED: {
+    status: 409,
+    message: '开发空间在送审过程中又产生了新的提交。',
+    impact: '平台没有覆盖或回退这些变化。',
+    requiredAction: '请核对当前成果后，重新发起一次新的送审。',
+  },
+  SOURCE_CHANGED_AFTER_SAVE: {
+    status: 409,
+    message: '本地保存后开发空间又发生了变化。',
+    impact: '已保存的提交和新增改动都保留，平台没有覆盖任何内容。',
+    requiredAction: '请核对新增改动，再重新发起送审。',
+  },
+  SOURCE_HISTORY_DIVERGED: {
+    status: 409,
+    message: '开发分支已经偏离创建时的基础版本。',
+    impact: '平台没有 rebase、reset 或改写历史。',
+    requiredAction: '请人工检查分支历史后决定如何处理。',
+  },
+  SUBMIT_FAILED: {
+    status: 503,
+    message: '本次送审未能完成。',
+    impact: '平台没有自动清理、回退或覆盖代码。',
+    requiredAction: '请查看开发空间状态并重试；若持续失败，请人工核对 Git 状态。',
+  },
 };
 
 function id(prefix, value) {
@@ -673,6 +758,27 @@ function validateMcpProgressBody(body) {
     const error = new Error('Invalid progress request.');
     error.code = 'INVALID_REQUEST';
     throw error;
+  }
+}
+
+function validateMcpSubmitBody(body) {
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'summary');
+  if (!Number.isInteger(body.expectedRevision)
+    || body.expectedRevision < 1
+    || body.summary.length > 160) {
+    const error = new Error('Invalid submit request.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  const allowedKeys = new Set(['sessionId', 'clientRequestId', 'expectedRevision', 'summary']);
+  for (const key of Object.keys(body)) {
+    if (!allowedKeys.has(key)) {
+      const error = new Error(`Unexpected submit property: ${key}`);
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
   }
 }
 
@@ -1863,6 +1969,33 @@ export async function createCockpitHttpServer({
         else sendError(response, result.code, {
           extra: { session_id: body.sessionId, revision: result.revision ?? null },
         });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit') {
+        const body = await readJson(request);
+        validateMcpSubmitBody(body);
+        const result = await submitDevelopmentSpace(db, {
+          commandId: id('mcp_submit', `${body.sessionId}:${body.clientRequestId}`),
+          sessionId: body.sessionId,
+          expectedRevision: body.expectedRevision,
+          summary: body.summary,
+        }, { faultInjector });
+        if (result.ok) {
+          sendJson(response, 200, result);
+        } else {
+          sendError(response, result.code, {
+            extra: {
+              sessionId: body.sessionId,
+              revision: body.expectedRevision,
+              localSaved: Boolean(result.localSaved),
+              pushed: Boolean(result.pushed),
+              retryable: Boolean(result.retryable),
+              sourceCommit: result.sourceCommit ?? null,
+              submissionId: result.submissionId ?? null,
+            },
+          });
+        }
         return;
       }
 

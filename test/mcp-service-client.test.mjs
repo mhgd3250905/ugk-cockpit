@@ -26,20 +26,28 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
   });
   assert.equal(calls[1].url, 'http://127.0.0.1:41737/api/v1/mcp/work/begin');
 
+  const submitArguments = {
+    sessionId: 'session-1', clientRequestId: 'request-submit', expectedRevision: 2,
+    summary: '完成开发空间功能',
+  };
+  await handlers.ugk_work_submit(submitArguments);
+  assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/work/submit');
+  assert.deepEqual(JSON.parse(calls[2].options.body), submitArguments);
+
   await handlers.ugk_work_handoff({
     sessionId: 'session-1', clientRequestId: 'request-3', expectedRevision: 1,
     outcome: 'completed', nextSessionFocus: '等待安排', summary: 'done',
     currentState: 'clean', completedItems: [], pendingItems: [], decisions: [],
     artifactRefs: [], risks: [], suggestedSkills: [],
   });
-  assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/work/handoff');
+  assert.equal(calls[3].url, 'http://127.0.0.1:41737/api/v1/mcp/work/handoff');
 
   await handlers.ugk_work_init({
     initCode: 'init-code', clientRequestId: 'request-4',
     currentTask: '继续现有开发', currentState: '功能完成一半',
   });
-  assert.equal(calls[3].url, 'http://127.0.0.1:41737/api/v1/mcp/work/init');
-  assert.deepEqual(JSON.parse(calls[3].options.body), {
+  assert.equal(calls[4].url, 'http://127.0.0.1:41737/api/v1/mcp/work/init');
+  assert.deepEqual(JSON.parse(calls[4].options.body), {
     initCode: 'init-code',
     clientRequestId: 'request-4',
     currentTask: '继续现有开发',

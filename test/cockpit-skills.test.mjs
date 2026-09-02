@@ -11,11 +11,12 @@ import {
 
 const repositoryRoot = path.resolve('.');
 
-test('Cockpit skill packages expose the five approved user actions', () => {
+test('Cockpit skill packages expose the six approved user actions', () => {
   assert.deepEqual(COCKPIT_SKILL_NAMES, [
     'cockpit-init',
     'cockpit-progress',
     'cockpit-relay',
+    'cockpit-submit',
     'cockpit-closeout',
     'cockpit-handoff',
   ]);
@@ -29,6 +30,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
   const expectedTools = new Map([
     ['cockpit-init', ['ugk_work_init']],
     ['cockpit-progress', ['ugk_work_progress']],
+    ['cockpit-submit', ['ugk_work_submit']],
     ['cockpit-relay', ['ugk_work_relay', 'ugk_work_resume']],
     ['cockpit-closeout', ['ugk_work_progress']],
     ['cockpit-handoff', ['ugk_work_handoff']],
@@ -44,7 +46,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
 });
 
 test('only progress may be selected implicitly', () => {
-  for (const name of ['cockpit-init', 'cockpit-relay', 'cockpit-closeout', 'cockpit-handoff']) {
+  for (const name of ['cockpit-init', 'cockpit-submit', 'cockpit-relay', 'cockpit-closeout', 'cockpit-handoff']) {
     const metadata = readFileSync(
       path.join(repositoryRoot, 'skills', name, 'agents', 'openai.yaml'),
       'utf8',
@@ -56,6 +58,24 @@ test('only progress may be selected implicitly', () => {
     'utf8',
   );
   assert.match(progressMetadata, /allow_implicit_invocation:\s*true/);
+});
+
+test('cockpit-submit is explicit, MCP-only, idempotent, and reports partial push state', () => {
+  const instructions = readFileSync(
+    path.join(repositoryRoot, 'skills', 'cockpit-submit', 'SKILL.md'),
+    'utf8',
+  );
+  assert.match(instructions, /只能由用户显式调用/);
+  assert.match(instructions, /ugk_work_submit/);
+  assert.match(instructions, /sessionId/);
+  assert.match(instructions, /clientRequestId/);
+  assert.match(instructions, /expectedRevision/);
+  assert.match(instructions, /summary/);
+  assert.match(instructions, /同一个 `clientRequestId`/);
+  assert.match(instructions, /localSaved/);
+  assert.match(instructions, /pushed/);
+  assert.match(instructions, /不得自行执行 `git add`、`git commit`、`git push`/);
+  assert.doesNotMatch(instructions, /"path"|"projectId"|"worktreeId"|"branch"|"remote"|"token"/);
 });
 
 test('completed handoff explicitly accompanies closeout without requiring a second skill invocation', () => {

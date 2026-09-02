@@ -68,6 +68,7 @@ export function createServiceHandlers({
   return {
     ugk_work_accept: (arguments_) => call('/api/v1/mcp/work/accept', arguments_),
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
+    ugk_work_submit: (arguments_) => call('/api/v1/mcp/work/submit', arguments_),
     ugk_work_finish: (arguments_) => call('/api/v1/mcp/work/finish', arguments_),
     ugk_work_handoff: (arguments_) => call('/api/v1/mcp/work/handoff', arguments_),
     ugk_work_init: (arguments_) => call('/api/v1/mcp/work/init', {
