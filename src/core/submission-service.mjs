@@ -328,14 +328,17 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
         const dirty = await (options.hasUncommittedChanges ?? hasUncommittedChanges)(context.canonicalPath);
         if (dirty) {
           try {
-            await (options.ensureLocalCommitIdentity ?? ensureLocalCommitIdentity)(context.canonicalPath);
+            const identity = await (options.ensureLocalCommitIdentity ?? ensureLocalCommitIdentity)(context.canonicalPath);
             await (options.stageAllChanges ?? stageAllChanges)(context.canonicalPath);
             await (options.createSubmissionCommit ?? createSubmissionCommit)(context.canonicalPath, {
               summary,
               commandId,
+              authorName: identity?.name,
+              authorEmail: identity?.email,
             });
           } catch (error) {
-            return retryableAttemptError(db, attempt, 'COMMIT_FAILED', error.message, {}, options);
+            const code = error?.code === 'COMMIT_IDENTITY_MISSING' ? error.code : 'COMMIT_FAILED';
+            return retryableAttemptError(db, attempt, code, error.message, {}, options);
           }
           await options.faultInjector?.('after_commit_before_persist');
           const metadata = await (options.readHeadMetadata ?? readHeadMetadata)(context.canonicalPath);

@@ -35,9 +35,12 @@ export function safeGitEnvironment() {
   return environment;
 }
 
-export async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0] } = {}) {
+export async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0], config = [] } = {}) {
+  const configArgs = Array.isArray(config)
+    ? config
+    : Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${value}`]);
   try {
-    const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...await remoteAuthArguments(args), ...args], {
+    const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...await remoteAuthArguments(args), ...configArgs, ...args], {
       cwd,
       timeout: timeoutMs,
       maxBuffer,

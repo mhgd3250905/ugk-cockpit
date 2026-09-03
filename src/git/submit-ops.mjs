@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { git } from './probe.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -57,23 +60,47 @@ export async function stageAllChanges(worktreePath, overrides = {}) {
   await git(worktreePath, ['add', '--all'], options(overrides));
 }
 
-export async function ensureLocalCommitIdentity(worktreePath, overrides = {}) {
+export async function ensureLocalCommitIdentity(worktreePath, { globalConfigPath = process.env.GIT_CONFIG_GLOBAL || path.join(os.homedir(), '.gitconfig'), ...overrides } = {}) {
   const gitOptions = { ...options(overrides), acceptExitCodes: [0, 1] };
   const [name, email] = await Promise.all([
     git(worktreePath, ['config', '--local', '--get', 'user.name'], gitOptions),
     git(worktreePath, ['config', '--local', '--get', 'user.email'], gitOptions),
   ]);
-  if (!name.stdout || !email.stdout) {
-    const error = new Error('This repository has no local Git author name and email configured.');
+
+  let authorName = name.stdout?.trim();
+  let authorEmail = email.stdout?.trim();
+
+  if (!authorName && existsSync(globalConfigPath)) {
+    const globalName = await git(worktreePath, ['config', '--file', globalConfigPath, '--no-includes', '--get', 'user.name'], gitOptions);
+    authorName = globalName.stdout?.trim();
+  }
+  if (!authorEmail && existsSync(globalConfigPath)) {
+    const globalEmail = await git(worktreePath, ['config', '--file', globalConfigPath, '--no-includes', '--get', 'user.email'], gitOptions);
+    authorEmail = globalEmail.stdout?.trim();
+  }
+
+  authorName = authorName || process.env.GIT_AUTHOR_NAME || process.env.GIT_COMMITTER_NAME;
+  authorEmail = authorEmail || process.env.GIT_AUTHOR_EMAIL || process.env.GIT_COMMITTER_EMAIL;
+
+  if (!authorName || !authorEmail || /[\r\n\0]/.test(authorName) || /[\r\n\0]/.test(authorEmail)) {
+    const error = new Error('This repository has no Git author name and email configured.');
     error.code = 'COMMIT_IDENTITY_MISSING';
     throw error;
   }
-  return { name: name.stdout, email: email.stdout };
+  return { name: authorName, email: authorEmail };
 }
 
-export async function createSubmissionCommit(worktreePath, { summary, commandId, ...overrides }) {
+export async function createSubmissionCommit(worktreePath, { summary, commandId, authorName, authorEmail, ...overrides }) {
   const trailer = `UGK-Cockpit-Command: ${commandId}`;
-  await git(worktreePath, ['commit', '--no-gpg-sign', '-m', summary, '-m', trailer], options(overrides));
+  const config = [];
+  if (authorName && authorEmail) {
+    config.push('-c', `user.name=${authorName}`, '-c', `user.email=${authorEmail}`);
+  }
+  await git(
+    worktreePath,
+    ['commit', '--no-gpg-sign', '-m', summary, '-m', trailer],
+    { ...options(overrides), config },
+  );
 }
 
 export async function readHeadMetadata(worktreePath, overrides = {}) {

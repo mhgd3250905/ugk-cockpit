@@ -32,9 +32,16 @@ export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
         createdAt: new Date().toISOString(),
       }), 'utf8');
       fsyncSync(fd);
+      let released = false;
       return {
         release() {
-          closeSync(fd);
+          if (released) return;
+          released = true;
+          try {
+            closeSync(fd);
+          } catch (error) {
+            if (error?.code !== 'EBADF') throw error;
+          }
           try {
             const current = JSON.parse(readFileSync(lockPath, 'utf8'));
             if (current.ownerToken === ownerToken) unlinkSync(lockPath);

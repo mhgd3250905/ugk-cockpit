@@ -1,5 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -8,6 +9,9 @@ const MIME = new Map([
   ['.svg', 'image/svg+xml'],
   ['.png', 'image/png'],
 ]);
+
+const SOURCE_WEB_ROOT = fileURLToPath(new URL('../../web', import.meta.url));
+const SOURCE_PUBLIC_ROOT = fileURLToPath(new URL('../../web/public', import.meta.url));
 
 function securityHeaders(contentType) {
   return {
@@ -19,6 +23,39 @@ function securityHeaders(contentType) {
   };
 }
 
+async function resolveAssetCandidate(webRoot, relativePath) {
+  try {
+    const root = await realpath(webRoot);
+    const candidate = await realpath(path.join(root, relativePath));
+    const relative = path.relative(root, candidate);
+    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return candidate;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+
+  try {
+    if (relativePath === 'index.html') {
+      const root = await realpath(SOURCE_WEB_ROOT);
+      const candidate = await realpath(path.join(root, 'index.html'));
+      return candidate;
+    }
+    if (relativePath.startsWith('assets/')) {
+      const root = await realpath(SOURCE_PUBLIC_ROOT);
+      const candidate = await realpath(path.join(root, relativePath));
+      const relative = path.relative(root, candidate);
+      if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+        return candidate;
+      }
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+
+  return null;
+}
+
 export async function serveWebAsset({ request, response, pathname, webRoot, sessionToken }) {
   if (request.method !== 'GET') return false;
   let relativePath;
@@ -26,11 +63,10 @@ export async function serveWebAsset({ request, response, pathname, webRoot, sess
   else if (/^\/assets\/[a-zA-Z0-9._-]+$/.test(pathname)) relativePath = pathname.slice(1);
   else return false;
 
+  const candidate = await resolveAssetCandidate(webRoot, relativePath);
+  if (!candidate) return false;
+
   try {
-    const root = await realpath(webRoot);
-    const candidate = await realpath(path.join(root, relativePath));
-    const relative = path.relative(root, candidate);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
     const body = await readFile(candidate);
     const headers = {
       ...securityHeaders(MIME.get(path.extname(candidate)) ?? 'application/octet-stream'),
@@ -47,3 +83,4 @@ export async function serveWebAsset({ request, response, pathname, webRoot, sess
     throw error;
   }
 }
+
