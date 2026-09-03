@@ -79,11 +79,3 @@ export function timelineCurveSourceY(targetY, railEndY, preferredDrop = 28) {
   if (availableDrop <= 0) return null;
   return targetY + Math.min(preferredDrop, availableDrop);
 }
-
-export function timelineConnectorEnd(pointX, railWidth) {
-  return Math.max(pointX + 7, railWidth - 8);
-}
-
-export function timelineEntryNodeOffset(entryKind) {
-  return entryKind === 'origin' || entryKind === 'origin-continuation' ? 15 : 21;
-}

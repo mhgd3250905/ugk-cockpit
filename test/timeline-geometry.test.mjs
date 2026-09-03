@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  timelineConnectorEnd,
   timelineCurveGeometry,
   timelineCurveSourceY,
-  timelineEntryNodeOffset,
   timelineRailEndY,
 } from '../web/src/timeline-geometry.mjs';
 
@@ -100,16 +98,4 @@ test('timeline curve source endpoint stays on the available older rail segment',
   assert.equal(timelineCurveSourceY(120, 180, 14), 134);
   assert.equal(timelineCurveSourceY(120, 126, 14), 126);
   assert.equal(timelineCurveSourceY(120, 120, 14), null);
-});
-
-test('timeline connectors never run backwards from the rightmost rail', () => {
-  assert.equal(timelineConnectorEnd(121, 132), 128);
-  assert.equal(timelineConnectorEnd(125, 132), 132);
-  assert.ok(timelineConnectorEnd(125, 132) >= 125 + 7);
-});
-
-test('timeline continuation origins share the source-node geometry', () => {
-  assert.equal(timelineEntryNodeOffset('origin'), 15);
-  assert.equal(timelineEntryNodeOffset('origin-continuation'), 15);
-  assert.equal(timelineEntryNodeOffset('event'), 21);
 });

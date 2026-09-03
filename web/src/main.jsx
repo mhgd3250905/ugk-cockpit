@@ -3,10 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { createApiClient } from './api.js';
 import { SUBMIT_MESSAGE, deliveryStatusLabel } from './delivery-view.mjs';
 import {
-  timelineConnectorEnd,
   timelineCurvePath,
   timelineCurveSourceY,
-  timelineEntryNodeOffset,
   timelineRailEndY,
 } from './timeline-geometry.mjs';
 import './styles.css';
@@ -1626,32 +1624,30 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
     if (entry.entryKind === 'origin') {
       const childX = geometry.laneX.get(lane.key);
       const sourceX = mainLane ? geometry.laneX.get(mainLane.key) : null;
-      if (childX === undefined || sourceX === undefined || childX === sourceX) continue;
-      const sourceY = timelineCurveSourceY(
-        point.y,
-        geometry.railEndY.get(mainLane.key) ?? Math.max(3, geometry.height - 3),
-      );
-      const path = timelineCurvePath({
-        sourceX,
-        targetX: childX,
-        sourceY,
-        targetY: point.y,
-      });
-      if (path) {
-        paths.push(
-          <path
-            key={`origin:${entry.laneKey}`}
-            className="timeline-graph-origin"
-            d={path}
-            stroke={lane.color}
-            style={{ opacity: focusedLaneKey && focusedLaneKey !== lane.key && focusedLaneKey !== mainLane?.key ? 0.24 : 1 }}
-          />,
+      if (childX !== undefined && sourceX !== undefined && childX !== sourceX) {
+        const sourceY = timelineCurveSourceY(
+          point.y,
+          geometry.railEndY.get(mainLane.key) ?? Math.max(3, geometry.height - 3),
         );
+        const path = timelineCurvePath({
+          sourceX,
+          targetX: childX,
+          sourceY,
+          targetY: point.y,
+        });
+        if (path) {
+          paths.push(
+            <path
+              key={`origin:${entry.laneKey}`}
+              className="timeline-graph-origin"
+              d={path}
+              stroke={lane.color}
+              style={{ opacity: focusOpacity(lane.key) }}
+            />,
+          );
+        }
       }
-      continue;
-    }
-
-    if (entry.kind === 'integration' && entry.sourceLaneKey) {
+    } else if (entry.kind === 'integration' && entry.sourceLaneKey) {
       const sourceLane = laneByKey.get(entry.sourceLaneKey);
       const targetX = geometry.laneX.get(entry.laneKey);
       const sourceX = geometry.laneX.get(entry.sourceLaneKey);
@@ -1673,21 +1669,28 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
               className="timeline-graph-integration"
               d={path}
               stroke={sourceLane.color}
-              style={{ opacity: focusedLaneKey && focusedLaneKey !== entry.laneKey && focusedLaneKey !== entry.sourceLaneKey ? 0.28 : 1 }}
+              style={{ opacity: focusOpacity(sourceLane.key) }}
             />,
           );
         }
       }
     }
 
-    const connectorEnd = timelineConnectorEnd(point.x, geometry.railWidth);
+    const connectorEnd = geometry.connectorEndX.get(timelineEntryKey(entry));
+    if (!Number.isFinite(connectorEnd) || connectorEnd <= point.x) continue;
     paths.push(
       <path
         key={`connector:${timelineEntryKey(entry)}`}
         className={`timeline-graph-connector${entry.entryKind === 'origin-continuation' ? ' timeline-graph-continuation' : ''}`}
-        d={`M ${point.x + 7} ${point.y} H ${connectorEnd}`}
-        stroke="var(--timeline-connector)"
-        style={{ opacity: focusOpacity(entry.laneKey) * 0.68 }}
+        d={`M ${point.x} ${point.y} H ${connectorEnd}`}
+        style={{
+          '--timeline-connector-color': focusedLaneKey === lane.key
+            ? lane.color
+            : 'var(--timeline-connector)',
+          opacity: focusedLaneKey
+            ? (focusedLaneKey === entry.laneKey ? 0.9 : 0.55)
+            : 0.75,
+        }}
       />,
     );
   }
@@ -1717,18 +1720,25 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
       const rootRect = history.getBoundingClientRect();
       const railWidth = timelineRailWidth(lanes.length, history.clientWidth);
       const points = new Map();
+      const connectorEndX = new Map();
       for (const entry of entries) {
         const row = rowRefs.current.get(timelineEntryKey(entry));
         if (!row) continue;
-        const rowRect = row.getBoundingClientRect();
+        const article = row.querySelector('article');
+        if (!article) continue;
+        const articleRect = article.getBoundingClientRect();
         points.set(timelineEntryKey(entry), {
           x: timelineLaneX(
             lanes.find((lane) => lane.key === entry.laneKey) || lanes[0],
             lanes.length,
             railWidth,
           ),
-          y: rowRect.top - rootRect.top + timelineEntryNodeOffset(entry.entryKind),
+          y: articleRect.top - rootRect.top + articleRect.height / 2,
         });
+        connectorEndX.set(
+          timelineEntryKey(entry),
+          articleRect.left - rootRect.left,
+        );
       }
       const railEndY = new Map(lanes.map((lane) => {
         const originEntry = entries.find((entry) => (
@@ -1748,6 +1758,7 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
         laneX: new Map(lanes.map((lane) => [lane.key, timelineLaneX(lane, lanes.length, railWidth)])),
         railEndY,
         points,
+        connectorEndX,
       });
     };
 

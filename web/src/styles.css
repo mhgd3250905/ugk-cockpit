@@ -1145,8 +1145,8 @@ summary:focus-visible {
 }
 
 @keyframes timeline-node-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes detail-loading-sheen {
@@ -1612,7 +1612,7 @@ summary:focus-visible {
 }
 
 .timeline-graph-connector {
-  stroke: var(--timeline-connector);
+  stroke: var(--timeline-connector-color, var(--timeline-connector));
   stroke-width: 1px;
 }
 
@@ -1651,7 +1651,6 @@ summary:focus-visible {
   border: 2px solid var(--timeline-lane-color);
   border-radius: 50%;
   background: var(--surface-app);
-  box-shadow: 0 0 0 4px var(--surface-app);
   transition: transform 0.14s ease-out, background-color 0.14s ease-out;
 }
 
