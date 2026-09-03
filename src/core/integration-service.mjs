@@ -75,6 +75,8 @@ function readMainBinding(db, sessionId, expectedRevision) {
       sessionId,
       expectedRevision,
       currentRevision: context.revision,
+      currentSessionRevision: context.revision,
+      expectedSessionRevision: expectedRevision,
     };
   }
   const project = db.prepare(`
@@ -112,6 +114,28 @@ function validateTextList(value, limit = 20) {
   return Array.isArray(value)
     && value.length <= limit
     && value.every((item) => typeof item === 'string' && item.trim() && item.length <= 500);
+}
+
+function reviewResponseForSession(response, request) {
+  if (!response || response.ok !== true) return response;
+  // The core journal stores its durable response without session-only
+  // presentation fields.  Reconstruct the same high-level response on a
+  // replay so a successful retry is the original review receipt, not a new
+  // authorization or a second verdict write.
+  return {
+    ok: true,
+    sessionId: request.sessionId,
+    revision: request.expectedRevision,
+    submissionId: request.submissionId,
+    submissionRevision: response.submissionRevision ?? response.submission?.revision ?? null,
+    claimId: request.claimId,
+    claimRevision: response.claimRevision ?? response.revision,
+    verdict: response.verdict,
+    summary: response.summary,
+    findings: request.findings,
+    checks: request.checks,
+    status: response.verdict,
+  };
 }
 
 export async function beginIntegrationReview(db, request = {}, options = {}) {
@@ -161,6 +185,8 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
     submissionId,
     claimant: `session:${sessionId}`,
     expectedSubmissionRevision,
+    sessionId,
+    expectedSessionRevision: expectedRevision,
   }, options);
   if (!claimed.ok) return claimed;
   const refreshed = readSubmission(db, submissionId);
@@ -210,36 +236,106 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
     || !validateTextList(findings) || !validateTextList(checks)) {
     return { ok: false, code: 'INVALID_REQUEST' };
   }
+
+  // Journal the exact review payload before any potentially long probe.  This
+  // makes a retry with the same clientRequestId return the original result
+  // even if the session/repository has since moved; a changed payload still
+  // raises COMMAND_CONFLICT through beginCommand.  The claim's immutable
+  // bindings reproduce the historical core journal request and avoid putting
+  // a wall-clock value into its digest.
+  const claimForJournal = db.prepare(`
+    SELECT source_commit, target_head, target_worktree_id
+    FROM integration_claims WHERE id = ?
+  `).get(claimId);
+  const existingReviewCommand = db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
+  let existingReviewRequest = null;
+  if (existingReviewCommand?.kind === 'integration.review' && existingReviewCommand.request_json) {
+    try { existingReviewRequest = JSON.parse(existingReviewCommand.request_json); } catch { existingReviewRequest = null; }
+  }
+  // Commands written before the high-level binding fields were added must be
+  // replayed through the old core shape only after the current request passes
+  // session/submission checks.  Never treat such a legacy row as proof that a
+  // different session or submission is the same request.
+  const legacyReviewCommand = Boolean(existingReviewCommand?.kind === 'integration.review'
+    && existingReviewRequest
+    && (existingReviewRequest.sessionId === undefined
+      || existingReviewRequest.submissionId === undefined
+      || existingReviewRequest.expectedSessionRevision === undefined));
+  const reviewJournalRequest = {
+    commandId,
+    claimId,
+    expectedClaimRevision,
+    verdict,
+    summary,
+    payload: { findings, checks, reviewedBySessionId: sessionId },
+    sessionId,
+    submissionId,
+    expectedSessionRevision: expectedRevision,
+    ...(claimForJournal ? {
+      sourceCommit: claimForJournal.source_commit,
+      targetHead: claimForJournal.target_head,
+      targetWorktreeId: claimForJournal.target_worktree_id,
+    } : {}),
+  };
+  if (!legacyReviewCommand) {
+    const begun = beginCommand(db, {
+      commandId,
+      kind: 'integration.review',
+      request: reviewJournalRequest,
+    });
+    if (begun.command.state === 'committed' || begun.command.state === 'failed') {
+      return reviewResponseForSession(parseCommandResponse(begun.command), {
+        sessionId, submissionId, claimId, expectedRevision, findings, checks,
+      });
+    }
+  }
+
   const binding = readMainBinding(db, sessionId, expectedRevision);
-  if (!binding.ok) return binding;
+  if (!binding.ok) return failCommand(db, commandId, binding, options);
   const submission = readSubmission(db, submissionId);
   const claim = readIntegrationClaim(db, claimId);
-  if (!submission) return { ok: false, code: 'SUBMISSION_NOT_FOUND' };
-  if (!claim) return { ok: false, code: 'CLAIM_NOT_FOUND' };
+  if (!submission) return failCommand(db, commandId, { ok: false, code: 'SUBMISSION_NOT_FOUND' }, options);
+  if (!claim) return failCommand(db, commandId, { ok: false, code: 'CLAIM_NOT_FOUND' }, options);
   if (submission.projectId !== binding.context.projectId || claim.submissionId !== submissionId) {
-    return { ok: false, code: 'INTEGRATION_BINDING_MISMATCH' };
+    return failCommand(db, commandId, { ok: false, code: 'INTEGRATION_BINDING_MISMATCH' }, options);
   }
-  if (claim.claimant !== `session:${sessionId}`) return { ok: false, code: 'CLAIMANT_MISMATCH' };
-  if (claim.status !== 'active') return { ok: false, code: 'CLAIM_NOT_ACTIVE' };
-  if (claim.expiresAt <= Date.parse(timestamp(options))) return { ok: false, code: 'CLAIM_EXPIRED' };
+  if (claim.claimant !== `session:${sessionId}`) {
+    return failCommand(db, commandId, { ok: false, code: 'CLAIMANT_MISMATCH' }, options);
+  }
+  if (claim.status !== 'active') {
+    return failCommand(db, commandId, { ok: false, code: 'CLAIM_NOT_ACTIVE' }, options);
+  }
   let main;
   try {
     main = await probeMain(binding.project, options);
   } catch (error) {
-    return { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' };
+    return failCommand(db, commandId, { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' }, options);
   }
   if (submission.delivery?.sourceId) {
-    if (verdict === 'approved' && submission.delivery.relation === 'conflict') return { ok: false, code: 'DELIVERY_MERGE_CONFLICT' };
+    if (verdict === 'approved' && submission.delivery.relation === 'conflict') {
+      return failCommand(db, commandId, { ok: false, code: 'DELIVERY_MERGE_CONFLICT' }, options);
+    }
     try { await verifyReviewDelivery(submission, binding.project); }
-    catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+    catch (error) {
+      return failCommand(db, commandId, { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }, options);
+    }
   } else {
-    if (main.after.branch !== submission.targetBranch) return { ok: false, code: 'MAIN_BRANCH_CHANGED' };
-    if (main.after.head !== submission.targetHead) return { ok: false, code: 'TARGET_HEAD_STALE' };
+    if (main.after.branch !== submission.targetBranch) {
+      return failCommand(db, commandId, { ok: false, code: 'MAIN_BRANCH_CHANGED' }, options);
+    }
+    if (main.after.head !== submission.targetHead) {
+      return failCommand(db, commandId, { ok: false, code: 'TARGET_HEAD_STALE' }, options);
+    }
   }
 
   const result = recordIntegrationReview(db, {
     commandId,
     claimId,
+    ...(!legacyReviewCommand ? {
+      sessionId,
+      submissionId,
+      expectedSessionRevision: expectedRevision,
+    } : {}),
     expectedClaimRevision,
     verdict,
     summary,
@@ -250,20 +346,9 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
   }, options);
   if (!result.ok) return result;
   if (submission.delivery?.reviewCache) discardDeliveryCache(submission.delivery.reviewCache);
-  return {
-    ok: true,
-    sessionId,
-    revision: expectedRevision,
-    submissionId,
-    submissionRevision: result.submission.revision,
-    claimId,
-    claimRevision: result.revision,
-    verdict,
-    summary,
-    findings,
-    checks,
-    status: verdict,
-  };
+  return reviewResponseForSession(result, {
+    sessionId, submissionId, claimId, expectedRevision, findings, checks,
+  });
 }
 
 function mapAttempt(row) {
@@ -361,7 +446,16 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       return failCommand(db, commandId, { ok: false, code: 'REVIEW_APPROVAL_REQUIRED' }, options);
     }
     if (submission.revision !== expectedSubmissionRevision || claim.revision !== expectedClaimRevision) {
-      return failCommand(db, commandId, { ok: false, code: 'INTEGRATION_REVISION_CONFLICT' }, options);
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'INTEGRATION_REVISION_CONFLICT',
+        submissionId,
+        claimId,
+        currentSubmissionRevision: submission.revision,
+        expectedSubmissionRevision,
+        currentClaimRevision: claim.revision,
+        expectedClaimRevision,
+      }, options);
     }
     if (claim.claimant !== `session:${sessionId}` || claim.status !== 'active') {
       return failCommand(db, commandId, { ok: false, code: 'CLAIM_NOT_ACTIVE' }, options);
@@ -411,7 +505,17 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
         const latestClaim = readIntegrationClaim(db, claimId);
         if (latestSubmission.status !== 'approved' || latestSubmission.revision !== expectedSubmissionRevision
           || latestClaim?.status !== 'active' || latestClaim?.revision !== expectedClaimRevision) {
-          return { ok: false, code: 'INTEGRATION_REVISION_CONFLICT' };
+          return {
+            ok: false,
+            code: 'INTEGRATION_REVISION_CONFLICT',
+            submissionId,
+            claimId,
+            currentSubmissionRevision: latestSubmission.revision,
+            expectedSubmissionRevision,
+            currentClaimRevision: latestClaim?.revision ?? null,
+            expectedClaimRevision,
+            status: latestSubmission.status,
+          };
         }
         if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
         try { await importReviewedDelivery(latestSubmission, binding.project); }

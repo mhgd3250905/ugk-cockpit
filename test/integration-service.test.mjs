@@ -11,7 +11,7 @@ import {
   readIntegrationAttempt,
   recordSessionIntegrationReview,
 } from '../src/core/integration-service.mjs';
-import { readSubmission } from '../src/core/integrations.mjs';
+import { claimSubmission, readIntegrationClaim, readSubmission } from '../src/core/integrations.mjs';
 import { registerProject, worktreeIdFor } from '../src/core/projects.mjs';
 import { startWriteRun } from '../src/core/runs.mjs';
 import { createDevelopmentSpace, readDevelopmentSpace } from '../src/core/spaces.mjs';
@@ -151,6 +151,23 @@ async function approve(f) {
 test('main session claims, reviews, fast-forwards, pushes, receipts, and replays idempotently', async (t) => {
   const f = await fixture(t);
   const { begun, reviewed } = await approve(f);
+  const reviewReplay = await recordSessionIntegrationReview(f.db, {
+    commandId: 'record-review',
+    sessionId: 'session-main',
+    submissionId: f.submissionId,
+    claimId: begun.claimId,
+    expectedRevision: 2,
+    expectedClaimRevision: begun.claimRevision,
+    verdict: 'approved',
+    summary: '审核通过',
+    findings: [],
+    checks: ['tests passed'],
+  }, {
+    // A committed review replay must not probe or submit a second verdict.
+    probe: async () => { throw new Error('review replay unexpectedly probed'); },
+  });
+  assert.deepEqual(reviewReplay, reviewed);
+  assert.equal(readSubmission(f.db, f.submissionId).activeClaim.revision, 1);
   const request = {
     commandId: 'merge-approved',
     sessionId: 'session-main',
@@ -171,6 +188,98 @@ test('main session claims, reviews, fast-forwards, pushes, receipts, and replays
   assert.equal(readDevelopmentSpace(f.db, f.spaceId).status, 'cleanup_ready');
   assert.deepEqual(await mergeApprovedSubmission(f.db, request), merged);
   assert.equal(f.db.prepare('SELECT count(*) AS count FROM integration_receipts').get().count, 1);
+});
+
+test('review replay binds session and submission fields to the command id', async (t) => {
+  const f = await fixture(t);
+  const { begun } = await approve(f);
+  const base = {
+    commandId: 'record-review',
+    sessionId: 'session-main',
+    submissionId: f.submissionId,
+    claimId: begun.claimId,
+    expectedRevision: 2,
+    expectedClaimRevision: begun.claimRevision,
+    verdict: 'approved',
+    summary: '审核通过',
+    findings: [],
+    checks: ['tests passed'],
+  };
+  await assert.rejects(
+    recordSessionIntegrationReview(f.db, { ...base, submissionId: 'different-submission' }),
+    (error) => error.code === 'COMMAND_CONFLICT',
+  );
+  await assert.rejects(
+    recordSessionIntegrationReview(f.db, { ...base, expectedRevision: 3 }),
+    (error) => error.code === 'COMMAND_CONFLICT',
+  );
+  assert.equal(readSubmission(f.db, f.submissionId).activeClaim.revision, 1);
+});
+
+test('legacy active claim journal replay remains valid without exposing its old deadline', async (t) => {
+  const f = await fixture(t);
+  const commandId = 'legacy-begin-review';
+  const legacyClaim = claimSubmission(f.db, {
+    commandId,
+    submissionId: f.submissionId,
+    claimant: 'session:session-main',
+    expectedSubmissionRevision: 0,
+  }, { clock: () => Date.parse('2026-09-02T01:00:00.000Z') });
+  assert.equal(legacyClaim.ok, true, JSON.stringify(legacyClaim));
+
+  // Emulate an alpha.29 journal/row: the claim remains active although its
+  // historical timestamp is already in the past, and response_json still
+  // contains the old numeric expiry fields.
+  const oldDeadline = Date.parse('2026-09-02T01:05:00.000Z');
+  f.db.prepare('UPDATE integration_claims SET expires_at = ? WHERE id = ?')
+    .run(oldDeadline, legacyClaim.claimId);
+  const command = f.db.prepare('SELECT response_json FROM commands WHERE id = ?').get(commandId);
+  const oldResponse = JSON.parse(command.response_json);
+  oldResponse.expiresAt = oldDeadline;
+  oldResponse.expiresAtIso = new Date(oldDeadline).toISOString();
+  oldResponse.claim.expiresAt = oldDeadline;
+  oldResponse.claim.expiresAtIso = new Date(oldDeadline).toISOString();
+  f.db.prepare('UPDATE commands SET response_json = ? WHERE id = ?')
+    .run(JSON.stringify(oldResponse), commandId);
+
+  const replay = await beginIntegrationReview(f.db, {
+    commandId,
+    sessionId: 'session-main',
+    submissionId: f.submissionId,
+    expectedRevision: 2,
+    expectedSubmissionRevision: 0,
+  }, { clock: () => Date.parse('2026-09-05T01:00:00.000Z') });
+  assert.equal(replay.ok, true, JSON.stringify(replay));
+  assert.equal(replay.expiresAt, null);
+  assert.equal(readIntegrationClaim(f.db, legacyClaim.claimId).status, 'active');
+  assert.equal(readIntegrationClaim(f.db, legacyClaim.claimId).expiresAt, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM integration_claims').get().count, 1);
+});
+
+test('begin command binds the main-session revision as well as the submission revision', async (t) => {
+  const f = await fixture(t);
+  const request = {
+    commandId: 'begin-session-revision-binding',
+    sessionId: 'session-main',
+    submissionId: f.submissionId,
+    expectedRevision: 2,
+    expectedSubmissionRevision: 0,
+  };
+  const begun = await beginIntegrationReview(f.db, request);
+  assert.equal(begun.ok, true, JSON.stringify(begun));
+
+  // The fixture intentionally seeds the main assignment at revision 2 while
+  // its minimal run starts at revision 1. Advance both records to model a
+  // later session update without introducing another workflow dependency.
+  f.db.prepare('UPDATE assignments SET revision = 3 WHERE session_id = ?').run('session-main');
+  f.db.prepare('UPDATE runs SET revision = 3 WHERE id = ?').run('session-main');
+
+  await assert.rejects(
+    beginIntegrationReview(f.db, { ...request, expectedRevision: 3 }),
+    (error) => error.code === 'COMMAND_CONFLICT',
+  );
+  assert.equal(readSubmission(f.db, f.submissionId).activeClaim.claimant, 'session:session-main');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM integration_claims').get().count, 1);
 });
 
 test('main push failure preserves local integration and the same command resumes only push', async (t) => {

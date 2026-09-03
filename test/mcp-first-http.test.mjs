@@ -564,6 +564,9 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   assert.match(reviewPrompt, /ugk_integration_begin/);
   assert.match(reviewPrompt, /ugk_integration_review/);
   assert.match(reviewPrompt, /ugk_integration_merge/);
+  assert.match(reviewPrompt, /不会因时间流逝自动失效/);
+  assert.match(reviewPrompt, /必须传 findings 与 checks/);
+  assert.match(reviewPrompt, /同一个 clientRequestId 和完整相同的 payload/);
   assert.doesNotMatch(reviewPrompt, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
   assert.doesNotMatch(reviewPrompt, /token\s*:/i);
 
@@ -614,6 +617,22 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   assert.equal(integrationBeginRes.status, 200, await integrationBeginRes.clone().text());
   const integrationBegin = await integrationBeginRes.json();
   assert.equal(integrationBegin.status, 'reviewing');
+
+  const staleSubmissionRevisionRes = await post(service, '/api/v1/mcp/integration/begin', {
+    sessionId: mainInitialized.sessionId,
+    clientRequestId: 'integration-begin-stale-revision',
+    expectedRevision: mainInitialized.revision,
+    submissionId: submitted.submissionId,
+    expectedSubmissionRevision: 0,
+  });
+  assert.equal(staleSubmissionRevisionRes.status, 409);
+  const staleSubmissionRevision = await staleSubmissionRevisionRes.json();
+  assert.equal(staleSubmissionRevision.code, 'SUBMISSION_REVISION_CONFLICT');
+  assert.equal(staleSubmissionRevision.submissionId, submitted.submissionId);
+  assert.equal(staleSubmissionRevision.currentSubmissionRevision, 1);
+  assert.equal(staleSubmissionRevision.expectedSubmissionRevision, 0);
+  assert.equal(staleSubmissionRevision.currentSessionRevision, undefined);
+  assert.equal(staleSubmissionRevision.secret, undefined);
 
   const integrationReviewRes = await post(service, '/api/v1/mcp/integration/review', {
     sessionId: mainInitialized.sessionId,

@@ -149,6 +149,13 @@ function mapClaim(row) {
   } catch {
     reviewPayload = {};
   }
+  // `expires_at` is retained by schema 19 for historical rows.  Integration
+  // claims no longer expire, so active claims (including legacy active rows
+  // whose old timestamp has elapsed) must never expose or enforce a deadline.
+  // New rows store 0 as the explicit no-expiry sentinel.
+  const expiresAt = row.status === 'active'
+    ? null
+    : (Number(row.expires_at) > 0 ? row.expires_at : null);
   return {
     id: row.id,
     claimId: row.id,
@@ -165,11 +172,26 @@ function mapClaim(row) {
     reviewPayloadJson: row.review_payload_json ?? '{}',
     reviewedAt: row.reviewed_at ?? null,
     revision: row.revision,
-    expiresAt: row.expires_at,
-    expiresAtIso: iso(row.expires_at),
+    expiresAt,
+    expiresAtIso: expiresAt === null ? null : iso(expiresAt),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     releasedAt: row.released_at ?? null,
+  };
+}
+
+function normalizeClaimResponse(response) {
+  if (!response || response.ok !== true) return response;
+  const claim = response.claim;
+  if (!claim || claim.status !== 'active') return response;
+  // A committed command may predate the no-expiry representation and contain
+  // a numeric expiresAt in response_json.  Normalize only the public replay;
+  // the journal remains untouched so its historical digest stays valid.
+  return {
+    ...response,
+    expiresAt: null,
+    expiresAtIso: null,
+    claim: { ...claim, expiresAt: null, expiresAtIso: null },
   };
 }
 
@@ -616,6 +638,8 @@ export function claimSubmission(db, request = {}, options = {}) {
     ttlMs = DEFAULT_CLAIM_TTL_MS,
     statusReason = 'review_started',
     expectedSubmissionRevision,
+    sessionId,
+    expectedSessionRevision,
   } = request;
 
   if (!isNonEmptyString(submissionId)) {
@@ -630,17 +654,49 @@ export function claimSubmission(db, request = {}, options = {}) {
 
   const nowMs = nowMillis(options);
   const timestamp = iso(nowMs);
-  const expiresAt = nowMs + ttlMs;
-  const claimId = request.claimId ?? request.id ?? claimIdFor(submissionId, claimant, timestamp);
+
+  // The first implementation included a timestamp-derived claim id in the
+  // journal request.  Replaying the same command after even one millisecond
+  // therefore looked like a different payload.  New command-backed claims
+  // derive their id from the stable command id.  If a pre-existing journal
+  // row is being replayed, retain its historical claim id so its digest still
+  // matches; this is compatibility only and never reclaims/overwrites a row.
+  let journalRequest = null;
+  if (commandId) {
+    const existingCommand = readCommand(db, commandId);
+    if (existingCommand?.kind === 'integration.claim' && existingCommand.request_json) {
+      try { journalRequest = JSON.parse(existingCommand.request_json); } catch { journalRequest = null; }
+    }
+  }
+  const effectiveTtlMs = request.ttlMs === undefined && Number.isFinite(journalRequest?.ttlMs)
+    ? journalRequest.ttlMs
+    : ttlMs;
+  if (!Number.isFinite(effectiveTtlMs) || effectiveTtlMs <= 0) {
+    return { ok: false, code: 'INVALID_REQUEST', message: 'ttlMs must be positive.' };
+  }
+  const claimId = request.claimId
+    ?? request.id
+    ?? journalRequest?.claimId
+    ?? (commandId
+      ? claimIdFor(submissionId, claimant, commandId)
+      : claimIdFor(submissionId, claimant, timestamp));
+
+  // Alpha.29 claim journal rows do not contain the high-level main-session
+  // binding. Keep their digest replayable, while all new begin requests bind
+  // the session revision so a reused command id cannot project a new receipt.
+  const supportsSessionBinding = !journalRequest
+    || (journalRequest.sessionId !== undefined && journalRequest.expectedSessionRevision !== undefined);
 
   const frozenRequest = {
     commandId,
     claimId,
     submissionId,
     claimant,
-    ttlMs,
+    ttlMs: effectiveTtlMs,
     statusReason,
     ...(expectedSubmissionRevision !== undefined ? { expectedSubmissionRevision } : {}),
+    ...(supportsSessionBinding && sessionId !== undefined ? { sessionId } : {}),
+    ...(supportsSessionBinding && expectedSessionRevision !== undefined ? { expectedSessionRevision } : {}),
   };
 
   if (commandId) {
@@ -650,7 +706,7 @@ export function claimSubmission(db, request = {}, options = {}) {
       request: frozenRequest,
     });
     if (begun.command.state === 'committed' || begun.command.state === 'failed') {
-      return parseCommandResponse(begun.command);
+      return normalizeClaimResponse(parseCommandResponse(begun.command));
     }
   }
 
@@ -658,7 +714,7 @@ export function claimSubmission(db, request = {}, options = {}) {
     if (commandId) {
       const command = readCommand(db, commandId);
       if (command.state === 'committed' || command.state === 'failed') {
-        return parseCommandResponse(command);
+        return normalizeClaimResponse(parseCommandResponse(command));
       }
     }
 
@@ -686,7 +742,9 @@ export function claimSubmission(db, request = {}, options = {}) {
         code: 'SUBMISSION_REVISION_CONFLICT',
         submissionId,
         currentRevision: submission.revision,
+        currentSubmissionRevision: submission.revision,
         expectedRevision: expectedSubmissionRevision,
+        expectedSubmissionRevision,
       };
       if (commandId) failCommand(db, commandId, response);
       return response;
@@ -699,39 +757,32 @@ export function claimSubmission(db, request = {}, options = {}) {
     `).get(submissionId);
 
     if (existingActiveClaim) {
-      if (existingActiveClaim.expires_at <= nowMs) {
-        // Expired claim: transition it out of active
-        db.prepare(`
-          UPDATE integration_claims
-          SET status = 'timed_out', status_reason = 'claim_expired', updated_at = ?, released_at = ?
-          WHERE id = ? AND status = 'active'
-        `).run(timestamp, timestamp, existingActiveClaim.id);
-      } else {
-        // Active and valid
-        if (existingActiveClaim.claimant === claimant && (existingActiveClaim.id === claimId || commandId)) {
-          const mapped = mapClaim(existingActiveClaim);
-          const response = {
-            ok: true,
-            claimId: existingActiveClaim.id,
-            claim: mapped,
-            ...mapped,
-            alreadyExists: true,
-          };
-          if (commandId) commitCommand(db, commandId, response, timestamp);
-          return response;
-        }
+      // Active integration claims are deliberately indefinite.  In
+      // particular, do not turn a legacy row with a past expires_at into
+      // timed_out: only an explicit release/terminal transition can close it.
+      if (existingActiveClaim.claimant === claimant && (existingActiveClaim.id === claimId || commandId)) {
+        const mapped = mapClaim(existingActiveClaim);
         const response = {
-          ok: false,
-          code: 'SUBMISSION_ALREADY_CLAIMED',
-          submissionId,
-          activeClaimId: existingActiveClaim.id,
-          claimant: existingActiveClaim.claimant,
-          expiresAt: existingActiveClaim.expires_at,
-          expiresAtIso: iso(existingActiveClaim.expires_at),
+          ok: true,
+          claimId: existingActiveClaim.id,
+          claim: mapped,
+          ...mapped,
+          alreadyExists: true,
         };
-        if (commandId) failCommand(db, commandId, response);
+        if (commandId) commitCommand(db, commandId, response, timestamp);
         return response;
       }
+      const response = {
+        ok: false,
+        code: 'SUBMISSION_ALREADY_CLAIMED',
+        submissionId,
+        activeClaimId: existingActiveClaim.id,
+        claimant: existingActiveClaim.claimant,
+        expiresAt: null,
+        expiresAtIso: null,
+      };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
     }
 
     db.prepare(`
@@ -750,7 +801,9 @@ export function claimSubmission(db, request = {}, options = {}) {
       submission.target_head,
       submission.target_worktree_id,
       statusReason,
-      expiresAt,
+      // Schema 19 keeps expires_at NOT NULL for old databases; zero is the
+      // explicit no-expiry value for every new integration claim.
+      0,
       timestamp,
       timestamp,
     );
@@ -883,6 +936,9 @@ export function recordIntegrationReview(db, request = {}, options = {}) {
   const {
     commandId,
     claimId,
+    sessionId,
+    submissionId,
+    expectedSessionRevision,
     expectedClaimRevision = request.expected_claim_revision ?? request.expectedRevision,
     verdict,
     summary = request.statusReason ?? request.status_reason ?? '',
@@ -914,6 +970,9 @@ export function recordIntegrationReview(db, request = {}, options = {}) {
     ...(sourceCommit !== undefined ? { sourceCommit } : {}),
     ...(targetHead !== undefined ? { targetHead } : {}),
     ...(targetWorktreeId !== undefined ? { targetWorktreeId } : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(submissionId !== undefined ? { submissionId } : {}),
+    ...(expectedSessionRevision !== undefined ? { expectedSessionRevision } : {}),
   };
 
   if (commandId) {
@@ -954,7 +1013,9 @@ export function recordIntegrationReview(db, request = {}, options = {}) {
         code: 'REVISION_CONFLICT',
         claimId,
         currentRevision: claim.revision,
+        currentClaimRevision: claim.revision,
         expectedRevision: expectedClaimRevision,
+        expectedClaimRevision,
       };
       if (commandId) failCommand(db, commandId, response);
       return response;
@@ -999,6 +1060,67 @@ export function recordIntegrationReview(db, request = {}, options = {}) {
     const submission = db.prepare('SELECT * FROM submissions WHERE id = ?').get(claim.submission_id);
     if (!submission) {
       const response = { ok: false, code: 'SUBMISSION_NOT_FOUND', submissionId: claim.submission_id };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
+    }
+
+    // A delivery version may be replaced or withdrawn while an older review
+    // is still doing its external checks.  Re-read the binding inside this
+    // transaction so a late verdict cannot mutate a stale/closed submission,
+    // even when a generic status update did not release its claim.
+    if (['integrated', 'rejected', 'cancelled', 'failed', 'merged', 'withdrawn'].includes(submission.status)) {
+      const response = {
+        ok: false,
+        code: 'SUBMISSION_CLOSED',
+        submissionId: submission.id,
+        status: submission.status,
+      };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
+    }
+    if (submission.status === 'stale') {
+      const response = {
+        ok: false,
+        code: 'SUBMISSION_NOT_REVIEWABLE',
+        submissionId: submission.id,
+        status: submission.status,
+      };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
+    }
+    if (submission.source_commit !== claim.source_commit) {
+      const response = {
+        ok: false,
+        code: 'SOURCE_COMMIT_MISMATCH',
+        submissionId: submission.id,
+        claimId,
+        currentSourceCommit: submission.source_commit,
+        claimSourceCommit: claim.source_commit,
+      };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
+    }
+    if (submission.target_head !== claim.target_head) {
+      const response = {
+        ok: false,
+        code: 'TARGET_HEAD_MISMATCH',
+        submissionId: submission.id,
+        claimId,
+        currentTargetHead: submission.target_head,
+        claimTargetHead: claim.target_head,
+      };
+      if (commandId) failCommand(db, commandId, response);
+      return response;
+    }
+    if (submission.target_worktree_id !== claim.target_worktree_id) {
+      const response = {
+        ok: false,
+        code: 'TARGET_WORKTREE_MISMATCH',
+        submissionId: submission.id,
+        claimId,
+        currentTargetWorktreeId: submission.target_worktree_id,
+        claimTargetWorktreeId: claim.target_worktree_id,
+      };
       if (commandId) failCommand(db, commandId, response);
       return response;
     }

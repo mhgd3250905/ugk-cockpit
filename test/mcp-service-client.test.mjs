@@ -157,3 +157,217 @@ test('MCP service handlers refresh an expired scoped session once', async () => 
   assert.equal(calls.length, 4);
   assert.notEqual(calls[1].options.headers.authorization, calls[3].options.headers.authorization);
 });
+
+test('integration service handlers preserve typed allowlist on failed HTTP response and drop secrets', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'SUBMISSION_REVISION_CONFLICT',
+      message: '审核事项刚刚发生了变化。',
+      impact: '旧请求没有覆盖最新审核状态，也没有执行合并。',
+      required_action: '请使用工具返回的最新 revision 重新确认。',
+      sessionId: 'session-1',
+      submissionId: 'sub-1',
+      currentSubmissionRevision: 3,
+      currentRevision: 3,
+      status: 'pending',
+      retryable: false,
+      token: 'leaked-token-value-12345',
+      path: '/leaked/filesystem/path',
+      raw_exception: 'TypeError: boom',
+      nested: { secret: 'unknown' },
+    }), { status: 409, headers: { 'content-type': 'application/json' } }),
+  });
+
+  await assert.rejects(
+    handlers.ugk_integration_begin({
+      sessionId: 'session-1',
+      clientRequestId: 'req-begin',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      expectedSubmissionRevision: 1,
+    }),
+    (error) => {
+      assert.equal(error.code, 'SUBMISSION_REVISION_CONFLICT');
+      assert.equal(error.message, '审核事项刚刚发生了变化。');
+      assert.equal(error.publicMessage, '审核事项刚刚发生了变化。');
+      assert.equal(error.impact, '旧请求没有覆盖最新审核状态，也没有执行合并。');
+      assert.equal(error.required_action, '请使用工具返回的最新 revision 重新确认。');
+      assert.equal(error.sessionId, 'session-1');
+      assert.equal(error.submissionId, 'sub-1');
+      assert.equal(error.currentSubmissionRevision, 3);
+      assert.equal(error.currentRevision, 3);
+      assert.equal(error.status, 'pending');
+      assert.equal(error.retryable, false);
+      assert.equal(error.token, undefined);
+      assert.equal(error.path, undefined);
+      assert.equal(error.raw_exception, undefined);
+      assert.equal(error.nested, undefined);
+      assert.equal(error.secret, undefined);
+      return true;
+    },
+  );
+});
+
+test('integration service handlers reject HTTP 200 {ok:false} and push failures with typed fields', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      ok: false,
+      code: 'INTEGRATION_PUSH_FAILED',
+      message: '功能已经安全接入本地主项目，但尚未推送到远端。',
+      impact: '本地主项目的新保存点保持完整；平台没有回退或重写历史。',
+      required_action: '请检查网络或远端权限后，用完全相同的合并请求重试。',
+      sessionId: 'session-1',
+      submissionId: 'sub-1',
+      claimId: 'claim-1',
+      localIntegrated: true,
+      pushed: false,
+      retryable: true,
+      integratedCommit: 'commit-sha-safe-evidence',
+      token: 'do-not-leak-token',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  });
+
+  await assert.rejects(
+    handlers.ugk_integration_merge({
+      sessionId: 'session-1',
+      clientRequestId: 'req-merge',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      claimId: 'claim-1',
+      expectedSubmissionRevision: 2,
+      expectedClaimRevision: 1,
+      summary: 'merge',
+    }),
+    (error) => {
+      assert.equal(error.code, 'INTEGRATION_PUSH_FAILED');
+      assert.equal(error.localIntegrated, true);
+      assert.equal(error.pushed, false);
+      assert.equal(error.retryable, true);
+      assert.equal(error.integratedCommit, 'commit-sha-safe-evidence');
+      assert.equal(error.token, undefined);
+      assert.equal(error.required_action, '请检查网络或远端权限后，用完全相同的合并请求重试。');
+      return true;
+    },
+  );
+});
+
+test('integration service handlers pass through server-provided non-expiring claim guidance without duplicate client wording', async () => {
+  const serverGuidance = '请回到项目页查看当前审核者；如需更换审核者，请由当前会话或用户明确撤回后再领取。';
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'SUBMISSION_ALREADY_CLAIMED',
+      message: '这个功能已经由另一条主项目会话领取审核。',
+      impact: '没有启动第二次审核，也没有修改代码。',
+      required_action: serverGuidance,
+      sessionId: 'session-1',
+      submissionId: 'sub-1',
+      status: 'claimed',
+    }), { status: 409, headers: { 'content-type': 'application/json' } }),
+  });
+
+  await assert.rejects(
+    handlers.ugk_integration_begin({
+      sessionId: 'session-1',
+      clientRequestId: 'req-begin-claimed',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      expectedSubmissionRevision: 0,
+    }),
+    (error) => {
+      assert.equal(error.code, 'SUBMISSION_ALREADY_CLAIMED');
+      assert.equal(error.required_action, serverGuidance);
+      assert.doesNotMatch(error.required_action, /过期后/);
+      assert.equal(error.message, '这个功能已经由另一条主项目会话领取审核。');
+      assert.equal(error.impact, '没有启动第二次审核，也没有修改代码。');
+      return true;
+    },
+  );
+});
+
+test('integration service handlers treat truncated or lost HTTP 200 body as uncertain outcome', async () => {
+  const truncatedHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response('{"ok": true, "truncated', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+
+  await assert.rejects(
+    truncatedHandlers.ugk_integration_begin({
+      sessionId: 'session-1',
+      clientRequestId: 'req-trunc',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      expectedSubmissionRevision: 0,
+    }),
+    (error) => {
+      assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+      assert.equal(error.retryable, true);
+      assert.match(error.required_action, /完全相同的 clientRequestId/);
+      return true;
+    },
+  );
+
+  const lostHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response('{}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+
+  await assert.rejects(
+    lostHandlers.ugk_integration_merge({
+      sessionId: 'session-1',
+      clientRequestId: 'req-lost',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      claimId: 'claim-1',
+      expectedSubmissionRevision: 2,
+      expectedClaimRevision: 1,
+      summary: 'merge',
+    }),
+    (error) => {
+      assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+      assert.equal(error.retryable, true);
+      assert.match(error.required_action, /完全相同的 clientRequestId/);
+      return true;
+    },
+  );
+});
+
+test('integration service handlers provide safe retry instruction without claiming no state update on transport failure', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => {
+      throw new Error('Connection reset by peer');
+    },
+  });
+
+  await assert.rejects(
+    handlers.ugk_integration_review({
+      sessionId: 'session-1',
+      clientRequestId: 'req-review',
+      expectedRevision: 2,
+      submissionId: 'sub-1',
+      claimId: 'claim-1',
+      expectedClaimRevision: 0,
+      verdict: 'approved',
+      summary: 'LGTM',
+      findings: [],
+      checks: [],
+    }),
+    (error) => {
+      assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+      assert.equal(error.retryable, true);
+      assert.match(error.publicMessage, /完全相同的 clientRequestId.*重试|不要创建新/i);
+      assert.doesNotMatch(error.publicMessage, /没有更新/);
+      assert.equal(error.required_action, '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。');
+      return true;
+    },
+  );
+});

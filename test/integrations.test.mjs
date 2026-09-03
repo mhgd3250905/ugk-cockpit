@@ -128,7 +128,7 @@ test('submissions fix source/target SHA and support revision CAS', (t) => {
   db.close();
 });
 
-test('integration claims enforce exclusivity (max 1 active claim) and expiration takeover', (t) => {
+test('integration claims are indefinite, preserve legacy active rows, and enforce exclusivity', (t) => {
   const db = fixture(t);
 
   const sub = createSubmission(db, {
@@ -155,7 +155,9 @@ test('integration claims enforce exclusivity (max 1 active claim) and expiration
   assert.equal(claim1.sourceCommit, 'commit-src-100');
   assert.equal(claim1.targetHead, 'commit-tgt-200');
   assert.equal(claim1.targetWorktreeId, 'wt-main');
-  assert.equal(claim1.expiresAt, Date.parse('2026-09-02T01:01:00.000Z'));
+  assert.equal(claim1.expiresAt, null);
+  assert.equal(claim1.expiresAtIso, null);
+  assert.equal(db.prepare('SELECT expires_at FROM integration_claims WHERE id = ?').get(claim1.claimId).expires_at, 0);
 
   // Submission status updated to 'claimed'
   const subAfterClaim = readSubmission(db, sub.submissionId);
@@ -186,24 +188,44 @@ test('integration claims enforce exclusivity (max 1 active claim) and expiration
     /UNIQUE constraint failed/i,
   );
 
-  // After expiration at T+2 min, new claim can safely take over
+  // A legacy active row with a historical deadline remains active forever;
+  // elapsed wall-clock time must not grant another claimant access.
+  db.prepare('UPDATE integration_claims SET expires_at = ? WHERE id = ?')
+    .run(Date.parse('2026-09-02T01:01:00.000Z'), claim1.claimId);
   const claim3 = claimSubmission(db, {
     submissionId: sub.submissionId,
     claimant: 'agent-reviewer-2',
     ttlMs: 60 * 1000,
   }, { clock: () => Date.parse('2026-09-02T01:02:00.000Z') });
 
-  assert.equal(claim3.ok, true);
-  assert.equal(claim3.claimant, 'agent-reviewer-2');
-  assert.equal(claim3.status, 'active');
+  assert.equal(claim3.ok, false);
+  assert.equal(claim3.code, 'SUBMISSION_ALREADY_CLAIMED');
+  assert.equal(claim3.activeClaimId, claim1.claimId);
+  assert.equal(claim3.expiresAt, null);
+  assert.equal(claim3.expiresAtIso, null);
 
-  // Verify previous claim was timed out
+  // Only an explicit release closes the old claim and permits a new one.
+  const releasedFirst = releaseIntegrationClaim(db, {
+    claimId: claim1.claimId,
+    claimant: 'agent-reviewer-1',
+  }, { clock: () => Date.parse('2026-09-02T01:02:10.000Z') });
+  assert.equal(releasedFirst.ok, true);
   const oldClaim = readIntegrationClaim(db, claim1.claimId);
-  assert.equal(oldClaim.status, 'timed_out');
+  assert.equal(oldClaim.status, 'released');
 
-  // Releasing claim3 reverts submission to pending
+  const claim4 = claimSubmission(db, {
+    submissionId: sub.submissionId,
+    claimant: 'agent-reviewer-2',
+    ttlMs: 60 * 1000,
+  }, { clock: () => Date.parse('2026-09-02T01:02:20.000Z') });
+  assert.equal(claim4.ok, true);
+  assert.equal(claim4.claimant, 'agent-reviewer-2');
+  assert.equal(claim4.status, 'active');
+  assert.equal(claim4.expiresAt, null);
+  assert.equal(db.prepare('SELECT expires_at FROM integration_claims WHERE id = ?').get(claim4.claimId).expires_at, 0);
+
   const released = releaseIntegrationClaim(db, {
-    claimId: claim3.claimId,
+    claimId: claim4.claimId,
     claimant: 'agent-reviewer-2',
   }, { clock: () => Date.parse('2026-09-02T01:02:30.000Z') });
   assert.equal(released.ok, true);
@@ -211,6 +233,64 @@ test('integration claims enforce exclusivity (max 1 active claim) and expiration
 
   const subAfterRelease = readSubmission(db, sub.submissionId);
   assert.equal(subAfterRelease.status, 'pending');
+
+  db.close();
+});
+
+test('integration claim commands replay stably across time and reject a changed payload', (t) => {
+  const db = fixture(t);
+  const sub = createSubmission(db, {
+    projectId: 'proj-integ',
+    spaceId: 'space-feat-1',
+    sourceWorktreeId: 'wt-space-1',
+    targetWorktreeId: 'wt-main',
+    sourceBranch: 'feature/feat-1',
+    sourceCommit: 'commit-src-replay',
+    targetBranch: 'main',
+    targetHead: 'commit-tgt-replay',
+  });
+
+  const request = {
+    commandId: 'integration-claim-replay',
+    submissionId: sub.submissionId,
+    claimant: 'session:main-replay',
+    expectedSubmissionRevision: 0,
+  };
+  const first = claimSubmission(db, request, {
+    clock: () => Date.parse('2026-09-02T01:00:00.000Z'),
+  });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.expiresAt, null);
+  const replay = claimSubmission(db, request, {
+    clock: () => Date.parse('2026-09-05T01:00:00.000Z'),
+  });
+  assert.deepEqual(replay, first);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM integration_claims').get().count, 1);
+
+  assert.throws(
+    () => claimSubmission(db, { ...request, claimant: 'session:other' }, {
+      clock: () => Date.parse('2026-09-05T01:00:01.000Z'),
+    }),
+    (error) => error.code === 'COMMAND_CONFLICT',
+  );
+
+  // Failed commands are also immutable replay records, not a fresh attempt
+  // whose result can change merely because time has elapsed.
+  const failedRequest = {
+    commandId: 'integration-claim-failed-replay',
+    submissionId: sub.submissionId,
+    claimant: 'session:other',
+    expectedSubmissionRevision: 0,
+  };
+  const failed = claimSubmission(db, failedRequest, {
+    clock: () => Date.parse('2026-09-02T01:00:01.000Z'),
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, 'SUBMISSION_REVISION_CONFLICT');
+  const failedReplay = claimSubmission(db, failedRequest, {
+    clock: () => Date.parse('2026-09-05T01:00:01.000Z'),
+  });
+  assert.deepEqual(failedReplay, failed);
 
   db.close();
 });
@@ -565,6 +645,67 @@ test('recordIntegrationReview records verdict with revision CAS and updates subm
   db.close();
 });
 
+test('review transaction rejects late verdicts after stale status or fixed target changes', (t) => {
+  const db = fixture(t);
+  const create = (suffix) => createSubmission(db, {
+    projectId: 'proj-integ',
+    spaceId: 'space-feat-1',
+    sourceWorktreeId: 'wt-space-1',
+    targetWorktreeId: 'wt-main',
+    sourceBranch: 'feature/feat-1',
+    sourceCommit: `commit-src-${suffix}`,
+    targetBranch: 'main',
+    targetHead: `commit-tgt-${suffix}`,
+  });
+
+  const staleSubmission = create('stale');
+  const staleClaim = claimSubmission(db, {
+    submissionId: staleSubmission.submissionId,
+    claimant: 'session:stale',
+  });
+  assert.equal(staleClaim.ok, true);
+  const staleStatus = updateSubmissionStatus(db, {
+    submissionId: staleSubmission.submissionId,
+    expectedRevision: 1,
+    status: 'stale',
+    statusReason: 'new_delivery_version',
+  });
+  assert.equal(staleStatus.ok, true);
+  const staleReview = recordIntegrationReview(db, {
+    commandId: 'late-stale-review',
+    claimId: staleClaim.claimId,
+    expectedClaimRevision: 0,
+    verdict: 'approved',
+    summary: '晚到结论',
+  });
+  assert.equal(staleReview.ok, false);
+  assert.equal(staleReview.code, 'SUBMISSION_NOT_REVIEWABLE');
+  assert.equal(readIntegrationClaim(db, staleClaim.claimId).revision, 0);
+  assert.equal(readSubmission(db, staleSubmission.submissionId).status, 'stale');
+
+  const changedSubmission = create('changed');
+  const changedClaim = claimSubmission(db, {
+    submissionId: changedSubmission.submissionId,
+    claimant: 'session:changed',
+  });
+  assert.equal(changedClaim.ok, true);
+  db.prepare('UPDATE submissions SET target_head = ?, revision = revision + 1 WHERE id = ?')
+    .run('commit-tgt-new', changedSubmission.submissionId);
+  const changedReview = recordIntegrationReview(db, {
+    commandId: 'late-target-review',
+    claimId: changedClaim.claimId,
+    expectedClaimRevision: 0,
+    verdict: 'approved',
+    summary: '旧目标结论',
+  });
+  assert.equal(changedReview.ok, false);
+  assert.equal(changedReview.code, 'TARGET_HEAD_MISMATCH');
+  assert.equal(readIntegrationClaim(db, changedClaim.claimId).revision, 0);
+  assert.equal(readSubmission(db, changedSubmission.submissionId).status, 'claimed');
+
+  db.close();
+});
+
 test('submissions support expanded status set', (t) => {
   const db = fixture(t);
 
@@ -605,4 +746,3 @@ test('submissions support expanded status set', (t) => {
 
   db.close();
 });
-

@@ -509,6 +509,12 @@ const PUBLIC_ERRORS = {
     impact: '本次送审没有继续执行，现有代码保持不变。',
     requiredAction: '请刷新最近一次 revision 后重新发起。',
   },
+  SUBMISSION_REVISION_CONFLICT: {
+    status: 409,
+    message: '这项审核待办已经有新的版本。',
+    impact: '旧审核请求没有覆盖新的送审状态，也没有修改代码。',
+    requiredAction: '请只使用返回的最新 submission revision，并生成新的 clientRequestId 重试。',
+  },
   PUSH_REMOTE_MISSING: {
     status: 409,
     message: '这个项目还没有可用的远端代码位置。',
@@ -593,11 +599,35 @@ const PUBLIC_ERRORS = {
     impact: '没有重复领取，也没有修改代码。',
     requiredAction: '请刷新项目页，查看它当前的审核结果或处理人。',
   },
+  SUBMISSION_CLOSED: {
+    status: 409,
+    message: '这项审核待办已经关闭，旧结论不能再写入。',
+    impact: '旧请求没有覆盖关闭状态，也没有修改代码。',
+    requiredAction: '请刷新项目页，确认是否已有新的送审版本；不要用旧版本继续审核。',
+  },
   SUBMISSION_ALREADY_CLAIMED: {
     status: 409,
     message: '这个功能已经由另一条主项目会话领取审核。',
     impact: '没有启动第二次审核，也没有修改代码。',
-    requiredAction: '请回到项目页查看当前审核者；过期后平台才允许重新领取。',
+    requiredAction: '请回到项目页查看当前审核者；如需更换审核者，请由当前会话或用户明确撤回后再领取。',
+  },
+  CLAIM_NOT_FOUND: {
+    status: 404,
+    message: '找不到这次审核领取记录。',
+    impact: '没有写入审核结论，也没有修改代码。',
+    requiredAction: '请从项目页复制当前待办的审核指令后重试。',
+  },
+  CLAIM_NOT_ACTIVE: {
+    status: 409,
+    message: '这次审核领取已经被明确撤回或结束。',
+    impact: '旧审核结论没有写入，也没有修改代码。',
+    requiredAction: '请刷新项目页；如果有新的送审版本，请使用新待办和新的 clientRequestId。',
+  },
+  CLAIMANT_MISMATCH: {
+    status: 409,
+    message: '当前 AI 会话不是这次审核领取的处理人。',
+    impact: '没有写入审核结论，也没有替换当前审核者。',
+    requiredAction: '请回到当前审核会话继续；更换处理人必须由用户明确撤回后再领取。',
   },
   MAIN_HAS_CHANGES: {
     status: 409,
@@ -616,6 +646,36 @@ const PUBLIC_ERRORS = {
     message: '主项目在送审后已经向前变化。',
     impact: '平台没有自动 rebase、reset 或覆盖新代码。',
     requiredAction: '请刷新待办，重新评估这个功能与最新主项目的兼容性。',
+  },
+  SOURCE_COMMIT_MISMATCH: {
+    status: 409,
+    message: '审核使用的代码保存点已经改变。',
+    impact: '旧审核结论没有覆盖新的代码版本，也没有修改代码。',
+    requiredAction: '请停止旧审核，刷新待办并使用固定的新版本重新开始。',
+  },
+  TARGET_HEAD_MISMATCH: {
+    status: 409,
+    message: '审核使用的主项目基线已经改变。',
+    impact: '旧审核结论没有覆盖新的主项目版本，也没有修改代码。',
+    requiredAction: '请停止旧审核，使用新待办返回的固定目标版本重新开始。',
+  },
+  TARGET_WORKTREE_MISMATCH: {
+    status: 409,
+    message: '审核绑定的主项目代码位置已经改变。',
+    impact: '没有写入审核结论，也没有修改代码位置绑定。',
+    requiredAction: '请回项目页确认当前主项目代码位置，再使用新的审核指令。',
+  },
+  INTEGRATION_BINDING_MISMATCH: {
+    status: 409,
+    message: '审核会话、待办和审核领取记录不是同一项工作。',
+    impact: '没有写入审核结论，也没有修改代码。',
+    requiredAction: '请使用同一待办复制的完整审核指令，不要手动替换 ID。',
+  },
+  DELIVERY_MERGE_CONFLICT: {
+    status: 409,
+    message: '送审版本存在未解决的合并冲突。',
+    impact: '审核结论没有写入，也没有执行合并。',
+    requiredAction: '请先按提示人工处理冲突，再以新版本重新送审。',
   },
   SOURCE_NOT_FAST_FORWARD: {
     status: 409,
@@ -637,9 +697,9 @@ const PUBLIC_ERRORS = {
   },
   CLAIM_EXPIRED: {
     status: 409,
-    message: '这次审核领取已经过期。',
+    message: '这次审核领取已被明确关闭，审核领取不会因时间流逝自动失效。',
     impact: '审核结论没有写入，代码没有修改。',
-    requiredAction: '请从项目页重新复制审核提示词并领取。',
+    requiredAction: '请刷新项目页；如果有新的送审版本，请使用新待办和新的 clientRequestId。',
   },
   INTEGRATION_PUSH_FAILED: {
     status: 200,
@@ -709,12 +769,76 @@ function integrationReviewPrompt(submission) {
     `submissionId: "${submission.submissionId}"`,
     `expectedSubmissionRevision: ${submission.revision}`,
     `本次代码保存点：${submission.sourceCommit}；目标基线：${submission.targetHead}。`,
-    '先调用 `ugk_integration_begin` 领取并锁定审核对象；使用当前会话已有的 sessionId、最新 revision 和新的 clientRequestId，不要传路径、项目 ID、工作副本 ID 或 token。',
-    '然后只针对工具返回的固定 sourceCommit 与 targetHead 审查代码差异并运行必要验证。',
-    '审查完成后调用 `ugk_integration_review`，如实提交 verdict、summary、findings 和 checks。',
+    '审核领取不会因时间流逝自动失效；可以隔几天再继续，但固定版本一旦改变就必须停止并报告冲突。',
+    '先调用 `ugk_integration_begin` 领取并锁定审核对象；使用当前会话已有的 sessionId、最新 session revision 和新的 clientRequestId，不要传路径、项目 ID、工作副本 ID 或 token。',
+    '然后只针对工具返回的固定 sourceCommit 与 targetHead 审查代码差异并运行必要验证；若 sourceCommit、targetHead、目标代码位置或送审版本改变，停止旧审核，不要继续提交旧结论。',
+    '审查完成后调用 `ugk_integration_review`，如实提交 verdict、summary，并且必须传 findings 与 checks（即使为空数组也要显式传入）。',
+    '如果响应不确定，请使用同一个 clientRequestId 和完整相同的 payload 重试，不要生成第二个审核请求。只有明确的版本冲突才使用响应返回的最新 revision，并同时生成新的 clientRequestId。',
     '审核通过不等于合并授权。只有用户明确要求合并且 verdict 为 approved 时，才用 review 返回的最新 submissionRevision、claimRevision 调用 `ugk_integration_merge`。',
     '不得自行 rebase、reset、force push、切换分支或清理开发空间；若工具返回冲突或待人工处理，停止并把影响和下一步告诉我。',
   ].join('\n');
+}
+
+function integrationErrorExtra(body, result = {}) {
+  const extra = {
+    sessionId: body.sessionId,
+    submissionId: result.submissionId ?? body.submissionId,
+  };
+  if (result.claimId ?? body.claimId) extra.claimId = result.claimId ?? body.claimId;
+  if (result.status !== undefined) extra.status = result.status;
+  if (result.activeClaimId !== undefined) extra.activeClaimId = result.activeClaimId;
+
+  // Keep the three revision domains explicit.  The generic currentRevision
+  // field in older core responses is interpreted only according to the
+  // operation's entity and is never presented as a session revision when it
+  // belongs to a submission/claim.
+  if (result.currentSessionRevision !== undefined) {
+    extra.currentSessionRevision = result.currentSessionRevision;
+  }
+  if (result.expectedSessionRevision !== undefined) {
+    extra.expectedSessionRevision = result.expectedSessionRevision;
+  }
+  if (result.currentSubmissionRevision !== undefined) {
+    extra.currentSubmissionRevision = result.currentSubmissionRevision;
+  }
+  if (result.expectedSubmissionRevision !== undefined) {
+    extra.expectedSubmissionRevision = result.expectedSubmissionRevision;
+  }
+  if (result.currentClaimRevision !== undefined) {
+    extra.currentClaimRevision = result.currentClaimRevision;
+  }
+  if (result.expectedClaimRevision !== undefined) {
+    extra.expectedClaimRevision = result.expectedClaimRevision;
+  }
+  if (result.code === 'REVISION_CONFLICT' && result.currentSessionRevision === undefined
+    && result.currentClaimRevision === undefined) {
+    // Compatibility for a core response produced before the named fields
+    // existed: begin's generic conflict is a session conflict, while review
+    // is a claim conflict.  Never copy a bare revision into both domains.
+    if (body.claimId) {
+      extra.currentClaimRevision = result.currentRevision;
+      extra.expectedClaimRevision = result.expectedRevision;
+    } else {
+      extra.currentSessionRevision = result.currentRevision;
+      extra.expectedSessionRevision = result.expectedRevision;
+    }
+  }
+  if (result.code === 'SUBMISSION_REVISION_CONFLICT'
+    && result.currentSubmissionRevision === undefined && result.currentRevision !== undefined) {
+    extra.currentSubmissionRevision = result.currentRevision;
+    extra.expectedSubmissionRevision = result.expectedRevision;
+  }
+
+  // These are immutable entity identifiers or safe state details; paths,
+  // tokens and arbitrary backend error fields are intentionally excluded.
+  for (const key of [
+    'currentHead', 'currentSourceCommit', 'expectedSourceCommit',
+    'currentTargetHead', 'expectedTargetHead', 'currentTargetWorktreeId',
+    'expectedTargetWorktreeId', 'retryable', 'humanActionRequired',
+  ]) {
+    if (result[key] !== undefined) extra[key] = result[key];
+  }
+  return extra;
 }
 
 function sendJson(response, statusCode, body) {
@@ -2754,9 +2878,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_begin', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, {
-          extra: { sessionId: body.sessionId, revision: body.expectedRevision },
-        });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
         return;
       }
 
@@ -2768,9 +2890,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_review', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, {
-          extra: { sessionId: body.sessionId, revision: body.expectedRevision },
-        });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
         return;
       }
 
@@ -2784,11 +2904,9 @@ export async function createCockpitHttpServer({
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
           extra: {
-            sessionId: body.sessionId,
-            revision: body.expectedRevision,
+            ...integrationErrorExtra(body, result),
             localIntegrated: Boolean(result.localIntegrated),
             pushed: Boolean(result.pushed),
-            retryable: Boolean(result.retryable),
             integratedCommit: result.integratedCommit ?? null,
           },
         });

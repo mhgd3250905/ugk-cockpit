@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
+import { createServiceHandlers } from '../src/mcp/service-client.mjs';
 import {
   TOOLS,
   createMcpServer,
@@ -997,4 +998,326 @@ test('createMcpServer stdio protocol loop: verifies single-line JSON on stdout a
   // Verify stderr received diagnostics
   assert.match(stderrBuffer, /JSON parse error/);
   assert.match(stderrBuffer, /Boom in finish handler/);
+});
+
+test('mocked HTTP -> createServiceHandlers -> dispatchMessage for submission revision conflict exposes safe JSON recovery fields', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'SUBMISSION_REVISION_CONFLICT',
+      message: '审核事项刚刚发生了变化。',
+      impact: '旧请求没有覆盖最新审核状态，也没有执行合并。',
+      required_action: '请使用工具返回的最新 revision 重新确认。',
+      sessionId: 'sess-100',
+      submissionId: 'sub-test-1',
+      currentSubmissionRevision: 4,
+      currentRevision: 4,
+      token: 'leaked-token-123',
+      path: '/secret/path',
+      unknown_secret: 'do-not-surface',
+      nested_data: { private: true },
+    }), { status: 409, headers: { 'content-type': 'application/json' } }),
+  });
+
+  const response = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 201,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_begin',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-conflict-1',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        expectedSubmissionRevision: 2,
+      },
+    },
+  }, { handlers });
+
+  assert.equal(response.id, 201);
+  assert.equal(response.result.isError, true);
+  assert.ok(Array.isArray(response.result.content));
+  assert.equal(response.result.content[0].type, 'text');
+
+  const parsed = JSON.parse(response.result.content[0].text);
+  assert.equal(parsed.code, 'SUBMISSION_REVISION_CONFLICT');
+  assert.equal(parsed.currentSubmissionRevision, 4);
+  assert.equal(parsed.required_action, '请使用工具返回的最新 revision 重新确认。');
+  assert.equal(parsed.message, '审核事项刚刚发生了变化。');
+  assert.equal(parsed.impact, '旧请求没有覆盖最新审核状态，也没有执行合并。');
+  assert.equal(parsed.submissionId, 'sub-test-1');
+  assert.equal(parsed.sessionId, 'sess-100');
+  assert.equal(parsed.token, undefined);
+  assert.equal(parsed.path, undefined);
+  assert.equal(parsed.unknown_secret, undefined);
+  assert.equal(parsed.nested_data, undefined);
+  assert.equal(response.result.content[0].text.includes('leaked'), false);
+  assert.equal(response.result.content[0].text.includes('do-not-surface'), false);
+});
+
+test('mocked HTTP -> createServiceHandlers -> dispatchMessage for integration push failure presents isError:true with safe JSON', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      ok: false,
+      code: 'INTEGRATION_PUSH_FAILED',
+      message: '功能已经安全接入本地主项目，但尚未推送到远端。',
+      impact: '本地主项目的新保存点保持完整；平台没有回退或重写历史。',
+      required_action: '请检查网络或远端权限后，用完全相同的合并请求重试。',
+      sessionId: 'sess-100',
+      submissionId: 'sub-test-1',
+      claimId: 'claim-test-1',
+      localIntegrated: true,
+      pushed: false,
+      retryable: true,
+      integratedCommit: 'commit-sha-safe-evidence',
+      token: 'leak-token',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  });
+
+  const response = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 202,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_merge',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-merge-1',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        claimId: 'claim-test-1',
+        expectedSubmissionRevision: 2,
+        expectedClaimRevision: 1,
+        summary: 'merge attempt',
+      },
+    },
+  }, { handlers });
+
+  assert.equal(response.id, 202);
+  assert.equal(response.result.isError, true);
+  const parsed = JSON.parse(response.result.content[0].text);
+  assert.equal(parsed.code, 'INTEGRATION_PUSH_FAILED');
+  assert.equal(parsed.localIntegrated, true);
+  assert.equal(parsed.pushed, false);
+  assert.equal(parsed.retryable, true);
+  assert.equal(parsed.token, undefined);
+  assert.equal(parsed.integratedCommit, 'commit-sha-safe-evidence');
+  assert.equal(parsed.required_action, '请检查网络或远端权限后，用完全相同的合并请求重试。');
+});
+
+test('mocked HTTP -> createServiceHandlers -> dispatchMessage passes through server-provided non-expiring claim guidance', async () => {
+  const serverGuidance = '请回到项目页查看当前审核者；如需更换审核者，请由当前会话或用户明确撤回后再领取。';
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response(JSON.stringify({
+      code: 'SUBMISSION_ALREADY_CLAIMED',
+      message: '这个功能已经由另一条主项目会话领取审核。',
+      impact: '没有启动第二次审核，也没有修改代码。',
+      required_action: serverGuidance,
+      sessionId: 'sess-100',
+      submissionId: 'sub-test-1',
+    }), { status: 409, headers: { 'content-type': 'application/json' } }),
+  });
+
+  const response = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 206,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_begin',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-claimed-1',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        expectedSubmissionRevision: 0,
+      },
+    },
+  }, { handlers });
+
+  assert.equal(response.id, 206);
+  assert.equal(response.result.isError, true);
+  const parsed = JSON.parse(response.result.content[0].text);
+  assert.equal(parsed.code, 'SUBMISSION_ALREADY_CLAIMED');
+  assert.equal(parsed.required_action, serverGuidance);
+  assert.doesNotMatch(parsed.required_action, /过期后/);
+  assert.equal(parsed.message, '这个功能已经由另一条主项目会话领取审核。');
+  assert.equal(parsed.impact, '没有启动第二次审核，也没有修改代码。');
+});
+
+test('mocked HTTP -> createServiceHandlers -> dispatchMessage on malformed or lost HTTP 200 JSON returns isError:true uncertain outcome', async () => {
+  // 1. Malformed JSON on HTTP 200
+  const malformedHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response('{"truncated', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+
+  const malformedRes = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 207,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_begin',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-malformed-json',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        expectedSubmissionRevision: 0,
+      },
+    },
+  }, { handlers: malformedHandlers });
+
+  assert.equal(malformedRes.id, 207);
+  assert.equal(malformedRes.result.isError, true);
+  const parsedMalformed = JSON.parse(malformedRes.result.content[0].text);
+  assert.equal(parsedMalformed.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(parsedMalformed.retryable, true);
+  assert.match(parsedMalformed.message, /完全相同的 clientRequestId.*重试|不要创建新/i);
+  assert.equal(parsedMalformed.required_action, '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。');
+  assert.equal(parsedMalformed.sessionId, 'sess-100');
+  assert.equal(parsedMalformed.submissionId, 'sub-test-1');
+
+  // 2. Lost HTTP 200 JSON (e.g. empty body {})
+  const lostHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => new Response('{}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+
+  const lostRes = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 208,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_merge',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-lost-body',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        claimId: 'claim-test-1',
+        expectedSubmissionRevision: 2,
+        expectedClaimRevision: 1,
+        summary: 'merge lost attempt',
+      },
+    },
+  }, { handlers: lostHandlers });
+
+  assert.equal(lostRes.id, 208);
+  assert.equal(lostRes.result.isError, true);
+  const parsedLost = JSON.parse(lostRes.result.content[0].text);
+  assert.equal(parsedLost.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(parsedLost.retryable, true);
+  assert.match(parsedLost.message, /完全相同的 clientRequestId.*重试|不要创建新/i);
+  assert.equal(parsedLost.required_action, '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。');
+  assert.equal(parsedLost.sessionId, 'sess-100');
+  assert.equal(parsedLost.submissionId, 'sub-test-1');
+  assert.equal(parsedLost.claimId, 'claim-test-1');
+});
+
+test('mocked HTTP -> createServiceHandlers -> dispatchMessage on integration transport failure presents safe retry instruction without claiming no state update', async () => {
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    fetchImpl: async () => {
+      throw new Error('ETIMEDOUT');
+    },
+  });
+
+  const response = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 203,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_review',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-review-timeout',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        claimId: 'claim-test-1',
+        expectedClaimRevision: 0,
+        verdict: 'approved',
+        summary: 'Review approved',
+        findings: [],
+        checks: ['all checks passed'],
+      },
+    },
+  }, { handlers });
+
+  assert.equal(response.id, 203);
+  assert.equal(response.result.isError, true);
+  const parsed = JSON.parse(response.result.content[0].text);
+  assert.equal(parsed.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(parsed.retryable, true);
+  assert.match(parsed.message, /完全相同的 clientRequestId.*重试|不要创建新/i);
+  assert.doesNotMatch(parsed.message, /没有更新/);
+  assert.equal(parsed.required_action, '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。');
+});
+
+test('dispatchMessage keeps generic/unexpected failures safe for integration tools and compatible for other tools', async () => {
+  let stderrOutput = '';
+  const fakeStderr = {
+    write: (chunk) => {
+      stderrOutput += chunk;
+    },
+  };
+
+  const handlers = {
+    ugk_integration_begin: async () => {
+      throw new TypeError('Cannot read property undefined of crash');
+    },
+    ugk_work_accept: async () => {
+      throw new Error('Accept custom failure');
+    },
+  };
+
+  // Integration tool with generic crash: should return safe JSON, no TypeError leakage
+  const resIntegration = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 204,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_integration_begin',
+      arguments: {
+        sessionId: 'sess-100',
+        clientRequestId: 'req-generic-fail',
+        expectedRevision: 2,
+        submissionId: 'sub-test-1',
+        expectedSubmissionRevision: 0,
+      },
+    },
+  }, { handlers, stderr: fakeStderr });
+
+  assert.equal(resIntegration.id, 204);
+  assert.equal(resIntegration.result.isError, true);
+  const parsed = JSON.parse(resIntegration.result.content[0].text);
+  assert.equal(parsed.code, 'REQUEST_FAILED');
+  assert.equal(resIntegration.result.content[0].text.includes('Cannot read property'), false);
+  assert.match(stderrOutput, /Cannot read property undefined of crash/);
+
+  // Non-integration tool: should return plain string public message (compatible)
+  const resAccept = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 205,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_work_accept',
+      arguments: {
+        dispatchCode: 'DISPATCH-1',
+        clientRequestId: 'req-accept-fail',
+      },
+    },
+  }, { handlers, stderr: fakeStderr });
+
+  assert.equal(resAccept.id, 205);
+  assert.equal(resAccept.result.isError, true);
+  assert.match(resAccept.result.content[0].text, /暂时无法完成/);
 });

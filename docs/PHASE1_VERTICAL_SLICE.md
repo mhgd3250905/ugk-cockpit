@@ -32,7 +32,8 @@
 - `0.1.0-alpha.31`：将 `$cockpit-closeout` 的本地两阶段收束与可选平台进度登记解耦。缺少可信会话或 MCP 不可用时不阻断本地文档整理、commit 和已明确授权的普通 push；基线可来自已记录的任务起点或明确版本记录。解除 closeout 元数据的必需 MCP 依赖，同步 handoff/progress 文案；正式 handoff 仍保留 active session、revision CAS 与 `cockpitVerified: true` 门槛。不修改生产 API、数据库 schema 或送审/合并逻辑。
 - `0.1.0-alpha.32`：新增 `ugk_work_context` 只读恢复会话信息。bridge 记住接入绑定，服务端按当前已授权代码位置核对会话及最新 revision；无绑定时只展示候选，经用户明确确认后建立当前客户端的临时绑定。接力代际变化使旧绑定失效，查询不修改平台会话、lease、心跳或 revision。同步 relay/progress/handoff 与 closeout 可选登记规则，不要求因聊天缺编号重新 init；不改变 submit 无需提前接入的契约。方案及验收见 [会话信息恢复](SESSION_CONTEXT_RECOVERY.md)。
 - `0.1.0-alpha.33`：运行详情时间线按稳定工作副本绘制多条工作线，移除跨副本 `branchChanged` 推断；开发空间来源显示为轻量来源锚点，未知来源独立归轨，真实 `integrated` 回执才绘制接入主项目关系。新增整条工作线聚焦与“显示全部”，并以紧凑 Metro smooth-step 绘制带统一受限圆角的分叉/接入路径，保留分页、详情展开、深浅主题、减弱动效和窄屏多轨行为；项目卡片进入独立项目详情页并使用正常页面滚动。实现与验收边界见 [工作线时间线](WORK_LINE_TIMELINE.md)。
-- 当前小步：alpha.33 UI 阶段已完成并完成本地文档收束；跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+- `0.1.0-alpha.34`：审核领取不再按时间失效，修复领取/结论重试和 HTTP 至 MCP 的恢复信息传递。继续保留固定版本、唯一审核领取、状态 CAS 与明确合并授权。全量测试 250/250、Phase 0 89/89、独立定向验收 40/40 及 Web 构建通过；运行中的服务尚未切换。方案与验收见 [统一送审](UNIFIED_SUBMIT.md)。
+- 当前小步：审核长期保留与恢复；跨机 MCP 可达性、托管平台合并 API、推送认证修复、清理或删除工作副本仍不在本次默认动作内。
 
 ### alpha.33 工作线时间线与验收（2026-09-03）
 

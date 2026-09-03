@@ -1,9 +1,15 @@
 import readline from 'node:readline';
 import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
+import { sanitizeIntegrationErrorPayload } from './service-client.mjs';
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const PROGRESS_STATUSES = ['working', 'in_progress'];
+const INTEGRATION_TOOL_NAMES = new Set([
+  'ugk_integration_begin',
+  'ugk_integration_review',
+  'ugk_integration_merge',
+]);
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   DEFAULT_PROTOCOL_VERSION,
   '2025-06-18',
@@ -1026,6 +1032,22 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
 
       try {
         const handlerResult = await handler(toolArgs);
+        if (INTEGRATION_TOOL_NAMES.has(toolName)) {
+          const isFailed = (handlerResult?.ok === false
+            || (Boolean(handlerResult?.code) && handlerResult?.ok !== true))
+            && handlerResult?.isError === undefined;
+          if (isFailed) {
+            const safePayload = sanitizeIntegrationErrorPayload(handlerResult);
+            return {
+              jsonrpc: '2.0',
+              id,
+              result: {
+                isError: true,
+                content: [{ type: 'text', text: JSON.stringify(safePayload) }]
+              }
+            };
+          }
+        }
         let formattedResult;
         if (handlerResult && typeof handlerResult === 'object' && Array.isArray(handlerResult.content)) {
           formattedResult = handlerResult;
@@ -1050,6 +1072,20 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
           try {
             stderr.write(`[ugk-mcp] Handler error for ${toolName}: ${err?.message || err}\n`);
           } catch {}
+        }
+        if (INTEGRATION_TOOL_NAMES.has(toolName) || err?.isIntegrationError) {
+          const safePayload = sanitizeIntegrationErrorPayload(
+            err?.integrationPayload ?? err,
+            err?.code ?? 'REQUEST_FAILED'
+          );
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              isError: true,
+              content: [{ type: 'text', text: JSON.stringify(safePayload) }]
+            }
+          };
         }
         const publicMessage = typeof err?.publicMessage === 'string'
           ? err.publicMessage
