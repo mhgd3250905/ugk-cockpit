@@ -9,11 +9,12 @@ import {
   dispatchMessage
 } from '../src/mcp/stdio-protocol.mjs';
 
-test('TOOLS definition contains the required 12 tools and no path/projectId/worktreeId/token', () => {
+test('TOOLS definition includes preflight and no path/projectId/worktreeId/token', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
     'ugk_work_accept',
     'ugk_work_progress',
+    'ugk_work_submit_preflight',
     'ugk_work_submit',
     'ugk_integration_begin',
     'ugk_integration_review',
@@ -285,9 +286,8 @@ test('dispatchMessage accurately forwards tool calls to handlers once with exact
   assert.deepEqual(JSON.parse(structuredProgRes.result.content[0].text), { revision: 2, status: 'running' });
 
   const submitPayload = {
-    sessionId: 'sess-100',
+    preflightId: 'preflight-100',
     clientRequestId: 'req-submit-1',
-    expectedRevision: 2,
     summary: '完成开发空间功能',
   };
   const submitRes = await dispatchMessage({

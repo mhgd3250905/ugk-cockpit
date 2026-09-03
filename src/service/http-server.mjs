@@ -30,7 +30,11 @@ import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
-import { submitDevelopmentSpace } from '../core/submission-service.mjs';
+import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
+import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
+import { deliveryResponse } from '../core/delivery-messages.mjs';
+import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
+import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
   beginIntegrationReview,
   mergeApprovedSubmission,
@@ -698,10 +702,11 @@ function integrationReviewPrompt(submission) {
     '请在当前主项目的 active Cockpit 会话中审核并处理这个待办。',
     `submissionId: "${submission.submissionId}"`,
     `expectedSubmissionRevision: ${submission.revision}`,
+    `本次代码保存点：${submission.sourceCommit}；目标基线：${submission.targetHead}。`,
     '先调用 `ugk_integration_begin` 领取并锁定审核对象；使用当前会话已有的 sessionId、最新 revision 和新的 clientRequestId，不要传路径、项目 ID、工作副本 ID 或 token。',
     '然后只针对工具返回的固定 sourceCommit 与 targetHead 审查代码差异并运行必要验证。',
     '审查完成后调用 `ugk_integration_review`，如实提交 verdict、summary、findings 和 checks。',
-    '只有 verdict 为 approved 时，才用 review 返回的最新 submissionRevision、claimRevision 调用 `ugk_integration_merge`。',
+    '审核通过不等于合并授权。只有用户明确要求合并且 verdict 为 approved 时，才用 review 返回的最新 submissionRevision、claimRevision 调用 `ugk_integration_merge`。',
     '不得自行 rebase、reset、force push、切换分支或清理开发空间；若工具返回冲突或待人工处理，停止并把影响和下一步告诉我。',
   ].join('\n');
 }
@@ -858,26 +863,6 @@ function validateMcpProgressBody(body) {
   }
 }
 
-function validateMcpSubmitBody(body) {
-  requireString(body, 'sessionId');
-  requireString(body, 'clientRequestId');
-  requireString(body, 'summary');
-  if (!Number.isInteger(body.expectedRevision)
-    || body.expectedRevision < 1
-    || body.summary.length > 160) {
-    const error = new Error('Invalid submit request.');
-    error.code = 'INVALID_REQUEST';
-    throw error;
-  }
-  const allowedKeys = new Set(['sessionId', 'clientRequestId', 'expectedRevision', 'summary']);
-  for (const key of Object.keys(body)) {
-    if (!allowedKeys.has(key)) {
-      const error = new Error(`Unexpected submit property: ${key}`);
-      error.code = 'INVALID_REQUEST';
-      throw error;
-    }
-  }
-}
 
 function validateMcpIntegrationBody(body, operation) {
   requireString(body, 'sessionId');
@@ -1653,6 +1638,12 @@ export async function createCockpitHttpServer({
           revision: submission.revision,
           sourceCommit: submission.sourceCommit,
           targetHead: submission.targetHead,
+          sourceBranch: submission.sourceBranch,
+          deliveryVersion: submission.deliveryVersion,
+          conflicts: submission.delivery.conflicts ?? [],
+          fastForward: submission.delivery.fastForward ?? null,
+          pullRequestUrl: submission.delivery.pullRequestUrl ?? null,
+          pullRequestVerified: false,
           activeClaim: submission.activeClaim ? {
             claimId: submission.activeClaim.claimId,
             status: submission.activeClaim.status,
@@ -1663,7 +1654,7 @@ export async function createCockpitHttpServer({
             outcome: submission.latestReceipt.outcome,
             integratedCommit: submission.latestReceipt.integratedCommit,
           } : null,
-          reviewPrompt: ['pending', 'claimed'].includes(submission.status)
+          reviewPrompt: ['pending', 'claimed', 'conflict'].includes(submission.status)
             ? integrationReviewPrompt(submission)
             : null,
           createdAt: submission.createdAt,
@@ -2176,30 +2167,68 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit/preflight') {
+        const body = await readJson(request);
+        const invalid = validateDeliveryRequest(body, 'preflight', { bridge: true });
+        if (invalid) { sendError(response, 'INVALID_REQUEST'); return; }
+        let source = null;
+        try {
+          const registeredSources = db.prepare('SELECT id FROM delivery_sources').all();
+          const matchedSources = [];
+          for (const row of registeredSources) {
+            const candidate = readDeliverySource(db, row.id);
+            try { assertDeliveryCwd(candidate, body.mcpWorkingDirectory); } catch { continue; }
+            await observeDeliverySource(db, row.id);
+            matchedSources.push(candidate);
+          }
+          if (matchedSources.length > 1) throw Object.assign(new Error('Ambiguous delivery project'), { code: 'DELIVERY_PROJECT_AMBIGUOUS' });
+          source = matchedSources[0] ?? null;
+          if (!source) {
+            let working = null;
+            try { working = await resolveMcpWorkingProject(body.mcpWorkingDirectory); }
+            catch (error) { if (!['PROJECT_NOT_FOUND', 'PATH_NOT_AUTHORIZED'].includes(error.code)) throw error; }
+            if (working) {
+              source = await registerDeliveryLocation(db, { observation: working.observation,
+                authorizedRoot: working.space ? working.observation.canonicalPath : working.project.authorized_root,
+                projectId: working.project.id });
+            } else if (body.selectFolder) {
+              const selected = await folderPicker();
+              if (!selected) { sendJson(response, 200, { ok: true, ready: false, cancelled: true }); return; }
+              const binding = authorizeExistingPath(body.mcpWorkingDirectory, selected);
+              await checkUnsupportedFeatures(binding.rootReal);
+              const observation = await probe(binding.rootReal);
+              revalidateAuthorizedPath(binding);
+              const roots = db.prepare('SELECT authorized_root FROM projects').all().map((row) => row.authorized_root);
+              authorizeDeliveryObservation(observation, [binding.rootReal, ...roots]);
+              source = await registerDeliveryLocation(db, { observation, authorizedRoot: binding.rootReal });
+            } else {
+              sendJson(response, 200, deliveryResponse({ ok: false, code: 'DELIVERY_FOLDER_REQUIRED', localSaved: false, pushed: false }));
+              return;
+            }
+          }
+          const result = await prepareDelivery(db, {
+            commandId: id('delivery_preflight', `${source.id}:${body.clientRequestId}`), sourceId: source.id,
+            ...(body.sessionId ? { sessionId: body.sessionId, expectedRevision: body.expectedRevision } : {}),
+            ...(body.files !== undefined ? { files: body.files } : {}),
+          });
+          sendJson(response, 200, deliveryResponse(result));
+        } catch (error) {
+          sendJson(response, 200, deliveryResponse({ ok: false, code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED', localSaved: false, pushed: false }));
+        }
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit') {
         const body = await readJson(request);
-        validateMcpSubmitBody(body);
-        const result = await submitDevelopmentSpace(db, {
-          commandId: id('mcp_submit', `${body.sessionId}:${body.clientRequestId}`),
-          sessionId: body.sessionId,
-          expectedRevision: body.expectedRevision,
-          summary: body.summary,
-        }, { faultInjector });
-        if (result.ok) {
-          sendJson(response, 200, result);
-        } else {
-          sendError(response, result.code, {
-            extra: {
-              sessionId: body.sessionId,
-              revision: body.expectedRevision,
-              localSaved: Boolean(result.localSaved),
-              pushed: Boolean(result.pushed),
-              retryable: Boolean(result.retryable),
-              sourceCommit: result.sourceCommit ?? null,
-              submissionId: result.submissionId ?? null,
-            },
-          });
+        const invalid = validateDeliveryRequest(body, 'submit', { bridge: true });
+        if (invalid) {
+          sendJson(response, 200, deliveryResponse({ ok: false, code: body.preflightId ? 'INVALID_REQUEST' : 'DELIVERY_PREFLIGHT_REQUIRED', localSaved: false, pushed: false }));
+          return;
         }
+        const result = await submitDelivery(db, { ...body,
+          commandId: id('delivery_submit', `${body.preflightId}:${body.clientRequestId}`),
+        }, { faultInjector });
+        sendJson(response, 200, deliveryResponse(result));
         return;
       }
 

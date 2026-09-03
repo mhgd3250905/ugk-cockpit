@@ -4,6 +4,8 @@ import {
   parseCommandResponse,
 } from './command-journal.mjs';
 import { readSessionContext } from './assignments.mjs';
+import { verifyReviewDelivery, importReviewedDelivery } from './delivery-review.mjs';
+import { discardDeliveryCache } from './delivery-cache.mjs';
 import {
   acquireRepositoryLock,
   claimSubmission,
@@ -126,7 +128,7 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   if (submission.projectId !== binding.context.projectId) {
     return { ok: false, code: 'SUBMISSION_PROJECT_MISMATCH' };
   }
-  if (!['pending', 'claimed'].includes(submission.status)) {
+  if (!['pending', 'claimed', 'conflict'].includes(submission.status)) {
     return { ok: false, code: 'SUBMISSION_NOT_REVIEWABLE', status: submission.status };
   }
   let main;
@@ -135,7 +137,13 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   } catch (error) {
     return { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' };
   }
-  if (main.after.hasChanges) return { ok: false, code: 'MAIN_HAS_CHANGES' };
+  let deliveryReview = null;
+  if (submission.delivery?.sourceId) {
+    try { deliveryReview = await verifyReviewDelivery(submission, binding.project); }
+    catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+  }
+  if (!deliveryReview && main.after.hasChanges) return { ok: false, code: 'MAIN_HAS_CHANGES' };
+  if (!deliveryReview) {
   if (main.after.branch !== submission.targetBranch) return { ok: false, code: 'MAIN_BRANCH_CHANGED' };
   if (main.after.head !== submission.targetHead) {
     return { ok: false, code: 'TARGET_HEAD_STALE', currentHead: main.after.head };
@@ -146,6 +154,7 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
     submission.sourceCommit,
   ).catch(() => false);
   if (!descendant) return { ok: false, code: 'SOURCE_NOT_FAST_FORWARD' };
+  }
 
   const claimed = claimSubmission(db, {
     commandId,
@@ -155,6 +164,13 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   }, options);
   if (!claimed.ok) return claimed;
   const refreshed = readSubmission(db, submissionId);
+  if (deliveryReview) {
+    try {
+      deliveryReview = await verifyReviewDelivery(refreshed, binding.project, { prepare: true });
+      db.prepare('UPDATE submissions SET delivery_json = ? WHERE id = ?').run(
+        JSON.stringify({ ...refreshed.delivery, reviewCache: deliveryReview.cache }), submissionId);
+    } catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED', claimId: claimed.claimId }; }
+  }
   return {
     ok: true,
     sessionId,
@@ -171,6 +187,10 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
     title: submission.title,
     description: submission.description,
     status: 'reviewing',
+    ...(deliveryReview ? { reviewRepository: deliveryReview.repository,
+      mergeConflict: submission.delivery.relation === 'conflict',
+      conflicts: submission.delivery.conflicts,
+      warning: '只在此独立代码副本审查固定版本；它不是安全沙箱，未经授权不要执行外部脚本或注入凭据。' } : {}),
   };
 }
 
@@ -208,8 +228,14 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
   } catch (error) {
     return { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' };
   }
-  if (main.after.branch !== submission.targetBranch) return { ok: false, code: 'MAIN_BRANCH_CHANGED' };
-  if (main.after.head !== submission.targetHead) return { ok: false, code: 'TARGET_HEAD_STALE' };
+  if (submission.delivery?.sourceId) {
+    if (verdict === 'approved' && submission.delivery.relation === 'conflict') return { ok: false, code: 'DELIVERY_MERGE_CONFLICT' };
+    try { await verifyReviewDelivery(submission, binding.project); }
+    catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+  } else {
+    if (main.after.branch !== submission.targetBranch) return { ok: false, code: 'MAIN_BRANCH_CHANGED' };
+    if (main.after.head !== submission.targetHead) return { ok: false, code: 'TARGET_HEAD_STALE' };
+  }
 
   const result = recordIntegrationReview(db, {
     commandId,
@@ -223,6 +249,7 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
     payload: { findings, checks, reviewedBySessionId: sessionId },
   }, options);
   if (!result.ok) return result;
+  if (submission.delivery?.reviewCache) discardDeliveryCache(submission.delivery.reviewCache);
   return {
     ok: true,
     sessionId,
@@ -379,6 +406,17 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     if (attempt.state === 'prepared') {
       const main = await probeMain(binding.project, options);
       if (main.after.hasChanges) return retryableMergeError(db, attempt, 'MAIN_HAS_CHANGES', 'Main has local changes.', options);
+      const latestSubmission = readSubmission(db, submissionId);
+      if (latestSubmission.delivery?.sourceId) {
+        const latestClaim = readIntegrationClaim(db, claimId);
+        if (latestSubmission.status !== 'approved' || latestSubmission.revision !== expectedSubmissionRevision
+          || latestClaim?.status !== 'active' || latestClaim?.revision !== expectedClaimRevision) {
+          return { ok: false, code: 'INTEGRATION_REVISION_CONFLICT' };
+        }
+        if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
+        try { await importReviewedDelivery(latestSubmission, binding.project); }
+        catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+      }
       if (main.after.branch !== attempt.targetBranch) {
         updateAttempt(db, commandId, { state: 'attention', last_error_code: 'MAIN_BRANCH_CHANGED' }, options);
         return { ok: false, code: 'MAIN_BRANCH_CHANGED', humanActionRequired: true };

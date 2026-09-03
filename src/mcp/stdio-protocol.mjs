@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { VERSION } from '../version.mjs';
+import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const PROGRESS_STATUSES = ['working', 'in_progress'];
@@ -85,23 +86,33 @@ export const TOOLS = [
     }
   },
   {
-    name: 'ugk_work_submit',
-    description: 'Only call after the user explicitly says a managed development-space task is complete and asks to save, push, and send it to the main project for review',
+    name: 'ugk_work_submit_preflight',
+    description: 'After explicit submit intent, verify the registered project, authorized current directory, selected changes and latest remote target without changing user code. No init required. selectFolder opens a user-controlled folder authorization dialog.',
     inputSchema: {
       type: 'object',
       properties: {
-        sessionId: {
-          type: 'string',
-          description: 'The identifier of the active development-space session'
-        },
+        clientRequestId: { type: 'string' },
+        sessionId: { type: 'string' },
+        expectedRevision: { type: 'integer', minimum: 1 },
+        files: { type: 'array', maxItems: 200, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 1024 }, description: 'Exact relative files selected from the returned changes; omit to discover scope first; [] submits committed work only.' },
+        selectFolder: { type: 'boolean', description: 'Only with user agreement: open the native folder picker to authorize this current code location.' }
+      },
+      required: ['clientRequestId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_work_submit',
+    description: 'Explicitly save, normally push and register a fixed-version review task after a valid MCP preflight; no prior init or development-space session required. Never merge automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        preflightId: { type: 'string', description: 'Unexpired identifier returned by ugk_work_submit_preflight for this directory and selected content' },
+        allowConflicts: { type: 'boolean', description: 'Only true after explicit user confirmation to save a conflict-marked delivery' },
+        pullRequestUrl: { type: 'string', description: 'Optional GitHub PR reference; not a verified approval or merge receipt' },
         clientRequestId: {
           type: 'string',
           description: 'Stable idempotency key for this submission attempt'
-        },
-        expectedRevision: {
-          type: 'integer',
-          minimum: 1,
-          description: 'Latest Cockpit session revision'
         },
         summary: {
           type: 'string',
@@ -110,7 +121,7 @@ export const TOOLS = [
           description: 'Concise feature-delivery summary used for the saved change and review request'
         }
       },
-      required: ['sessionId', 'clientRequestId', 'expectedRevision', 'summary'],
+      required: ['preflightId', 'clientRequestId', 'summary'],
       additionalProperties: false
     }
   },
@@ -595,29 +606,6 @@ function validateProgressArgs(args) {
   return null;
 }
 
-function validateSubmitArgs(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) {
-    return 'Arguments must be an object';
-  }
-  const allowedKeys = ['sessionId', 'clientRequestId', 'expectedRevision', 'summary'];
-  for (const key of Object.keys(args)) {
-    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
-    if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
-  }
-  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
-    return 'Missing or invalid required field: sessionId (must be non-empty string)';
-  }
-  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
-    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
-  }
-  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
-    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
-  }
-  if (typeof args.summary !== 'string' || args.summary.trim() === '' || args.summary.length > 160) {
-    return 'Missing or invalid required field: summary (must be non-empty string up to 160 characters)';
-  }
-  return null;
-}
 
 function validateIntegrationArgs(args, operation) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return 'Arguments must be an object';
@@ -934,7 +922,9 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
       } else if (toolName === 'ugk_work_progress') {
         validationError = validateProgressArgs(toolArgs);
       } else if (toolName === 'ugk_work_submit') {
-        validationError = validateSubmitArgs(toolArgs);
+        validationError = validateDeliveryRequest(toolArgs, 'submit');
+      } else if (toolName === 'ugk_work_submit_preflight') {
+        validationError = validateDeliveryRequest(toolArgs, 'preflight');
       } else if (toolName === 'ugk_integration_begin') {
         validationError = validateIntegrationArgs(toolArgs, 'begin');
       } else if (toolName === 'ugk_integration_review') {

@@ -68,7 +68,12 @@ export function createServiceHandlers({
   return {
     ugk_work_accept: (arguments_) => call('/api/v1/mcp/work/accept', arguments_),
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
-    ugk_work_submit: (arguments_) => call('/api/v1/mcp/work/submit', arguments_),
+    ugk_work_submit_preflight: (arguments_) => call('/api/v1/mcp/work/submit/preflight', {
+      ...arguments_, mcpWorkingDirectory: workingDirectory,
+    }),
+    ugk_work_submit: (arguments_) => call('/api/v1/mcp/work/submit', {
+      ...arguments_, mcpWorkingDirectory: workingDirectory,
+    }),
     ugk_integration_begin: (arguments_) => call('/api/v1/mcp/integration/begin', arguments_),
     ugk_integration_review: (arguments_) => call('/api/v1/mcp/integration/review', arguments_),
     ugk_integration_merge: (arguments_) => call('/api/v1/mcp/integration/merge', arguments_),

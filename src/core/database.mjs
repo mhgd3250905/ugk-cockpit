@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 18;
+export const SUPPORTED_SCHEMA_VERSION = 19;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -627,6 +627,45 @@ CREATE INDEX idx_integration_attempts_submission_state
   ON integration_attempts(submission_id, state, updated_at DESC);
 CREATE INDEX idx_integration_attempts_session
   ON integration_attempts(session_id, updated_at DESC);
+`,
+  },
+  {
+    version: 19,
+    name: 'delivery-intake-preflight',
+    sql: `
+CREATE TABLE delivery_sources (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  authorized_root TEXT NOT NULL,
+  source_remote_identity TEXT NOT NULL,
+  target_remote_identity TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(project_id, worktree_id)
+) STRICT;
+CREATE TABLE delivery_preflights (
+  id TEXT PRIMARY KEY,
+  command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),
+  source_id TEXT NOT NULL REFERENCES delivery_sources(id),
+  session_id TEXT,
+  session_revision INTEGER,
+  inspection_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE delivery_attempts (
+  command_id TEXT PRIMARY KEY REFERENCES commands(id),
+  preflight_id TEXT NOT NULL UNIQUE REFERENCES delivery_preflights(id),
+  state TEXT NOT NULL CHECK(state IN ('prepared','local_saved','pushed','completed','attention')),
+  source_commit TEXT,
+  submission_id TEXT REFERENCES submissions(id),
+  last_error_code TEXT,
+  updated_at TEXT NOT NULL
+) STRICT;
+ALTER TABLE submissions ADD COLUMN delivery_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE submissions ADD COLUMN delivery_line_key TEXT;
+ALTER TABLE submissions ADD COLUMN delivery_version INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX idx_submission_delivery_line ON submissions(delivery_line_key, delivery_version);
 `,
   },
 ];

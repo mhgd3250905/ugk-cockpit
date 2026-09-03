@@ -1,7 +1,7 @@
 interface:
   display_name: "Cockpit 送审"
-  short_description: "保存开发空间成果并安全送交主项目审核"
-  default_prompt: "使用 $cockpit-submit 保存当前开发空间成果并送交主项目审核。"
+  short_description: "先核对项目、分支与合并冲突，再保存上传当前成果并交给主项目审核"
+  default_prompt: "使用 $cockpit-submit 检查并送审当前分支成果，无需提前 init。"
 dependencies:
   tools:
     - type: "mcp"

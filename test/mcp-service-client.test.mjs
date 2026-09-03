@@ -27,12 +27,12 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
   assert.equal(calls[1].url, 'http://127.0.0.1:41737/api/v1/mcp/work/begin');
 
   const submitArguments = {
-    sessionId: 'session-1', clientRequestId: 'request-submit', expectedRevision: 2,
+    preflightId: 'preflight-1', clientRequestId: 'request-submit',
     summary: '完成开发空间功能',
   };
   await handlers.ugk_work_submit(submitArguments);
   assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/work/submit');
-  assert.deepEqual(JSON.parse(calls[2].options.body), submitArguments);
+  assert.deepEqual(JSON.parse(calls[2].options.body), { ...submitArguments, mcpWorkingDirectory: 'E:\\fixture\\active-project' });
 
   await handlers.ugk_work_handoff({
     sessionId: 'session-1', clientRequestId: 'request-3', expectedRevision: 1,

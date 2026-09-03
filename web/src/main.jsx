@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createApiClient } from './api.js';
+import { SUBMIT_MESSAGE, deliveryStatusLabel } from './delivery-view.mjs';
 import './styles.css';
 
 const STATUS = {
@@ -1214,6 +1215,20 @@ function DetailErrorState({ notice, onRetry }) {
   );
 }
 
+function SubmitHelp() {
+  const [copied, setCopied] = useState(false);
+  return <details className="review-prompt-fallback">
+    <summary>外部或已有分支如何送审？</summary>
+    <p>无论是否提前接入过平台，都可以在完成功能的会话中调用 cockpit-submit。首次访问新目录会请你选择文件夹授权。</p>
+    <button type="button" className="btn btn-secondary btn-sm" onClick={async () => {
+      try { await navigator.clipboard.writeText(SUBMIT_MESSAGE); setCopied(true); }
+      catch { setCopied(false); }
+    }}>{copied ? '送审消息已复制' : '复制分支送审消息'}</button>
+    <pre>{SUBMIT_MESSAGE}</pre>
+    <p>外部机器无法连接本机平台时，交付消息只表示“待接入”，不能当作平台已收到。</p>
+  </details>;
+}
+
 function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const git = project.git ?? {};
@@ -1302,6 +1317,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
             <p>功能送达后，从这里复制标准审核提示词。</p>
           </div>
         </div>
+        <SubmitHelp />
         {submissions.length === 0 ? (
           <p className="workspace-empty">当前没有等待处理的功能。</p>
         ) : (
@@ -1310,7 +1326,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
               <article className="workspace-card review-card" key={submission.submissionId}>
                 <div>
                   <strong>{submission.title || submission.spaceName}</strong>
-                  <span>{submission.status === 'pending' ? '等待 main 审核' : submission.status === 'claimed' ? '审核进行中' : submission.status === 'integrated' ? '已接入主项目' : submission.status === 'approved' ? '审核通过，等待接入' : '需要查看审核结果'}</span>
+                  <span>{deliveryStatusLabel(submission)}</span>
+                  {submission.sourceBranch && <span>工作线：{submission.sourceBranch} · 第 {submission.deliveryVersion ?? 1} 次交付</span>}
+                  {submission.fastForward === false && submission.status === 'pending' && <span>未发现文件冲突；接入前仍需处理主项目版本衔接。</span>}
+                  {submission.conflicts?.length > 0 && <details><summary>查看冲突文件（{submission.conflicts.length}）</summary><ul>{submission.conflicts.map((file) => <li key={file}>{file}</li>)}</ul></details>}
+                  {submission.pullRequestUrl && <a href={submission.pullRequestUrl} target="_blank" rel="noopener noreferrer">查看关联 PR（状态尚未核验）</a>}
                 </div>
                 {submission.reviewPrompt && (
                   <button type="button" className="btn btn-primary btn-sm" onClick={() => onCopyReviewPrompt(submission)}>

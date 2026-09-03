@@ -517,12 +517,21 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   assert.equal(resumed.status, 'active');
   assert.equal(resumed.worktreeId, spaceWorktreeId);
 
-  // 11. Explicit submit saves all changes, pushes the managed branch, and creates main review work
+  // 11. Explicit preflight binds selected content before saving and pushing.
   writeFileSync(path.join(spaceFolder, 'feature.txt'), 'ready for review\n');
-  const submitRes = await post(service, '/api/v1/mcp/work/submit', {
+  const preflightRes = await post(service, '/api/v1/mcp/work/submit/preflight', {
     sessionId,
-    clientRequestId: 'space-submit-1',
+    clientRequestId: 'space-preflight-1',
     expectedRevision: resumed.revision,
+    files: ['feature.txt'],
+    mcpWorkingDirectory: spaceFolder,
+  });
+  const preflight = await preflightRes.json();
+  assert.equal(preflight.ready, true, JSON.stringify(preflight));
+  const submitRes = await post(service, '/api/v1/mcp/work/submit', {
+    preflightId: preflight.preflightId,
+    clientRequestId: 'space-submit-1',
+    mcpWorkingDirectory: spaceFolder,
     summary: '完成开发空间功能',
   });
   assert.equal(submitRes.status, 200, await submitRes.clone().text());
@@ -539,9 +548,9 @@ test('development space MCP init, progress, relay, and resume workflows bind cor
   );
 
   const submitReplay = await post(service, '/api/v1/mcp/work/submit', {
-    sessionId,
+    preflightId: preflight.preflightId,
     clientRequestId: 'space-submit-1',
-    expectedRevision: resumed.revision,
+    mcpWorkingDirectory: spaceFolder,
     summary: '完成开发空间功能',
   });
   assert.deepEqual(await submitReplay.json(), submitted);

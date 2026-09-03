@@ -134,6 +134,8 @@ function mapSubmission(row, activeClaimRow, latestReceiptRow) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     closedAt: row.closed_at ?? null,
+    delivery: JSON.parse(row.delivery_json ?? '{}'),
+    deliveryVersion: row.delivery_version ?? 1,
     activeClaim: activeClaimRow ? mapClaim(activeClaimRow) : null,
     latestReceipt: latestReceiptRow ? mapReceipt(latestReceiptRow) : null,
   };
@@ -302,7 +304,8 @@ export function createSubmission(db, request = {}, options = {}) {
       return response;
     }
 
-    if (sourceWorktree.repository_identity !== project.repository_identity) {
+    if (sourceWorktree.repository_identity !== project.repository_identity
+      && !db.prepare('SELECT id FROM delivery_sources WHERE project_id = ? AND worktree_id = ?').get(projectId, sourceWorktreeId)) {
       const response = {
         ok: false,
         code: 'REPOSITORY_IDENTITY_MISMATCH',

@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { remoteAuthArguments } from './remote-auth.mjs';
 
 const execFileAsync = promisify(execFile);
 const MAX_ALTERNATES_BYTES = 64 * 1024;
@@ -36,7 +37,7 @@ export function safeGitEnvironment() {
 
 export async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0] } = {}) {
   try {
-    const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...args], {
+    const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...await remoteAuthArguments(args), ...args], {
       cwd,
       timeout: timeoutMs,
       maxBuffer,

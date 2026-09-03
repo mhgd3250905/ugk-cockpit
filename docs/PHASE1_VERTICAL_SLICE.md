@@ -27,7 +27,8 @@
 - `0.1.0-alpha.26`：补齐 INIT 节点的规范化展示，以接入时的工作目标作为摘要，完整 currentState 收入“查看接入状态”折叠区；历史记录无需迁移即可避免长段文字占满时间线，并继续保留基线 Git 证据。
 - `0.1.0-alpha.27`：交付平台持有的多开发空间生命周期。用户从项目详情选择空目录创建通用功能空间，空间会话通过 `$cockpit-submit` 显式保存并普通 push；主项目待办提供一键复制审核提示词，以固定 SHA、独占 claim、revision CAS 驱动领取、审核和 `ff-only` 接入。接入的本地保存、远端 push 与不可变回执可从崩溃或网络失败恢复，平台不自动 rebase、reset、force push 或清理空间。
 - `0.1.0-alpha.28`：修复开发空间创建入口依赖历史项目观察值的问题。用户选定空目录后，平台先只读复核主项目身份与当前 Git 状态，将最新观察写入项目记录，再把该 HEAD 作为创建 CAS 基线；只有复核与创建之间确有并发提交时才继续安全停止。
-- 当前小步：多开发空间闭环已可用，继续补充真实项目可用性验证与后续安全整理入口；清理或删除工作副本仍不在默认动作内。
+- `0.1.0-alpha.29`：统一受管空间与外部分支的显式送审入口。新增 `ugk_work_submit_preflight`，先核对已登记项目、目录授权、交付文件范围、最新远端 main 与真实合并冲突，再通过 `ugk_work_submit` 精确保存、普通推送、固定 SHA 登记待办。无 session 不要求重新 init，也不接管旧写入权限；新版使旧审核失效，审核可在隔离副本进行。完整边界与验收见 [统一送审](UNIFIED_SUBMIT.md)。
+- 当前小步：统一送审闭环；继续补充用户实测。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
 
 ## 产品方向：晨间工作简报
 
@@ -106,7 +107,7 @@
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容。服务端从一次性代码、接力码或 session 解析项目和代码位置；
+- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 13 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

@@ -22,7 +22,7 @@ test('new database records every ordered migration', (t) => {
   assert.deepEqual(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       .map((row) => row.version),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    Array.from({ length: SUPPORTED_SCHEMA_VERSION }, (_, index) => index + 1),
   );
   db.close();
 });
@@ -679,25 +679,13 @@ test('version 4 database upgrades through current schema preserving projects', (
 
 test('version 15 database upgrades through current schema creating empty_folder_grants', (t) => {
   const dbPath = fixture(t, 'migration-v15');
-  const legacy = new DatabaseSync(dbPath);
+  const legacy = openCockpitDatabase(dbPath);
+  removeDeliveryMigration(legacy);
   legacy.exec(`
-    CREATE TABLE schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      applied_at TEXT NOT NULL
-    ) STRICT;
-    INSERT INTO schema_migrations VALUES (1, 'phase0-core', '2026-01-01T00:00:00.000Z');
-    INSERT INTO schema_migrations VALUES (15, 'repository-locks', '2026-01-01T00:00:00.000Z');
-    CREATE TABLE repository_locks (
-      repository_identity TEXT PRIMARY KEY,
-      lock_id TEXT NOT NULL UNIQUE,
-      holder TEXT NOT NULL,
-      operation TEXT NOT NULL,
-      expires_at INTEGER NOT NULL,
-      acquired_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      command_id TEXT
-    ) STRICT;
+    DROP TABLE integration_attempts;
+    DROP TABLE submission_attempts;
+    DROP TABLE empty_folder_grants;
+    DELETE FROM schema_migrations WHERE version >= 16;
     PRAGMA user_version = 15;
   `);
   legacy.close();
@@ -736,9 +724,19 @@ test('version 15 database upgrades through current schema creating empty_folder_
   upgraded.close();
 });
 
+function removeDeliveryMigration(db) {
+  db.exec(`DROP TABLE delivery_attempts; DROP TABLE delivery_preflights; DROP TABLE delivery_sources;
+    DROP INDEX idx_submission_delivery_line;
+    ALTER TABLE submissions DROP COLUMN delivery_json;
+    ALTER TABLE submissions DROP COLUMN delivery_line_key;
+    ALTER TABLE submissions DROP COLUMN delivery_version;`);
+  db.prepare('DELETE FROM schema_migrations WHERE version = 19').run();
+}
+
 test('version 16 database upgrades to version 17 creating durable submission attempts', (t) => {
   const dbPath = fixture(t, 'migration-v16');
   const legacy = openCockpitDatabase(dbPath);
+  removeDeliveryMigration(legacy);
   legacy.exec('PRAGMA user_version = 16');
   legacy.prepare('DELETE FROM schema_migrations WHERE version >= 17').run();
   legacy.exec('DROP TABLE integration_attempts');
@@ -746,7 +744,7 @@ test('version 16 database upgrades to version 17 creating durable submission att
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   const columns = upgraded.prepare('PRAGMA table_info(submission_attempts)').all()
     .map((row) => row.name);
   assert.ok(columns.includes('command_id'));
@@ -759,13 +757,14 @@ test('version 16 database upgrades to version 17 creating durable submission att
 test('version 17 database upgrades to version 18 creating durable integration attempts', (t) => {
   const dbPath = fixture(t, 'migration-v17');
   const legacy = openCockpitDatabase(dbPath);
+  removeDeliveryMigration(legacy);
   legacy.exec('PRAGMA user_version = 17');
   legacy.prepare('DELETE FROM schema_migrations WHERE version = 18').run();
   legacy.exec('DROP TABLE integration_attempts');
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 18);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   const columns = upgraded.prepare('PRAGMA table_info(integration_attempts)').all()
     .map((row) => row.name);
   assert.ok(columns.includes('submission_id'));
@@ -773,6 +772,22 @@ test('version 17 database upgrades to version 18 creating durable integration at
   assert.ok(columns.includes('integrated_commit'));
   assert.ok(columns.includes('external_integration'));
   upgraded.close();
+});
+
+test('version 18 upgrades repeatably without losing existing project or receipt tables', (t) => {
+  const dbPath = fixture(t, 'migration-v18');
+  const legacy = openCockpitDatabase(dbPath);
+  removeDeliveryMigration(legacy);
+  legacy.exec('PRAGMA user_version = 18');
+  legacy.close();
+  for (let i = 0; i < 2; i += 1) {
+    const upgraded = openCockpitDatabase(dbPath);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
+    assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM delivery_preflights').get().n, 0);
+    assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM integration_receipts').get().n, 0);
+    assert.ok(upgraded.prepare('PRAGMA table_info(submissions)').all().some((column) => column.name === 'delivery_json'));
+    upgraded.close();
+  }
 });
 
 test('database from a newer product version is rejected without mutation', (t) => {
