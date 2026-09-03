@@ -220,6 +220,46 @@ function useTheme() {
   return [mode, setMode];
 }
 
+const PROJECT_ROUTE_PREFIX = '#/projects/';
+
+function readAppRoute() {
+  if (typeof window === 'undefined') return { kind: 'list', projectId: null };
+  const hash = window.location.hash || '';
+  if (!hash.startsWith(PROJECT_ROUTE_PREFIX)) return { kind: 'list', projectId: null };
+
+  const encodedId = hash.slice(PROJECT_ROUTE_PREFIX.length).replace(/\/+$/, '');
+  if (!encodedId) return { kind: 'detail', projectId: null, invalid: true };
+  try {
+    const projectId = decodeURIComponent(encodedId);
+    return projectId
+      ? { kind: 'detail', projectId, invalid: false }
+      : { kind: 'detail', projectId: null, invalid: true };
+  } catch {
+    return { kind: 'detail', projectId: null, invalid: true };
+  }
+}
+
+function useAppRoute() {
+  const [route, setRoute] = useState(readAppRoute);
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(readAppRoute());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  return route;
+}
+
+function navigateToProject(projectId) {
+  if (!projectId) return;
+  window.location.hash = `${PROJECT_ROUTE_PREFIX}${encodeURIComponent(projectId)}`;
+}
+
+function navigateToProjectList() {
+  if (window.location.hash) window.location.hash = '';
+}
+
 const api = createApiClient({
   fetchImpl: (...args) => fetch(...args),
   storage: localStorage,
@@ -491,6 +531,7 @@ function useFocusTrap(isOpen, onClose, busy = false) {
 }
 
 function App() {
+  const route = useAppRoute();
   const [dashboard, setDashboard] = useState(null);
   const [isStale, setIsStale] = useState(false);
   const [selection, setSelection] = useState(null);
@@ -504,11 +545,104 @@ function App() {
   const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
   const projectDetailRef = useRef(projectDetail);
-  const activeDetailProjectId = projectDetail?.seed?.id ?? null;
+  const dashboardRef = useRef(dashboard);
+  const activeDetailProjectId = route.kind === 'detail' && !route.invalid
+    ? route.projectId
+    : null;
 
   useEffect(() => {
     projectDetailRef.current = projectDetail;
   }, [projectDetail]);
+
+  useEffect(() => {
+    dashboardRef.current = dashboard;
+  }, [dashboard]);
+
+  function isCurrentDetailRequest(requestId, projectId) {
+    const currentRoute = readAppRoute();
+    return detailRequestRef.current === requestId
+      && currentRoute.kind === 'detail'
+      && !currentRoute.invalid
+      && currentRoute.projectId === projectId;
+  }
+
+  function beginProjectDetailLoad(projectId, seed = null) {
+    const requestId = ++detailRequestRef.current;
+    const fallbackSeed = seed ?? {
+      id: projectId,
+      name: '项目详情',
+      stage: 'development',
+    };
+    setProjectDetail({
+      seed: fallbackSeed,
+      data: null,
+      loading: true,
+      loadingMore: false,
+      error: null,
+      requestId,
+    });
+
+    api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=30&offset=0`)
+      .then((data) => {
+        if (!isCurrentDetailRequest(requestId, projectId)) return;
+        setProjectDetail((previous) => {
+          if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) {
+            return previous;
+          }
+          return {
+            ...previous,
+            data,
+            loading: false,
+            error: null,
+          };
+        });
+      })
+      .catch((error) => {
+        if (!isCurrentDetailRequest(requestId, projectId)) return;
+        setProjectDetail((previous) => {
+          if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) {
+            return previous;
+          }
+          return {
+            ...previous,
+            loading: false,
+            error: createErrorNotice(error, {
+              message: '暂时没有读到项目运行详情。',
+              impact: '项目代码和已有工作记录不受影响。',
+              requiredAction: '请确认本机服务已更新，然后重试读取。',
+            }),
+          };
+        });
+      });
+  }
+
+  useEffect(() => {
+    if (route.kind !== 'detail') {
+      detailRequestRef.current += 1;
+      setProjectDetail(null);
+      return;
+    }
+
+    if (route.invalid) {
+      const requestId = ++detailRequestRef.current;
+      setProjectDetail({
+        seed: { id: '', name: '项目详情', stage: 'development' },
+        data: null,
+        loading: false,
+        loadingMore: false,
+        requestId,
+        error: {
+          message: '项目链接无效。',
+          impact: '没有读取或修改任何项目记录。',
+          required_action: '请返回项目列表后重新选择项目。',
+        },
+      });
+      return;
+    }
+
+    const seed = dashboardRef.current?.projects?.find((item) => item.id === route.projectId) ?? null;
+    beginProjectDetailLoad(route.projectId, seed);
+  }, [route.kind, route.projectId, route.invalid]);
 
   useEffect(() => {
     if (!activeDetailProjectId) return;
@@ -518,14 +652,19 @@ function App() {
       if (!current || current.seed.id !== activeDetailProjectId || current.loadingMore) return;
       const count = current.data?.timeline?.items?.length ?? 30;
       const limit = calculateRefreshLimit(count);
-      const requestId = detailRequestRef.current;
+      const requestId = current.requestId;
       try {
         const data = await api(
           `/api/v1/projects/${encodeURIComponent(activeDetailProjectId)}?limit=${limit}&offset=0`
         );
-        if (detailRequestRef.current !== requestId) return;
+        if (!isCurrentDetailRequest(requestId, activeDetailProjectId)) return;
         setProjectDetail((prev) => {
-          if (!prev || prev.seed.id !== activeDetailProjectId || prev.loadingMore) return prev;
+          if (
+            !prev
+            || prev.requestId !== requestId
+            || prev.seed.id !== activeDetailProjectId
+            || prev.loadingMore
+          ) return prev;
           const visibleCount = prev.data?.timeline?.items?.length ?? 0;
           if (visibleCount > limit) return prev;
           return {
@@ -740,28 +879,39 @@ function App() {
   async function refreshOpenProjectDetail(actionNotice = null) {
     const current = projectDetailRef.current;
     if (!current) return;
-    const data = await api(`/api/v1/projects/${encodeURIComponent(current.seed.id)}?limit=30&offset=0`);
-    setProjectDetail((previous) => previous ? {
-      ...previous,
-      data,
-      loading: false,
-      error: null,
-      actionNotice,
-    } : previous);
+    const projectId = current.seed.id;
+    const requestId = current.requestId;
+    if (!isCurrentDetailRequest(requestId, projectId)) return;
+    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=30&offset=0`);
+    if (!isCurrentDetailRequest(requestId, projectId)) return;
+    setProjectDetail((previous) => {
+      if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) return previous;
+      return {
+        ...previous,
+        data,
+        loading: false,
+        error: null,
+        actionNotice,
+      };
+    });
   }
 
   async function createDevelopmentSpaceFromDetail() {
-    const project = projectDetailRef.current?.data?.project;
-    if (!project?.git?.head) return;
+    const current = projectDetailRef.current;
+    const project = current?.data?.project;
+    const projectId = project?.id;
+    const requestId = current?.requestId;
+    if (!projectId || !project?.git?.head || !isCurrentDetailRequest(requestId, projectId)) return;
     setBusy(true);
     try {
       const selected = await api('/api/v1/folders/select-empty', { method: 'POST', body: '{}' });
-      if (selected.cancelled) return;
-      const refreshed = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/refresh`, {
+      if (selected.cancelled || !isCurrentDetailRequest(requestId, projectId)) return;
+      const refreshed = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/refresh`, {
         method: 'POST',
         body: JSON.stringify({ commandId: crypto.randomUUID() }),
       });
-      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/spaces`, {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
+      const result = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/spaces`, {
         method: 'POST',
         body: JSON.stringify({
           commandId: crypto.randomUUID(),
@@ -770,18 +920,22 @@ function App() {
           name: selected.folderName || '通用开发空间',
         }),
       });
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       await refreshOpenProjectDetail({
         message: `已创建 ${result.name || selected.folderName || '通用开发空间'}。`,
         detail: '代码已放入独立工作副本；主项目和已有改动没有被覆盖。',
       });
     } catch (error) {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {
         ...previous,
-        actionNotice: {
-          error: true,
-          message: error.message || '开发空间还没有创建。',
-          detail: error.required_action || '请保留当前目录并刷新后重试。',
-        },
+        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
+          actionNotice: {
+            error: true,
+            message: error.message || '开发空间还没有创建。',
+            detail: error.required_action || '请保留当前目录并刷新后重试。',
+          },
+        } : {}),
       } : previous);
     } finally {
       setBusy(false);
@@ -789,11 +943,14 @@ function App() {
   }
 
   async function assignDevelopmentSpace(space) {
-    const project = projectDetailRef.current?.data?.project;
-    if (!project) return;
+    const current = projectDetailRef.current;
+    const project = current?.data?.project;
+    const projectId = project?.id;
+    const requestId = current?.requestId;
+    if (!projectId || !isCurrentDetailRequest(requestId, projectId)) return;
     setBusy(true);
     try {
-      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/assignments`, {
+      const result = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/assignments`, {
         method: 'POST',
         body: JSON.stringify({
           clientRequestId: crypto.randomUUID(),
@@ -803,19 +960,24 @@ function App() {
           spaceId: space.spaceId,
         }),
       });
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       await navigator.clipboard.writeText(result.message);
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       await refreshOpenProjectDetail({
         message: '开发空间接入消息已复制。',
         detail: '请把它粘贴给将在该代码位置工作的 Agent。',
       });
     } catch (error) {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {
         ...previous,
-        actionNotice: {
-          error: true,
-          message: error.message || '还没有生成开发空间接入消息。',
-          detail: error.required_action || '请刷新当前项目后重试。',
-        },
+        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
+          actionNotice: {
+            error: true,
+            message: error.message || '还没有生成开发空间接入消息。',
+            detail: error.required_action || '请刷新当前项目后重试。',
+          },
+        } : {}),
       } : previous);
     } finally {
       setBusy(false);
@@ -823,24 +985,33 @@ function App() {
   }
 
   async function copyIntegrationPrompt(submission) {
-    if (!submission.reviewPrompt) return;
+    const current = projectDetailRef.current;
+    const projectId = current?.seed?.id;
+    const requestId = current?.requestId;
+    if (!submission.reviewPrompt || !projectId || !isCurrentDetailRequest(requestId, projectId)) return;
     try {
       await navigator.clipboard.writeText(submission.reviewPrompt);
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {
         ...previous,
-        actionNotice: {
-          message: '审核提示词已复制。',
-          detail: '请把它粘贴给主项目中的 Agent；平台会规范记录领取、审核与合并回执。',
-        },
+        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
+          actionNotice: {
+            message: '审核提示词已复制。',
+            detail: '请把它粘贴给主项目中的 Agent；平台会规范记录领取、审核与合并回执。',
+          },
+        } : {}),
       } : previous);
     } catch {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {
         ...previous,
-        actionNotice: {
-          error: true,
-          message: '无法自动写入剪贴板。',
-          detail: '请展开审核提示词并手动复制。',
-        },
+        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
+          actionNotice: {
+            error: true,
+            message: '无法自动写入剪贴板。',
+            detail: '请展开审核提示词并手动复制。',
+          },
+        } : {}),
       } : previous);
     }
   }
@@ -855,45 +1026,45 @@ function App() {
     openHandoff(project);
   }
 
-  async function openProjectDetail(project) {
-    const requestId = ++detailRequestRef.current;
-    setProjectDetail({ seed: project, data: null, loading: true, loadingMore: false, error: null });
-    try {
-      const data = await api(`/api/v1/projects/${encodeURIComponent(project.id)}?limit=30&offset=0`);
-      if (detailRequestRef.current !== requestId) return;
-      setProjectDetail({ seed: project, data, loading: false, loadingMore: false, error: null });
-    } catch (error) {
-      if (detailRequestRef.current !== requestId) return;
-      setProjectDetail({
-        seed: project,
-        data: null,
-        loading: false,
-        loadingMore: false,
-        error: createErrorNotice(error, {
-          message: '暂时没有读到项目运行详情。',
-          impact: '项目代码和已有工作记录不受影响。',
-          requiredAction: '请确认本机服务已更新，然后重试读取。',
-        }),
-      });
-    }
+  function openProjectDetail(project) {
+    navigateToProject(project.id);
   }
 
   function closeProjectDetail() {
     detailRequestRef.current += 1;
+    navigateToProjectList();
     setProjectDetail(null);
+  }
+
+  function retryProjectDetail() {
+    if (!activeDetailProjectId) return;
+    const seed = projectDetailRef.current?.seed ?? null;
+    beginProjectDetailLoad(activeDetailProjectId, seed);
   }
 
   async function loadOlderTimeline() {
     const detail = projectDetail;
     const timeline = detail?.data?.timeline;
     if (!detail || !timeline?.hasMore || detail.loadingMore) return;
-    setProjectDetail((current) => current ? { ...current, loadingMore: true } : current);
+    const projectId = detail.seed.id;
+    const requestId = detail.requestId;
+    if (!isCurrentDetailRequest(requestId, projectId)) return;
+    setProjectDetail((current) => {
+      if (!current || current.requestId !== requestId || current.seed.id !== projectId) return current;
+      return { ...current, loadingMore: true };
+    });
     try {
       const page = await api(
-        `/api/v1/projects/${encodeURIComponent(detail.seed.id)}/timeline?limit=30&offset=${timeline.items.length}`
+        `/api/v1/projects/${encodeURIComponent(projectId)}/timeline?limit=30&offset=${timeline.items.length}`
       );
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((current) => {
-        if (!current || current.seed.id !== detail.seed.id || !current.data) return current;
+        if (
+          !current
+          || current.requestId !== requestId
+          || current.seed.id !== projectId
+          || !current.data
+        ) return current;
         return {
           ...current,
           loadingMore: false,
@@ -909,15 +1080,19 @@ function App() {
         };
       });
     } catch (error) {
-      setProjectDetail((current) => current ? {
-        ...current,
-        loadingMore: false,
-        error: createErrorNotice(error, {
-          message: '更早的节点暂时没有加载出来。',
-          impact: '已显示的记录和项目代码不受影响。',
-          requiredAction: '稍后可以再次尝试加载。',
-        }),
-      } : current);
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
+      setProjectDetail((current) => {
+        if (!current || current.requestId !== requestId || current.seed.id !== projectId) return current;
+        return {
+          ...current,
+          loadingMore: false,
+          error: createErrorNotice(error, {
+            message: '更早的节点暂时没有加载出来。',
+            impact: '已显示的记录和项目代码不受影响。',
+            requiredAction: '稍后可以再次尝试加载。',
+          }),
+        };
+      });
     }
   }
 
@@ -1043,39 +1218,56 @@ function App() {
       </header>
 
       <main className="control-content">
-        {notice && !selection && !handoffProject && !projectDetail && (
-          <NoticeBanner notice={notice} busy={busy} />
-        )}
-
-        {!dashboard ? (
-          <LoadingState notice={notice} />
-        ) : projects.length === 0 ? (
-          <EmptyState busy={busy} onChoose={() => chooseFolder()} />
+        {route.kind === 'detail' ? (
+          <ProjectDetailPage
+            state={route.invalid || projectDetail?.seed?.id !== activeDetailProjectId ? null : projectDetail}
+            projectId={activeDetailProjectId}
+            invalidRoute={route.invalid}
+            onBack={closeProjectDetail}
+            onRetry={retryProjectDetail}
+            onLoadOlder={loadOlderTimeline}
+            busy={busy}
+            onCreateSpace={createDevelopmentSpaceFromDetail}
+            onAssignSpace={assignDevelopmentSpace}
+            onCopyReviewPrompt={copyIntegrationPrompt}
+          />
         ) : (
-          groups.length > 0 && (
-            <section className="projects-section" aria-label="项目矩阵">
-              <div className="groups-container">
-                {groups.map((group) => (
-                  <div key={group.key} className="status-group">
-                    <div className="group-header">
-                      <h3 className="group-title">{group.title}</h3>
-                      <span className="group-count">{group.list.length}</span>
-                    </div>
-                    <div className="group-grid">
-                      {group.list.map((project) => (
-                        <ProjectCard
-                          key={project.id}
-                          project={project}
-                          onAction={handleProjectAction}
-                          onOpen={openProjectDetail}
-                        />
-                      ))}
-                    </div>
+          <>
+            {notice && !selection && !handoffProject && (
+              <NoticeBanner notice={notice} busy={busy} />
+            )}
+
+            {!dashboard ? (
+              <LoadingState notice={notice} />
+            ) : projects.length === 0 ? (
+              <EmptyState busy={busy} onChoose={() => chooseFolder()} />
+            ) : (
+              groups.length > 0 && (
+                <section className="projects-section" aria-label="项目矩阵">
+                  <div className="groups-container">
+                    {groups.map((group) => (
+                      <div key={group.key} className="status-group">
+                        <div className="group-header">
+                          <h3 className="group-title">{group.title}</h3>
+                          <span className="group-count">{group.list.length}</span>
+                        </div>
+                        <div className="group-grid">
+                          {group.list.map((project) => (
+                            <ProjectCard
+                              key={project.id}
+                              project={project}
+                              onAction={handleProjectAction}
+                              onOpen={openProjectDetail}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </section>
-          )
+                </section>
+              )
+            )}
+          </>
         )}
       </main>
 
@@ -1105,18 +1297,6 @@ function App() {
         />
       )}
 
-      {projectDetail && (
-        <ProjectDetailModal
-          state={projectDetail}
-          onClose={closeProjectDetail}
-          onRetry={() => openProjectDetail(projectDetail.seed)}
-          onLoadOlder={loadOlderTimeline}
-          busy={busy}
-          onCreateSpace={createDevelopmentSpaceFromDetail}
-          onAssignSpace={assignDevelopmentSpace}
-          onCopyReviewPrompt={copyIntegrationPrompt}
-        />
-      )}
     </div>
   );
 }
@@ -1245,71 +1425,87 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailModal({ state, onClose, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
-  const modalRef = useFocusTrap(true, onClose);
-  const project = state.data?.project ?? state.seed;
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
+  const titleRef = useRef(null);
+  const project = state?.data?.project ?? state?.seed ?? {
+    name: '项目详情',
+    stage: 'development',
+  };
   const statusReason = getProjectStatusReason(project);
   const statusCopy = STATUS[statusReason] ?? STATUS.ready_to_start;
+  const headingCopy = state?.loading
+    ? '正在读取项目运行详情…'
+    : state?.error && !state?.data
+      ? '项目详情暂时不可用'
+      : statusCopy.title;
+  const eyebrow = state?.loading
+    ? '正在读取'
+    : state?.error && !state?.data
+      ? '读取失败'
+      : statusCopy.eyebrow;
+  const invalidNotice = {
+    message: '项目链接无效。',
+    impact: '没有读取或修改任何项目记录。',
+    required_action: '请返回项目列表后重新选择项目。',
+  };
 
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, []);
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    const frame = window.requestAnimationFrame(() => titleRef.current?.focus({ preventScroll: true }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [projectId, invalidRoute]);
 
   return (
-    <div
-      className="modal-backdrop project-detail-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
+    <section
+      className={`project-detail-page status-${getProjectTheme(project)}`}
+      aria-labelledby="project-detail-title"
     >
-      <section
-        ref={modalRef}
-        className={`project-detail-dialog status-${getProjectTheme(project)}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="project-detail-title"
-        tabIndex="-1"
-      >
-        <header className="project-detail-header">
-          <div className="project-detail-heading">
-            <div className="detail-kicker-row">
-              <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>
-              <span className="badge badge-status">{statusCopy.eyebrow}</span>
-            </div>
-            <h2 id="project-detail-title">{project.name}</h2>
-            <p>{statusCopy.title}</p>
-          </div>
-          <button type="button" className="detail-close-btn" onClick={onClose} aria-label="关闭项目详情">
-            <span aria-hidden="true">×</span>
+      <header className="project-detail-header">
+        <div className="project-detail-heading">
+          <button type="button" className="detail-back-link" onClick={onBack}>
+            ← 返回项目列表
           </button>
-        </header>
-
-        <div className="project-detail-scroll">
-          {state.loading ? (
-            <DetailLoadingState />
-          ) : state.error && !state.data ? (
-            <DetailErrorState notice={state.error} onRetry={onRetry} />
-          ) : (
-            <ProjectDetailContent
-              data={state.data}
-              loadingMore={state.loadingMore}
-              loadError={state.error}
-              onLoadOlder={onLoadOlder}
-              actionNotice={state.actionNotice}
-              busy={busy}
-              onCreateSpace={onCreateSpace}
-              onAssignSpace={onAssignSpace}
-              onCopyReviewPrompt={onCopyReviewPrompt}
-            />
-          )}
+          <div className="detail-kicker-row">
+            {project.stage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
+            <span className="badge badge-status">{eyebrow}</span>
+          </div>
+          <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
+          <p>{headingCopy}</p>
         </div>
-      </section>
-    </div>
+      </header>
+
+      <div className="project-detail-content">
+        {invalidRoute ? (
+          <DetailErrorState notice={invalidNotice} onRetry={onBack} retryLabel="返回项目列表" />
+        ) : !state || state.loading ? (
+          <DetailLoadingState />
+        ) : state.error && !state.data ? (
+          <DetailErrorState notice={state.error} onRetry={onRetry} />
+        ) : state.data ? (
+          <ProjectDetailContent
+            data={state.data}
+            loadingMore={state.loadingMore}
+            loadError={state.error}
+            onLoadOlder={onLoadOlder}
+            actionNotice={state.actionNotice}
+            busy={busy}
+            onCreateSpace={onCreateSpace}
+            onAssignSpace={onAssignSpace}
+            onCopyReviewPrompt={onCopyReviewPrompt}
+          />
+        ) : (
+          <DetailErrorState
+            notice={{
+              message: '项目详情暂时没有数据。',
+              impact: '项目代码和已有工作记录不受影响。',
+              required_action: '请返回项目列表后重试。',
+            }}
+            onRetry={onBack}
+            retryLabel="返回项目列表"
+          />
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1324,14 +1520,14 @@ function DetailLoadingState() {
   );
 }
 
-function DetailErrorState({ notice, onRetry }) {
+function DetailErrorState({ notice, onRetry, retryLabel = '重新读取详情' }) {
   return (
     <div className="detail-error" role="alert">
       <span className="detail-error-mark" aria-hidden="true">!</span>
       <h3>{notice.message}</h3>
       {notice.impact && <p>{notice.impact}</p>}
       {notice.required_action && <p>{notice.required_action}</p>}
-      <button type="button" className="btn btn-secondary" onClick={onRetry}>重新读取详情</button>
+      <button type="button" className="btn btn-secondary" onClick={onRetry}>{retryLabel}</button>
     </div>
   );
 }
