@@ -12,9 +12,20 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 
 不得调用 `ugk_work_init` 或 `ugk_work_handoff` 代替接力；接力是非终态流程，不结束 Cockpit 阶段、不重新 init、不自动 handoff，不要自动 commit、清理、覆盖或 reset。
 
+### 会话信息遗失时先恢复
+
+如果准备接力前当前聊天没有最近一次成功 MCP 返回的 `sessionId` 或 `revision`，先在当前项目目录调用只读 `ugk_work_context`（默认 `{}`）。它会由 MCP bridge 注入工作目录并从平台读取权威状态；不要翻查凭据、猜测编号或重新 init。
+
+- 只有工具返回 `canContinue: true`、`status: "active"`、有效 `sessionId` 和 `revision` 时，才可继续准备 relay。
+- 返回 `awaiting_resume`、已结束、`stale`、`ambiguous` 或其他不可继续状态时，停止写入并如实说明；不要用同目录候选自动接续。
+- 返回 `requiresUserConfirmation: true` 且 `bindingStatus: "unbound"` 时，只向用户确认是否“继续此工作会话”。用户确认后，使用上一次 context 返回的 `sessionId` 与 `revision` 成对调用 `ugk_work_context` 的 `confirmSessionId` 和 `expectedRevision`；确认期间 revision 变化则重新查询并再次确认。
+- 只有确认调用返回 `bindingEstablished: true`、`canContinue: true`、`status: "active"` 后，才可准备 relay。context 只更新 bridge 的进程内绑定，不改变平台会话、租约、心跳或 revision。
+
+新聊天已经收到 `continueCode` 时直接按模式二调用 `ugk_work_resume`，不要先用 context 的 `awaiting_resume` 结果阻挡恢复。
+
 ## 模式一：准备接力（旧聊天）
 
-在已有 active Cockpit session 且掌握最近一次成功 MCP 返回的 `sessionId` 与 `revision` 时调用 `ugk_work_relay`。准备模式只做轻量对齐摘要：复用当前已知事实和本阶段已经观察到的未对齐项，不为 relay 扫描全仓、运行测试、修文档或创建 commit，也不要因此触发 `$cockpit-closeout`。无论是否有未对齐项都不得阻塞 relay；把已知事项带入 `pendingItems`、`risks` 和 `nextSessionFocus`，不明事实不要猜测。所有列表字段都必须提供字符串数组，若无内容提供 `[]`：
+在已有 active Cockpit session 且通过最近一次成功 MCP 返回或上述 context 恢复流程掌握可信 `sessionId` 与 `revision` 时调用 `ugk_work_relay`。准备模式只做轻量对齐摘要：复用当前已知事实和本阶段已经观察到的未对齐项，不为 relay 扫描全仓、运行测试、修文档或创建 commit，也不要因此触发 `$cockpit-closeout`。无论是否有未对齐项都不得阻塞 relay；把已知事项带入 `pendingItems`、`risks` 和 `nextSessionFocus`，不明事实不要猜测。所有列表字段都必须提供字符串数组，若无内容提供 `[]`：
 
 ```json
 {
@@ -63,5 +74,5 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 
 - `clientRequestId` 必须非空且唯一。传输结果不确定时，使用相同的 ID 重发完全相同的 payload；不要换 ID 或修改 revision。
 - 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 仅包含 `continueCode` 与 `clientRequestId`，不得携带 `currentTask`、`currentState`；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
-- MCP 报错、不可用、缺少成功标志（如 `relayPrepared: true` / `status: "awaiting_resume"` / 非空 `continueCode` / 非空 `continueMessage`）或状态不符时，向用户说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用 `ugk-cockpit` 本地 MCP。缺少必要字段不得声称接力准备或恢复成功。
+- MCP 报错、不可用、缺少成功标志（如 `relayPrepared: true` / `status: "awaiting_resume"` / 非空 `continueCode` / 非空 `continueMessage`）或状态不符时，向用户说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用或重新连接新版 `ugk-cockpit` 本地 MCP。缺少必要字段不得声称接力准备或恢复成功，也不要因为 context 不可用就重新 init。
 - 恢复成功前不要修改代码；不得清理或重置工作区已有改动。

@@ -11,6 +11,11 @@ export function createServiceHandlers({
   }
 
   let scopedToken = null;
+  // This is deliberately process-local.  It is a conversation/bridge
+  // binding, not a durable credential or a second Cockpit session record.
+  // Only successful init/accept/resume responses (and an explicit context
+  // confirmation) may replace it.
+  let bridgeBinding = null;
 
   async function bootstrapScopedToken() {
     let response;
@@ -65,8 +70,49 @@ export function createServiceHandlers({
     return body;
   }
 
+  function rememberBinding(result) {
+    if (result?.ok !== true || typeof result.sessionId !== 'string'
+      || !result.sessionId.trim() || typeof result.worktreeId !== 'string'
+      || !result.worktreeId.trim()) {
+      return;
+    }
+    const returned = result.binding && typeof result.binding === 'object'
+      ? result.binding
+      : {};
+    const relay = result.relay && typeof result.relay === 'object'
+      ? result.relay
+      : {};
+    if (returned.sessionId !== undefined && returned.sessionId !== result.sessionId) return;
+    if (returned.worktreeId !== undefined && returned.worktreeId !== result.worktreeId) return;
+    bridgeBinding = Object.freeze({
+      sessionId: result.sessionId,
+      worktreeId: result.worktreeId,
+      relayId: returned.relayId ?? relay.relayId ?? null,
+      relaySequence: returned.relaySequence ?? relay.sequence ?? null,
+      acceptedRevision: returned.acceptedRevision ?? relay.acceptedRevision ?? null,
+    });
+  }
+
+  async function callAndRemember(pathname, arguments_) {
+    const result = await call(pathname, arguments_);
+    rememberBinding(result);
+    return result;
+  }
+
   return {
-    ugk_work_accept: (arguments_) => call('/api/v1/mcp/work/accept', arguments_),
+    ugk_work_context: async (arguments_ = {}) => {
+      const request = {};
+      if (arguments_ && typeof arguments_ === 'object' && !Array.isArray(arguments_)) {
+        if (arguments_.confirmSessionId !== undefined) request.confirmSessionId = arguments_.confirmSessionId;
+        if (arguments_.expectedRevision !== undefined) request.expectedRevision = arguments_.expectedRevision;
+      }
+      if (bridgeBinding) request.bridgeBinding = { ...bridgeBinding };
+      request.mcpWorkingDirectory = workingDirectory;
+      const result = await call('/api/v1/mcp/work/context', request);
+      if (result?.bindingEstablished === true) rememberBinding(result);
+      return result;
+    },
+    ugk_work_accept: (arguments_) => callAndRemember('/api/v1/mcp/work/accept', arguments_),
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
     ugk_work_submit_preflight: (arguments_) => call('/api/v1/mcp/work/submit/preflight', {
       ...arguments_, mcpWorkingDirectory: workingDirectory,
@@ -79,13 +125,13 @@ export function createServiceHandlers({
     ugk_integration_merge: (arguments_) => call('/api/v1/mcp/integration/merge', arguments_),
     ugk_work_finish: (arguments_) => call('/api/v1/mcp/work/finish', arguments_),
     ugk_work_handoff: (arguments_) => call('/api/v1/mcp/work/handoff', arguments_),
-    ugk_work_init: (arguments_) => call('/api/v1/mcp/work/init', {
+    ugk_work_init: (arguments_) => callAndRemember('/api/v1/mcp/work/init', {
       ...arguments_,
       mcpWorkingDirectory: workingDirectory,
     }),
     ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
     ugk_work_relay: (arguments_) => call('/api/v1/mcp/work/relay', arguments_),
-    ugk_work_resume: (arguments_) => call('/api/v1/mcp/work/resume', {
+    ugk_work_resume: (arguments_) => callAndRemember('/api/v1/mcp/work/resume', {
       ...arguments_,
       mcpWorkingDirectory: workingDirectory,
     }),

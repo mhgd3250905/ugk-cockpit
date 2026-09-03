@@ -4,9 +4,13 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.31` — 将本地阶段收束与 Cockpit 进度登记分开：没有会话信息或 MCP 不可用时，仍可整理文档、保存提交，并执行用户明确授权的普通 push；只如实说明平台登记状态，不要求为版本保存重新 init 或接力。正式 handoff 仍须用户明确结束并通过平台校验。
+`0.1.0-alpha.32` — 新增只读会话查询 `ugk_work_context`：聊天遗失会话编号或最新进度号后，可从平台重新核对；已接入客户端保留绑定，无绑定时由用户确认候选，已被新接力取代的旧绑定不能自动继续。查询不修改平台会话、写入权限或代码。
+
+保留 `alpha.31` 的本地收束与可选平台登记分离：没有会话信息或 MCP 不可用时，仍可整理文档、保存提交，并执行用户明确授权的普通 push。正式 handoff 仍须用户明确结束并通过平台校验。
 
 当前开发版本以 `VERSION` 为准；版本与阶段验收的当前事实源是 [阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+
+会话恢复的契约、实施计划和验收边界见 [会话信息恢复](docs/SESSION_CONTEXT_RECOVERY.md)。升级后，运行中的本地服务及 Agent MCP 连接需加载新版；工具列表出现 `ugk_work_context` 才表示客户端已加载新接口。重新连接不等于重新 init，也不会结束平台已有会话。
 
 保留 `alpha.30` 的送审内容范围修复：只送审已提交代码时，不读取无关工作文件内容；保存改动时仅对选中文件做内容检查。主项目里的截图、视频和未选中文件不再因体积过大阻塞送审，无需清理 build。用户确认的分支成果可以包含其他会话的提交，不冒称已验收，也不因换过会话拒绝接纳。
 
@@ -56,7 +60,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit
 
 ## 配套 Skills
 
-仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，新的只读 MCP 工具 `ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管，只有用户明确确认后才在当前 bridge 进程内建立临时绑定。查询不会改变平台会话、写入归属、租约、心跳或 revision；旧 bridge 被新接力代际超越时会安全标为 stale。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 安装到当前用户的 Codex：
 

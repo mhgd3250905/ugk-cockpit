@@ -18,6 +18,8 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 
 不要为 `status`、`diff`、`log`、`add`，失败命令，或没有成果的切分支调用；这些不是检查点。不要为了判断是否该记录而主动运行 Git。
 
+如果当前聊天遗失了最近一次成功 MCP 返回的 `sessionId` 或 `revision`，不要直接放弃、猜测或重新 init；在当前项目目录先调用只读 `ugk_work_context`（默认 `{}`）。只有返回 `canContinue: true`、`status: "active"`、有效 `sessionId` 和 `revision` 时，才可按下方格式登记。如果返回 `bindingStatus: "unbound"`，先向用户确认是否继续该候选会话，再把 context 返回的 `sessionId` 填入 `confirmSessionId`、把返回的 `revision` 填入 `expectedRevision`，成对调用 context 确认；确认成功前不要写 progress。`awaiting_resume`、`stale`、`ambiguous`、已结束或无会话时只报告平台登记未完成，不能把目录候选当作当前聊天身份。context 查询本身不改变会话、租约、心跳、revision 或业务记录；不可用时提示重新连接新版 MCP，不要求重新 init。
+
 ## 调用
 
 只使用最近一次成功 MCP 调用返回的 `sessionId` 和 `revision`，生成新的非空 `clientRequestId`，调用：

@@ -73,7 +73,7 @@ Preflight 报告必须包含以下字段，缺任一字段不得进入阶段二�
 
 只有阶段二完成并核对有效 `commit SHA` 且具备活跃会话与 MCP 条件时，才调用一次 `ugk_work_progress`，这是 closeout 唯一的 progress 记录。不要因为 closeout 创建或复用的 commit 再额外触发通用 `$cockpit-progress`。如果环境已经对同一 closeout commit 记录了可信进展，直接复用该记录及其最新 `revision`，不再调用 progress、不要重复记录，也不得猜 revision。
 
-本地成功后，只有同时具备已有 `active` Cockpit session、掌握最近一次成功 MCP 返回的可信 `sessionId` 和 `revision`、且工具可用时，才登记一次非终态 progress。缺少任一条件时安全跳过登记，向用户明确说明本地收束已成功、未登记平台检查点及具体跳过原因（无 active 会话 / 缺少可信 sessionId/revision / MCP 不可用；不把当前上下文缺信息推断为平台没有 active session）；不得扫描 DB、翻查旧消息或拼凑凭据，也不得要求用户执行 init/relay 来完成本地保存。
+本地成功后，只有同时具备已有 `active` Cockpit session、掌握最近一次成功 MCP 返回的可信 `sessionId` 和 `revision`、且工具可用时，才登记一次非终态 progress。若仅因聊天上下文遗失这些值，可在登记阶段（不改变本地 Preflight/Alignment 门槛）调用只读 `ugk_work_context`（默认 `{}`）重新读取权威状态；`unbound` 候选必须先获得用户“继续此工作会话”的明确确认，再把 context 返回的 `sessionId` 填入 `confirmSessionId`、把返回的 `revision` 填入 `expectedRevision`，成对确认，且只在确认响应 `canContinue: true`、`status: "active"` 后登记。`awaiting_resume`、`stale`、`ambiguous`、已结束或无会话时安全跳过登记。缺少任一条件时向用户明确说明本地收束已成功、未登记平台检查点及具体跳过原因（无 active 会话 / 缺少可信 sessionId/revision / MCP 不可用 / context 不可继续；不把当前上下文缺信息推断为平台没有 active session）；不得扫描 DB、翻查旧消息或拼凑凭据，也不得要求用户执行 init/relay 来完成本地保存。context 查询不会修改平台会话、写入归属、租约、心跳或 revision；不可用时提示重新连接新版 MCP。
 
 具备登记条件时，请求必须使用最近成功 MCP 返回的值，不得自行递增 `expectedRevision`，不得为绕过失败创建 session，并生成新的非空唯一 `clientRequestId`：
 

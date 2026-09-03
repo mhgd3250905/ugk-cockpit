@@ -19,7 +19,7 @@ description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP
 
 ## 前置条件与内容
 
-只在已有 active Cockpit session 且掌握最近一次成功 MCP 返回的 `sessionId`、`revision` 时调用。根据事实选择 `outcome`：`completed`、`blocked` 或 `abandoned`，不要为了好看把未完成工作写成 `completed`。所有列表字段都必须提供字符串数组，没有内容就用 `[]`。
+只在已有 active Cockpit session 且掌握最近一次成功 MCP 返回的 `sessionId`、`revision` 时调用。若聊天上下文遗失这些值，先在当前项目目录调用只读 `ugk_work_context`（默认 `{}`），按其权威结果恢复；`unbound` 候选必须先获得用户“继续此工作会话”的明确确认，再把 context 返回的 `sessionId` 填入 `confirmSessionId`、把返回的 `revision` 填入 `expectedRevision`，成对确认，并且只有确认响应 `canContinue: true`、`status: "active"` 后才可调用终态 handoff。`awaiting_resume`、`stale`、`ambiguous`、已结束或无会话时不得用 context 确认捷径，按平台提示处理。context 查询不会改变平台会话、写入归属、租约、心跳或 revision，也不要因此重新 init。根据事实选择 `outcome`：`completed`、`blocked` 或 `abandoned`，不要为了好看把未完成工作写成 `completed`。所有列表字段都必须提供字符串数组，没有内容就用 `[]`。
 
 ```json
 {
@@ -44,6 +44,6 @@ description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP
 ## 成功标准与重试
 
 - 只有工具结果中严格出现布尔值 `cockpitVerified: true`（且不是工具错误）才向用户宣告“交接已由 Cockpit 验证并完成”。只有 `ok: true`、Markdown 或本地推断都不能替代该字段。
-- 缺少 active session、MCP 不可用、缺少 `cockpitVerified: true` 或 revision 冲突时，只向用户报告未完成平台 handoff（说明发生了什么、代码是否受影响及建议下一步），绝不否定本地已完成的收束成果；不能绕过失败 CAS 继续终态调用，也不得声称交接成功。提示用户安装/启用 `ugk-cockpit` 本地 MCP 或按 MCP 返回的事实处理。
+- 缺少 active session、MCP 不可用、context 返回不可继续状态、缺少 `cockpitVerified: true` 或 revision 冲突时，只向用户报告未完成平台 handoff（说明发生了什么、代码是否受影响及建议下一步），绝不否定本地已完成的收束成果；不能绕过失败 CAS 继续终态调用，也不得声称交接成功。提示用户安装/启用或重新连接新版 `ugk-cockpit` 本地 MCP；不要因为 context 不可用重新 init。
 - 传输结果不确定时，使用同一个 `clientRequestId` 重发完全相同的 payload；不要换 ID、猜 revision、重复结束操作或再调用另一个终态工具。
 - 请求不得携带 `path`、`projectId` 或 `worktreeId`；不要在 Skill 内复制状态机或绕过 MCP 权限。

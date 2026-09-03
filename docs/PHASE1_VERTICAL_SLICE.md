@@ -30,7 +30,16 @@
 - `0.1.0-alpha.29`：统一受管空间与外部分支的显式送审入口。新增 `ugk_work_submit_preflight`，先核对已登记项目、目录授权、交付文件范围、最新远端 main 与真实合并冲突，再通过 `ugk_work_submit` 精确保存、普通推送、固定 SHA 登记待办。无 session 不要求重新 init，也不接管旧写入权限；新版使旧审核失效，审核可在隔离副本进行。完整边界与验收见 [统一送审](UNIFIED_SUBMIT.md)。
 - `0.1.0-alpha.30`：修正预检误读源/目标无关文件的范围问题。已提交代码按提交对象检查，待保存内容仅检查选中文件；主项目未跟踪素材不再触发送审体积上限。Skill 不以聊天归属限制已确认的分支成果，也不建议清理 build 绕过平台问题。
 - `0.1.0-alpha.31`：将 `$cockpit-closeout` 的本地两阶段收束与可选平台进度登记解耦。缺少可信会话或 MCP 不可用时不阻断本地文档整理、commit 和已明确授权的普通 push；基线可来自已记录的任务起点或明确版本记录。解除 closeout 元数据的必需 MCP 依赖，同步 handoff/progress 文案；正式 handoff 仍保留 active session、revision CAS 与 `cockpitVerified: true` 门槛。不修改生产 API、数据库 schema 或送审/合并逻辑。
-- 当前小步：本地收束与平台登记解耦，统一送审已有用户实测记录。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+- `0.1.0-alpha.32`：新增 `ugk_work_context` 只读恢复会话信息。bridge 记住接入绑定，服务端按当前已授权代码位置核对会话及最新 revision；无绑定时只展示候选，经用户明确确认后建立当前客户端的临时绑定。接力代际变化使旧绑定失效，查询不修改平台会话、lease、心跳或 revision。同步 relay/progress/handoff 与 closeout 可选登记规则，不要求因聊天缺编号重新 init；不改变 submit 无需提前接入的契约。方案及验收见 [会话信息恢复](SESSION_CONTEXT_RECOVERY.md)。
+- 当前小步：补齐会话信息恢复，保留本地收束与平台登记解耦。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+
+### alpha.32 会话恢复与验收（2026-09-03）
+
+基线 `6ca91e92f5430ad848b15e8a5880567d679e5522`，起点工作区干净。Luna Max 实现只读 context、bridge 临时绑定和接力代际校验，主会话复核并补齐自动绑定及确认后复查的真实客户端验证。新增 MCP 工具和 HTTP 查询路由，补充 init/accept 响应的 worktreeId；无数据库迁移、生产依赖或业务仓库改动。
+
+本轮工作树验证：核心临时项目链路 2/2；MCP/技能受影响检查 23/23；既有 relay、MCP-first、stdio 启动检查 5/5；最终 `npm test` 229/229、`npm run test:phase0` 89/89，均 exit 0。四个技能格式校验、三个实现文件语法检查、`git diff --check` 和 `npm run build:web` 通过。六个 Cockpit 技能的仓库、共享目录及 Codex 安装副本正文和元数据 SHA-256 一致。完整计划及证据见 [会话信息恢复](SESSION_CONTEXT_RECOVERY.md)。
+
+本地服务已加载 alpha.32；空参数只读查询找回已有 active 会话和 revision 20，新 bridge 无绑定时正确要求确认。更新服务和查询前后会话、租约、接力状态与操作记录数量摘要不变，schema 19、完整性正常。未对真实会话执行确认、relay、init 或 progress；旧 MCP 连接仍需重新连接以发现新工具，此操作不等于重新 init。
 
 ### alpha.31 收束与验收（2026-09-03）
 
@@ -119,7 +128,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 13 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
+- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息，不创建或接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 14 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

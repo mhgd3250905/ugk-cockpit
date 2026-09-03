@@ -13,6 +13,25 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
 
 export const TOOLS = [
   {
+    name: 'ugk_work_context',
+    description: 'Read the current Cockpit work session for this project directory; this is read-only and never acquires a lease or changes session state',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirmSessionId: {
+          type: 'string',
+          description: 'Only after the user explicitly confirms continuing this candidate session; copy the sessionId returned by the previous context query',
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: 'The exact revision returned with confirmSessionId by the previous context query',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'ugk_work_accept',
     description: 'Only call after the user explicitly instructs accepting this dispatch and provides its code; initialize or resume the AI session',
     inputSchema: {
@@ -520,6 +539,32 @@ function validateAcceptArgs(args) {
   return null;
 }
 
+function validateContextArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) {
+      return `Forbidden property: ${key}`;
+    }
+    if (!['confirmSessionId', 'expectedRevision'].includes(key)) {
+      return `Unexpected property: ${key}`;
+    }
+  }
+  const hasSession = args.confirmSessionId !== undefined;
+  const hasRevision = args.expectedRevision !== undefined;
+  if (hasSession !== hasRevision) {
+    return 'confirmSessionId and expectedRevision must be provided together';
+  }
+  if (hasSession && (typeof args.confirmSessionId !== 'string' || args.confirmSessionId.trim() === '')) {
+    return 'Invalid confirmSessionId (must be non-empty string)';
+  }
+  if (hasRevision && (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1)) {
+    return 'Invalid expectedRevision (must be a positive integer)';
+  }
+  return null;
+}
+
 function validateBeginArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
@@ -917,7 +962,9 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
       const toolArgs = params.arguments || {};
 
       let validationError = null;
-      if (toolName === 'ugk_work_accept') {
+      if (toolName === 'ugk_work_context') {
+        validationError = validateContextArgs(toolArgs);
+      } else if (toolName === 'ugk_work_accept') {
         validationError = validateAcceptArgs(toolArgs);
       } else if (toolName === 'ugk_work_progress') {
         validationError = validateProgressArgs(toolArgs);

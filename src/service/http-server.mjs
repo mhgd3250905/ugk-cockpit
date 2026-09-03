@@ -347,6 +347,12 @@ const PUBLIC_ERRORS = {
     impact: '没有接受接力，也没有修改代码或项目绑定。',
     requiredAction: '请在原项目目录中重试，不要手动改写路径绑定。',
   },
+  SESSION_CONTEXT_CONFIRMATION_STALE: {
+    status: 409,
+    message: '确认继续前，这个工作会话已经发生变化。',
+    impact: '没有绑定新的聊天，也没有修改会话、写入权限或代码。',
+    requiredAction: '请重新查询当前工作会话，确认最新状态后再继续。',
+  },
   RELAY_TTL_TOO_LONG: {
     status: 400,
     message: '接力码有效期超过安全上限。',
@@ -994,6 +1000,24 @@ const MCP_RESUME_KEYS = new Set([
   'mcpWorkingDirectory',
 ]);
 
+const MCP_CONTEXT_KEYS = new Set([
+  'mcpWorkingDirectory',
+  'confirmSessionId',
+  'expectedRevision',
+  // This field is injected by the stdio bridge and is not exposed in the
+  // model-facing tool schema.  It carries only the bridge's process-local
+  // binding generation; it is never persisted.
+  'bridgeBinding',
+]);
+
+const MCP_CONTEXT_BINDING_KEYS = new Set([
+  'sessionId',
+  'worktreeId',
+  'relayId',
+  'relaySequence',
+  'acceptedRevision',
+]);
+
 function rejectUnexpectedMcpFields(body, allowedKeys, operation) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     const error = new Error(`Invalid ${operation} request.`);
@@ -1046,6 +1070,57 @@ function validateMcpResumeBody(body) {
   requireString(body, 'mcpWorkingDirectory');
 }
 
+function validateMcpContextBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_CONTEXT_KEYS, 'context');
+  requireString(body, 'mcpWorkingDirectory');
+  const hasConfirmSession = body.confirmSessionId !== undefined;
+  const hasExpectedRevision = body.expectedRevision !== undefined;
+  if (hasConfirmSession !== hasExpectedRevision) {
+    const error = new Error('Context confirmation requires confirmSessionId and expectedRevision together.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  if (hasConfirmSession) {
+    requireString(body, 'confirmSessionId');
+    if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+      const error = new Error('Invalid context expectedRevision.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+  if (body.bridgeBinding !== undefined) {
+    if (!body.bridgeBinding || typeof body.bridgeBinding !== 'object' || Array.isArray(body.bridgeBinding)) {
+      const error = new Error('Invalid context bridge binding.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    rejectUnexpectedMcpFields(body.bridgeBinding, MCP_CONTEXT_BINDING_KEYS, 'context bridge binding');
+    requireString(body.bridgeBinding, 'sessionId');
+    requireString(body.bridgeBinding, 'worktreeId');
+    const generationFields = ['relayId', 'relaySequence', 'acceptedRevision'];
+    const generationPresent = generationFields.some((field) => body.bridgeBinding[field] !== undefined);
+    const generationAllNull = generationFields.every((field) => body.bridgeBinding[field] === null);
+    const generationAllValues = generationFields.every((field) => body.bridgeBinding[field] !== undefined
+      && body.bridgeBinding[field] !== null);
+    if (generationPresent && !generationAllNull && !generationAllValues) {
+      const error = new Error('Invalid context bridge generation.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    if (generationAllValues && (
+      typeof body.bridgeBinding.relayId !== 'string'
+      || !body.bridgeBinding.relayId.trim()
+      || !Number.isInteger(body.bridgeBinding.relaySequence)
+      || body.bridgeBinding.relaySequence < 1
+      || !Number.isInteger(body.bridgeBinding.acceptedRevision)
+      || body.bridgeBinding.acceptedRevision < 1)) {
+      const error = new Error('Invalid context bridge generation.');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+  }
+}
+
 function validateMcpFinishBody(body) {
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
@@ -1060,6 +1135,191 @@ function validateMcpFinishBody(body) {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+}
+
+function relayGenerationRow(row) {
+  if (!row) return null;
+  return {
+    relayId: row.id,
+    sequence: row.sequence,
+    acceptedRevision: row.accepted_revision,
+  };
+}
+
+function readSessionRelayState(db, sessionId, now = Date.now()) {
+  const waiting = db.prepare(`
+    SELECT id, sequence, state, accepted_revision, expires_at
+    FROM relays
+    WHERE session_id = ? AND state = 'active' AND expires_at > ?
+    ORDER BY sequence DESC, created_at DESC, id DESC
+    LIMIT 1
+  `).get(sessionId, now) ?? null;
+  const accepted = db.prepare(`
+    SELECT id, sequence, state, accepted_revision, expires_at
+    FROM relays
+    WHERE session_id = ? AND state = 'accepted'
+    ORDER BY sequence DESC, accepted_revision DESC, created_at DESC, id DESC
+    LIMIT 1
+  `).get(sessionId) ?? null;
+  return {
+    waiting: waiting ? {
+      relayId: waiting.id,
+      sequence: waiting.sequence,
+      status: waiting.state,
+      expiresAt: waiting.expires_at,
+    } : null,
+    generation: relayGenerationRow(accepted),
+  };
+}
+
+function readWorktreeSessionState(db, worktreeId, now = Date.now()) {
+  const rows = db.prepare(`
+    SELECT assignments.id AS assignment_id,
+           assignments.project_id,
+           assignments.worktree_id,
+           assignments.session_id,
+           assignments.status AS assignment_status,
+           assignments.revision AS assignment_revision,
+           assignments.updated_at AS assignment_updated_at,
+           assignments.created_at AS assignment_created_at,
+           runs.lifecycle AS run_lifecycle,
+           runs.revision AS run_revision
+    FROM assignments
+    LEFT JOIN runs ON runs.id = assignments.session_id
+    WHERE assignments.worktree_id = ? AND assignments.session_id IS NOT NULL
+    ORDER BY assignments.updated_at DESC, assignments.created_at DESC, assignments.id DESC
+  `).all(worktreeId);
+  const activeRows = rows.filter((row) => row.run_lifecycle === 'active'
+    && ['accepted', 'active'].includes(row.assignment_status));
+  if (activeRows.length > 1) {
+    return {
+      status: 'ambiguous',
+      sessions: activeRows.map((row) => readSessionStateRow(db, row, now)),
+    };
+  }
+  const selected = activeRows[0] ?? rows[0] ?? null;
+  if (!selected) return { status: 'no_session', sessions: [] };
+  return {
+    status: 'session',
+    session: readSessionStateRow(db, selected, now),
+  };
+}
+
+function readSessionStateRow(db, row, now = Date.now()) {
+  const context = readSessionContext(db, row.session_id);
+  if (!context?.ok) {
+    return {
+      ok: false,
+      projectId: row.project_id,
+      worktreeId: row.worktree_id,
+      assignmentId: row.assignment_id,
+      sessionId: row.session_id,
+      status: 'session_not_found',
+      revision: null,
+      assignmentRevision: row.assignment_revision,
+      runRevision: row.run_revision,
+      leaseHeld: false,
+      relay: null,
+      generation: null,
+    };
+  }
+  const relay = readSessionRelayState(db, row.session_id, now);
+  const lease = db.prepare(`
+    SELECT run_id, generation FROM write_leases WHERE worktree_id = ?
+  `).get(row.worktree_id) ?? null;
+  const leaseHeld = Boolean(
+    context.run
+    && context.run.lifecycle === 'active'
+    && lease
+    && lease.run_id === row.session_id
+    && lease.generation === context.run.leaseGeneration,
+  );
+  const revision = context.revision ?? null;
+  const revisionsAligned = !context.run || context.run.revision === context.revision;
+  let status = context.status;
+  if (!context.run) {
+    status = context.status === 'active' ? 'stale_write_lease' : context.status;
+  } else if (context.run.lifecycle !== 'active') {
+    status = context.run.lifecycle ?? context.status;
+  } else if (!['accepted', 'active'].includes(context.status)) {
+    status = context.status;
+  } else if (!revisionsAligned) {
+    status = 'inconsistent';
+  } else if (!leaseHeld) {
+    status = 'stale_write_lease';
+  } else if (relay.waiting) {
+    status = 'awaiting_resume';
+  } else {
+    status = 'active';
+  }
+  return {
+    ok: true,
+    projectId: context.projectId,
+    projectName: context.projectName ?? null,
+    worktreeId: context.worktreeId,
+    assignmentId: context.assignmentId,
+    sessionId: context.sessionId,
+    agent: context.agentId ?? null,
+    task: context.run?.goal ?? context.taskId ?? null,
+    status,
+    lifecycle: context.run?.lifecycle ?? null,
+    health: context.run?.health ?? null,
+    revision,
+    assignmentRevision: context.revision ?? null,
+    runRevision: context.run?.revision ?? null,
+    leaseHeld,
+    relay: relay.waiting,
+    generation: relay.generation,
+  };
+}
+
+function publicSessionState(state) {
+  if (!state) return null;
+  return {
+    sessionId: state.sessionId,
+    assignmentId: state.assignmentId,
+    projectId: state.projectId,
+    projectName: state.projectName,
+    worktreeId: state.worktreeId,
+    agent: state.agent,
+    task: state.task,
+    status: state.status,
+    revision: state.revision,
+    assignmentRevision: state.assignmentRevision,
+    runRevision: state.runRevision,
+    leaseHeld: state.leaseHeld,
+    relay: state.relay,
+    relayGeneration: state.generation,
+  };
+}
+
+function publicBridgeBinding(state) {
+  if (!state) return null;
+  return {
+    sessionId: state.sessionId,
+    worktreeId: state.worktreeId,
+    relayId: state.generation?.relayId ?? null,
+    relaySequence: state.generation?.sequence ?? null,
+    acceptedRevision: state.generation?.acceptedRevision ?? null,
+  };
+}
+
+function bridgeBindingMatches(state, binding) {
+  if (!state || !binding
+    || binding.sessionId !== state.sessionId
+    || binding.worktreeId !== state.worktreeId) return false;
+  const current = state.generation;
+  const bound = binding.relayId === null || binding.relayId === undefined
+    ? null
+    : {
+      relayId: binding.relayId,
+      sequence: binding.relaySequence,
+      acceptedRevision: binding.acceptedRevision,
+    };
+  if (!current || !bound) return !current && !bound;
+  return current.relayId === bound.relayId
+    && current.sequence === bound.sequence
+    && current.acceptedRevision === bound.acceptedRevision;
 }
 
 async function readJson(request) {
@@ -1341,6 +1601,223 @@ export async function createCockpitHttpServer({
     const error = new Error('The MCP working project is not registered.');
     error.code = 'PROJECT_NOT_FOUND';
     throw error;
+  }
+
+  async function resolveMcpWorkingCandidates(workingDirectory) {
+    if (typeof workingDirectory !== 'string' || !workingDirectory.trim()) {
+      const error = new Error('MCP working directory is unavailable.');
+      error.code = 'PROJECT_NOT_FOUND';
+      throw error;
+    }
+    const candidates = db.prepare(`
+      SELECT * FROM (
+        SELECT projects.id AS project_id, projects.worktree_id AS worktree_id,
+               worktrees.canonical_path AS canonical_path
+        FROM projects
+        JOIN worktrees ON worktrees.id = projects.worktree_id
+        UNION ALL
+        SELECT development_spaces.project_id AS project_id,
+               development_spaces.worktree_id AS worktree_id,
+               worktrees.canonical_path AS canonical_path
+        FROM development_spaces
+        JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+        WHERE development_spaces.status != 'archived'
+      )
+      ORDER BY length(canonical_path) DESC, canonical_path ASC,
+               project_id ASC, worktree_id ASC
+    `).all();
+    const pathMatches = [];
+    for (const candidate of candidates) {
+      try {
+        const binding = authorizeExistingPath(workingDirectory, candidate.canonical_path);
+        revalidateAuthorizedPath(binding);
+        pathMatches.push(candidate);
+      } catch (error) {
+        if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(error?.code)) continue;
+        throw error;
+      }
+    }
+    if (pathMatches.length === 0) return [];
+    const ordered = [...pathMatches].sort((left, right) => {
+      const lengthDifference = right.canonical_path.length - left.canonical_path.length;
+      return lengthDifference
+        || left.project_id.localeCompare(right.project_id)
+        || left.worktree_id.localeCompare(right.worktree_id);
+    });
+    const mostSpecificLength = ordered[0].canonical_path.length;
+    const selected = ordered.filter((candidate) => candidate.canonical_path.length === mostSpecificLength);
+    const matches = [];
+    const seen = new Set();
+    for (const candidate of selected) {
+      const key = `${candidate.project_id}\0${candidate.worktree_id}`;
+      if (seen.has(key)) continue;
+      const working = await observeRegisteredProject(candidate.project_id, {
+        worktreeId: candidate.worktree_id,
+      });
+      seen.add(key);
+      matches.push(working);
+    }
+    return matches;
+  }
+
+  async function readMcpWorkContext(body) {
+    const safety = {
+      impact: '本次查询没有修改代码、平台会话、写入归属、租约、心跳或 revision。',
+      required_action: '请根据 status、bindingStatus 和 canContinue 处理；不要猜测编号或自动接管。',
+      next_command: null,
+      warnings: [],
+    };
+    const matches = await resolveMcpWorkingCandidates(body.mcpWorkingDirectory);
+    if (matches.length === 0) {
+      return {
+        ok: true,
+        ...safety,
+        canContinue: false,
+        requiresUserConfirmation: false,
+        bindingStatus: body.bridgeBinding ? 'stale' : 'unbound',
+        status: 'no_session',
+        sessionId: null,
+        revision: null,
+        candidates: [],
+        message: body.bridgeBinding
+          ? '当前目录没有找到旧绑定对应的已授权工作会话；没有刷新旧绑定。'
+          : '当前目录没有找到已登记的工作会话；没有创建新会话。',
+      };
+    }
+
+    const ordered = [...matches].sort((left, right) => {
+      const leftLength = left.observation.canonicalPath.length;
+      const rightLength = right.observation.canonicalPath.length;
+      return rightLength - leftLength
+        || left.project.id.localeCompare(right.project.id)
+        || left.worktreeId.localeCompare(right.worktreeId);
+    });
+    const mostSpecificLength = ordered[0].observation.canonicalPath.length;
+    const specific = ordered.filter((candidate) => candidate.observation.canonicalPath.length === mostSpecificLength);
+    const states = specific.map((candidate) => ({
+      candidate,
+      state: readWorktreeSessionState(db, candidate.worktreeId),
+    }));
+    if (states.length !== 1) {
+      return {
+        ok: true,
+        ...safety,
+        canContinue: false,
+        requiresUserConfirmation: false,
+        bindingStatus: 'ambiguous',
+        status: 'ambiguous',
+        sessionId: null,
+        revision: null,
+        candidates: states.flatMap(({ state }) => state.status === 'ambiguous'
+          ? state.sessions.map(publicSessionState)
+          : [publicSessionState(state.session)]),
+        message: '当前代码目录对应多个已登记工作位置；没有猜测会话归属，也没有修改平台记录。',
+      };
+    }
+
+    const [{ state }] = states;
+    if (state.status === 'ambiguous') {
+      return {
+        ok: true,
+        ...safety,
+        canContinue: false,
+        requiresUserConfirmation: false,
+        bindingStatus: 'ambiguous',
+        status: 'ambiguous',
+        sessionId: null,
+        revision: null,
+        candidates: state.sessions.map(publicSessionState),
+        message: '当前代码目录存在多个 active 工作会话；没有猜测会话归属，也没有修改平台记录。',
+      };
+    }
+
+    const current = state.session;
+    if (!current) {
+      return {
+        ok: true,
+        ...safety,
+        canContinue: false,
+        requiresUserConfirmation: false,
+        bindingStatus: body.bridgeBinding ? 'stale' : 'unbound',
+        status: 'no_session',
+        sessionId: null,
+        revision: null,
+        candidates: [],
+        message: '当前代码目录尚无可继续的工作会话；没有创建新会话。',
+      };
+    }
+
+    const base = {
+      ...publicSessionState(current),
+      candidates: [publicSessionState(current)],
+      requiresUserConfirmation: false,
+      canContinue: false,
+      bindingStatus: body.bridgeBinding ? 'stale' : 'unbound',
+    };
+
+    if (current.status !== 'active') {
+      return {
+        ok: true,
+        ...safety,
+        ...base,
+        message: current.status === 'awaiting_resume'
+          ? '当前会话正在等待新的 AI 会话接手；查询没有取得写入权限。'
+          : '当前工作会话已经结束或不具备安全继续条件；没有创建新会话。',
+      };
+    }
+
+    const hasBinding = Boolean(body.bridgeBinding);
+    const matchesBinding = bridgeBindingMatches(current, body.bridgeBinding);
+    if (hasBinding && matchesBinding) {
+      return {
+        ok: true,
+        ...safety,
+        ...base,
+        canContinue: true,
+        bindingStatus: 'bound',
+        binding: publicBridgeBinding(current),
+        message: '已核对当前 bridge 绑定；返回的是平台最新 revision，查询没有修改平台状态。',
+      };
+    }
+
+    if (hasBinding) {
+      return {
+        ok: true,
+        ...safety,
+        ...base,
+        bindingStatus: 'stale',
+        requiresUserConfirmation: false,
+        message: '当前 bridge 绑定已经过期或被新的接力代际超越；没有把最新 revision 自动交给旧绑定。',
+      };
+    }
+
+    if (body.confirmSessionId !== undefined) {
+      if (body.confirmSessionId !== current.sessionId || body.expectedRevision !== current.revision) {
+        const error = new Error('Context confirmation no longer matches the current session.');
+        error.code = 'SESSION_CONTEXT_CONFIRMATION_STALE';
+        error.context = base;
+        throw error;
+      }
+      return {
+        ok: true,
+        ...safety,
+        ...base,
+        canContinue: true,
+        requiresUserConfirmation: false,
+        bindingStatus: 'bound',
+        bindingEstablished: true,
+        binding: publicBridgeBinding(current),
+        message: '已按用户确认绑定当前 bridge；未改变平台写入归属、租约或 revision。',
+      };
+    }
+
+    return {
+      ok: true,
+      ...safety,
+      ...base,
+      requiresUserConfirmation: true,
+      message: '已找到当前目录唯一 active 工作会话；请先向用户确认“继续此工作会话”，再用返回的 sessionId 与 revision 调用 context 确认。',
+    };
   }
 
   const server = createServer(async (request, response) => {
@@ -1868,6 +2345,30 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/context') {
+        const body = await readJson(request);
+        validateMcpContextBody(body);
+        try {
+          sendJson(response, 200, await readMcpWorkContext(body));
+        } catch (error) {
+          if (error?.code === 'SESSION_CONTEXT_CONFIRMATION_STALE') {
+            sendError(response, error.code, {
+              extra: {
+                session_id: error.context?.sessionId ?? null,
+                revision: error.context?.revision ?? null,
+                status: error.context?.status ?? null,
+                bindingStatus: error.context?.bindingStatus ?? null,
+                canContinue: false,
+                requiresUserConfirmation: true,
+              },
+            });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/accept') {
         const body = await readJson(request);
         requireString(body, 'dispatchCode');
@@ -1893,6 +2394,7 @@ export async function createCockpitHttpServer({
             ok: true,
             assignmentId: accepted.assignmentId,
             sessionId: accepted.sessionId,
+            worktreeId: accepted.worktreeId,
             agent: accepted.agentId,
             task: accepted.taskId,
             status: 'waiting_for_instruction',
@@ -1927,6 +2429,7 @@ export async function createCockpitHttpServer({
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
+          worktreeId: accepted.worktreeId,
           agent: accepted.agentId,
           task: accepted.taskId,
           status: 'active',
@@ -2058,6 +2561,7 @@ export async function createCockpitHttpServer({
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
+          worktreeId: accepted.worktreeId,
           agent: accepted.agentId,
           task: body.currentTask.trim(),
           status: 'active',

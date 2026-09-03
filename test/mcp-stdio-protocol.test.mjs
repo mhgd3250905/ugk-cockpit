@@ -12,6 +12,7 @@ import {
 test('TOOLS definition includes preflight and no path/projectId/worktreeId/token', () => {
   const toolNames = TOOLS.map((t) => t.name);
   assert.deepEqual(toolNames, [
+    'ugk_work_context',
     'ugk_work_accept',
     'ugk_work_progress',
     'ugk_work_submit_preflight',
@@ -43,6 +44,7 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
   assert.strictEqual(progressTool.inputSchema.properties.details.items.minLength, 1);
 
   const descriptions = Object.fromEntries(TOOLS.map((tool) => [tool.name, tool.description]));
+  assert.match(descriptions.ugk_work_context, /read.*current.*session|read-only/i);
   assert.match(descriptions.ugk_work_progress, /only.*eligible for implicit/i);
   assert.match(descriptions.ugk_work_accept, /explicitly.*code/i);
   assert.match(descriptions.ugk_work_begin, /explicitly instructs beginning/i);
@@ -70,6 +72,36 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
     assert.strictEqual(required.includes('token'), false);
     assert.strictEqual(tool.inputSchema.additionalProperties, false);
   }
+  const contextTool = TOOLS.find((tool) => tool.name === 'ugk_work_context');
+  assert.deepEqual(Object.keys(contextTool.inputSchema.properties), ['confirmSessionId', 'expectedRevision']);
+  assert.deepEqual(contextTool.inputSchema.required ?? [], []);
+});
+
+test('context validation keeps confirmation fields optional but paired', async () => {
+  const invalid = await dispatchMessage({
+    jsonrpc: '2.0', id: 'context-invalid', method: 'tools/call',
+    params: { name: 'ugk_work_context', arguments: { confirmSessionId: 'session-1' } },
+  });
+  assert.equal(invalid.result.isError, true);
+  assert.match(invalid.result.content[0].text, /provided together/);
+
+  const received = [];
+  const valid = await dispatchMessage({
+    jsonrpc: '2.0', id: 'context-valid', method: 'tools/call',
+    params: {
+      name: 'ugk_work_context',
+      arguments: { confirmSessionId: 'session-1', expectedRevision: 4 },
+    },
+  }, {
+    handlers: {
+      ugk_work_context: async (args) => {
+        received.push(args);
+        return { ok: true, canContinue: false };
+      },
+    },
+  });
+  assert.equal(valid.result.content[0].text, JSON.stringify({ ok: true, canContinue: false }));
+  assert.deepEqual(received, [{ confirmSessionId: 'session-1', expectedRevision: 4 }]);
 });
 
 test('dispatchMessage handles initialize, ping, tools/list, and notifications', async () => {
