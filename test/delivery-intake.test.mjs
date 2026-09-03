@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -225,4 +225,40 @@ test('remote target advancement invalidates review without disturbing dirty main
   assert.equal(readFileSync(path.join(f.main,'local-only.txt'),'utf8'),'main work in progress\n');
   git(f.main,['add','local-only.txt']); git(f.main,['commit','-m','advance main']); git(f.main,['push','origin','main']);
   await assert.rejects(verifyReviewDelivery(readSubmission(f.db,result.submissionId),readProjectContext(f.db,f.projectId)),{code:'TARGET_HEAD_STALE'});
+});
+
+test('intake succeeds when main has untracked files >128MiB; oversize selected file returns error details to client', async (t) => {
+  const f = await fixture(t);
+
+  // 1. Untracked file in main >128MiB (sparse file)
+  const mainHuge = path.join(f.main, 'untracked_huge.bin');
+  const fdMain = openSync(mainHuge, 'w');
+  ftruncateSync(fdMain, 140 * 1024 * 1024);
+  closeSync(fdMain);
+
+  // 2. Commit a feature in source, and leave an unselected untracked file in source >128MiB
+  const sourceHuge = path.join(f.source, 'source_huge.bin');
+  const fdSource = openSync(sourceHuge, 'w');
+  ftruncateSync(fdSource, 140 * 1024 * 1024);
+  closeSync(fdSource);
+
+  writeFileSync(path.join(f.source, 'feature.txt'), 'feature content\n');
+  git(f.source, ['add', 'feature.txt']);
+  git(f.source, ['commit', '-m', 'feat: add feature']);
+
+  // Preflight with files: [] (submitted committed branch) must succeed despite main and source untracked >128MiB
+  const preflightHead = await f.preflight([], 'preflight-head');
+  assert.equal(preflightHead.ok, true, JSON.stringify(preflightHead));
+  assert.equal(preflightHead.ready, true);
+
+  const submitHead = await f.submit(preflightHead.preflightId, 'submit-head');
+  assert.equal(submitHead.ok, true, JSON.stringify(submitHead));
+
+  // 3. Selecting the oversize file returns DELIVERY_CONTENT_TOO_LARGE with structured details
+  const preflightOversize = await f.preflight(['source_huge.bin'], 'preflight-oversize');
+  assert.equal(preflightOversize.ok, false);
+  assert.equal(preflightOversize.code, 'DELIVERY_CONTENT_TOO_LARGE');
+  assert.equal(preflightOversize.details?.file, 'source_huge.bin');
+  assert.equal(preflightOversize.details?.limitBytes, 32 * 1024 * 1024);
+  assert.equal(preflightOversize.details?.actualBytes, 140 * 1024 * 1024);
 });

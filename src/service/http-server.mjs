@@ -2213,7 +2213,13 @@ export async function createCockpitHttpServer({
           });
           sendJson(response, 200, deliveryResponse(result));
         } catch (error) {
-          sendJson(response, 200, deliveryResponse({ ok: false, code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED', localSaved: false, pushed: false }));
+          sendJson(response, 200, deliveryResponse({
+            ok: false,
+            code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+            ...(error.details !== undefined ? { details: error.details } : {}),
+            localSaved: false,
+            pushed: false,
+          }));
         }
         return;
       }

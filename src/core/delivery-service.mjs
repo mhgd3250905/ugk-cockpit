@@ -97,7 +97,13 @@ async function prepareDeliveryOnce(db, request, options = {}) {
   } catch (error) {
     const completed = db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
     if (completed?.state === 'committed') return parseCommandResponse(completed);
-    return finishCommand(db, commandId, { ok: false, code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED', localSaved: false, pushed: false });
+    return finishCommand(db, commandId, {
+      ok: false,
+      code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+      ...(error.details !== undefined ? { details: error.details } : {}),
+      localSaved: false,
+      pushed: false,
+    });
   } finally {
     if (!retained && inspection) discardDeliveryCache(inspection);
   }
@@ -249,6 +255,7 @@ async function submitDeliveryOnce(db, request, options = {}) {
       'REMOTE_TARGET_CHANGED','REMOTE_SOURCE_MISMATCH','REMOTE_IDENTITY_CHANGED','BRANCH_MISMATCH','DELIVERY_REMOTE_CHANGED',
       'DELIVERY_CACHE_INVALID','DELIVERY_INDEX_CHANGED','SOURCE_COMMIT_MISMATCH'].includes(code);
     const result = { ok: false, code,
+      ...(error.details !== undefined ? { details: error.details } : {}),
       localSaved: Boolean(attempt?.source_commit), pushed: ['pushed','completed'].includes(attempt?.state),
       sourceCommit: attempt?.source_commit ?? null, retryable: !requiresNewPreflight && (Boolean(attempt) || code === 'REPOSITORY_LOCKED'),
       requiresNewPreflight, submissionId: attempt?.submission_id ?? null };

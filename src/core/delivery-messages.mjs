@@ -40,14 +40,18 @@ const messages = {
   DELIVERY_CONFLICT_CONFIRMATION_REQUIRED: ['本次成果与最新 main 存在合并冲突。', '请先解决冲突，或明确确认仅保存为“需要解决冲突”的待办。'],
   DELIVERY_DIRECTORY_MISMATCH: ['当前会话目录与本次送审对象不一致。', '请回到对应代码目录，不能拿另一份代码的检查结果送审。'],
   DELIVERY_INTEGRATION_BUSY: ['同一交付正在执行合并。', '请等待该操作结果后重新检查，不要替换它正在处理的版本。'],
+  DELIVERY_CONTENT_TOO_LARGE: ['选中的送审文件超出大小安全限制。', '请从送审范围移除超限文件，或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。'],
 };
 
 export function deliveryResponse(result) {
   if (result.ok) return result;
   const known = messages[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
+  const required_action = (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file)
+    ? `请从送审范围移除超限文件（${result.details.file}），或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。`
+    : known[1];
   return { ...result, message: known[0], impact: result.pushed
     ? '代码已上传，但审核登记尚未完成；主项目代码没有被合并。'
     : result.localSaved ? '本地成果已保存，尚未确认上传并送达审核；主项目代码没有被修改。'
       : '尚未确认新的保存或送审；平台没有合并、覆盖或清理主项目。',
-  required_action: known[1], next_command: null, warnings: [] };
+  required_action, next_command: null, warnings: [] };
 }

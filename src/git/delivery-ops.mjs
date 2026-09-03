@@ -237,23 +237,41 @@ export function parseStatusZ(output) {
   return changes.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-export async function computeContentFingerprint(cwd, head, changes) {
+export async function computeContentFingerprint(cwd, head, files = []) {
   const hasher = createHash('sha256');
   hasher.update(`HEAD:${head ?? 'EMPTY'}\n`);
   hasher.update((await runGit(cwd, ['ls-files', '--stage', '-z'], { raw: true })).stdout);
   let totalBytes = 0;
-  const sorted = [...changes].sort((a, b) => a.path.localeCompare(b.path));
-  for (const item of sorted) {
-    hasher.update(`PATH:${item.path}:${item.status}\n`);
-    if (isSensitivePath(item.path)) { hasher.update('EXCLUDED_SENSITIVE_PATH\n'); continue; }
-    const fullPath = path.resolve(cwd, item.path);
+  const fileList = (Array.isArray(files) ? files : [])
+    .map((item) => (typeof item === 'string' ? item : item?.path))
+    .filter(Boolean)
+    .map((p) => p.replace(/\\/g, '/'));
+  const sorted = [...new Set(fileList)].sort((a, b) => a.localeCompare(b));
+  for (const relPath of sorted) {
+    hasher.update(`PATH:${relPath}\n`);
+    if (isSensitivePath(relPath)) { hasher.update('EXCLUDED_SENSITIVE_PATH\n'); continue; }
+    const fullPath = path.resolve(cwd, relPath);
     try {
       const stats = await lstat(fullPath);
       if (!stats.isFile()) throw Object.assign(new Error('Unsupported changed path'), { code: 'INVALID_DELIVERY_FILES' });
       const binding = authorizeExistingPath(fullPath, cwd);
       revalidateAuthorizedPath(binding);
       totalBytes += stats.size;
-      if (stats.size > 32 * 1024 * 1024 || totalBytes > 128 * 1024 * 1024) throw Object.assign(new Error('Content exceeds safe inspection size'), { code: 'DELIVERY_CONTENT_TOO_LARGE' });
+      if (stats.size > 32 * 1024 * 1024 || totalBytes > 128 * 1024 * 1024) {
+        const isSingle = stats.size > 32 * 1024 * 1024;
+        const limitBytes = isSingle ? 32 * 1024 * 1024 : 128 * 1024 * 1024;
+        const actualBytes = isSingle ? stats.size : totalBytes;
+        const error = new Error(isSingle
+          ? `Selected file '${relPath}' exceeds safe size limit (32MiB)`
+          : `Cumulative selected files exceed safe size limit (128MiB) at '${relPath}'`);
+        error.code = 'DELIVERY_CONTENT_TOO_LARGE';
+        error.details = {
+          file: relPath,
+          limitBytes,
+          actualBytes,
+        };
+        throw error;
+      }
       {
         const buf = await readFile(fullPath);
         revalidateAuthorizedPath(binding);
@@ -261,6 +279,7 @@ export async function computeContentFingerprint(cwd, head, changes) {
         hasher.update(`MODE:${stats.mode} CONTENT:${digest}\n`);
       }
     } catch (error) {
+      if (error.code === 'DELIVERY_CONTENT_TOO_LARGE' || error.code === 'INVALID_DELIVERY_FILES') throw error;
       if (error.code !== 'ENOENT') throw error;
       hasher.update('DELETED\n');
     }
@@ -268,7 +287,7 @@ export async function computeContentFingerprint(cwd, head, changes) {
   return hasher.digest('hex');
 }
 
-export async function readDeliveryLocation(cwd) {
+export async function readDeliveryLocation(cwd, { files = null } = {}) {
   await checkUnsupportedFeatures(cwd);
   const [headRes, branchRes, statusRes, remotesListRes] = await Promise.all([
     runGit(cwd, ['rev-parse', '--verify', 'HEAD'], { acceptExitCodes: [0, 128] }),
@@ -300,7 +319,7 @@ export async function readDeliveryLocation(cwd) {
     }
   }
 
-  const fingerprint = await computeContentFingerprint(cwd, head, changes);
+  const fingerprint = await computeContentFingerprint(cwd, head, files ?? []);
 
   return {
     head,
@@ -519,6 +538,7 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
 
   const validatedFiles = validateDeliveryFiles(files, sourceLocation.changes, sourcePath);
   if (validatedFiles.length) await readCommitIdentity(sourcePath);
+  const fingerprint = await computeContentFingerprint(sourcePath, sourceLocation.head, validatedFiles);
 
   // Setup temporary cache bare git repository
   const cache = createDeliveryCache();
@@ -690,7 +710,7 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
     head: sourceLocation.head,
     branch: sourceLocation.branch,
     files: validatedFiles,
-    fingerprint: sourceLocation.fingerprint,
+    fingerprint,
     candidateTree,
     sourceRemote,
     targetRemote,
@@ -711,7 +731,7 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
 }
 
 export async function saveDelivery({ sourcePath, inspection, commandId, summary, beforeWrite = () => {}, afterRefUpdate = () => {} }) {
-  let current = await readDeliveryLocation(sourcePath);
+  let current = await readDeliveryLocation(sourcePath, { files: inspection.files });
   if (current.branch !== inspection.branch) throw Object.assign(new Error('Source branch changed'), { code: 'BRANCH_MISMATCH' });
   let recoveredCommit = null;
   if (current.head !== inspection.head) {
@@ -733,7 +753,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
   let savedCommit = recoveredCommit;
   try {
     indexLock = openSync(`${indexPath}.lock`, 'wx');
-    current = await readDeliveryLocation(sourcePath);
+    current = await readDeliveryLocation(sourcePath, { files: inspection.files });
     if (current.branch !== inspection.branch || current.head !== (recoveredCommit ?? inspection.head)) {
       throw Object.assign(new Error('Source moved before saving'), { code: 'HEAD_MOVED' });
     }
@@ -767,7 +787,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
       else await runGit(sourcePath, ['update-index', '--force-remove', '--', file], { env });
     }
     if (!recoveredCommit) {
-      const finalCheck = await readDeliveryLocation(sourcePath);
+      const finalCheck = await readDeliveryLocation(sourcePath, { files: inspection.files });
       if (finalCheck.fingerprint !== inspection.fingerprint || finalCheck.branch !== inspection.branch) {
         throw Object.assign(new Error('Source changed while preparing commit'), { code: 'SOURCE_CONTENT_CHANGED' });
       }

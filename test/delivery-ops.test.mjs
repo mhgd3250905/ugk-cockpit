@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -572,5 +572,65 @@ test('files parameter rejects invalid inputs, traversal, pathspec magic, and non
   await assert.rejects(
     () => inspectDelivery({ sourcePath, targetPath, files: [path.resolve(sourcePath, 'valid.txt')], targetBranch: 'main' }),
     { code: 'INVALID_DELIVERY_FILES' },
+  );
+});
+
+test('unselected large files and target main >128MiB untracked files do not block delivery; selected oversize fails with details', async (t) => {
+  const { sourcePath, targetPath } = createDeliveryFixture(t);
+
+  // 1. Target main has untracked sparse file > 128MiB
+  const targetHuge = path.join(targetPath, 'target_huge.bin');
+  const fdTarget = openSync(targetHuge, 'w');
+  ftruncateSync(fdTarget, 140 * 1024 * 1024);
+  closeSync(fdTarget);
+
+  // 2. Source has unselected untracked sparse file > 128MiB
+  const sourceHuge = path.join(sourcePath, 'source_huge.bin');
+  const fdSource = openSync(sourceHuge, 'w');
+  ftruncateSync(fdSource, 140 * 1024 * 1024);
+  closeSync(fdSource);
+
+  // 3. Source also has a valid small change
+  writeFileSync(path.join(sourcePath, 'small.txt'), 'small change\n');
+
+  // 4. files: [] (submitting committed HEAD only) must not fail despite huge files in target and source
+  const headInspection = await inspectDelivery({
+    sourcePath,
+    targetPath,
+    files: [],
+    targetBranch: 'main',
+  });
+  t.after(() => discardDeliveryCache(headInspection));
+  assert.equal(headInspection.files.length, 0);
+  assert.ok(headInspection.fingerprint);
+
+  // 5. files: ['small.txt'] must succeed and unselected big file does not block it
+  const smallInspection = await inspectDelivery({
+    sourcePath,
+    targetPath,
+    files: ['small.txt'],
+    targetBranch: 'main',
+  });
+  t.after(() => discardDeliveryCache(smallInspection));
+  assert.deepEqual(smallInspection.files, ['small.txt']);
+
+  const saved = await saveDelivery({
+    sourcePath,
+    inspection: smallInspection,
+    commandId: 'cmd-save-small',
+    summary: 'Save small file',
+  });
+  assert.ok(saved.localSaved);
+
+  // 6. Selecting the oversize file directly must fail with DELIVERY_CONTENT_TOO_LARGE and structured details
+  await assert.rejects(
+    () => inspectDelivery({ sourcePath, targetPath, files: ['source_huge.bin'], targetBranch: 'main' }),
+    (err) => {
+      assert.equal(err.code, 'DELIVERY_CONTENT_TOO_LARGE');
+      assert.equal(err.details?.file, 'source_huge.bin');
+      assert.equal(err.details?.limitBytes, 32 * 1024 * 1024);
+      assert.equal(err.details?.actualBytes, 140 * 1024 * 1024);
+      return true;
+    },
   );
 });
