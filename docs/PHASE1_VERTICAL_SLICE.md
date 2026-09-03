@@ -29,7 +29,18 @@
 - `0.1.0-alpha.28`：修复开发空间创建入口依赖历史项目观察值的问题。用户选定空目录后，平台先只读复核主项目身份与当前 Git 状态，将最新观察写入项目记录，再把该 HEAD 作为创建 CAS 基线；只有复核与创建之间确有并发提交时才继续安全停止。
 - `0.1.0-alpha.29`：统一受管空间与外部分支的显式送审入口。新增 `ugk_work_submit_preflight`，先核对已登记项目、目录授权、交付文件范围、最新远端 main 与真实合并冲突，再通过 `ugk_work_submit` 精确保存、普通推送、固定 SHA 登记待办。无 session 不要求重新 init，也不接管旧写入权限；新版使旧审核失效，审核可在隔离副本进行。完整边界与验收见 [统一送审](UNIFIED_SUBMIT.md)。
 - `0.1.0-alpha.30`：修正预检误读源/目标无关文件的范围问题。已提交代码按提交对象检查，待保存内容仅检查选中文件；主项目未跟踪素材不再触发送审体积上限。Skill 不以聊天归属限制已确认的分支成果，也不建议清理 build 绕过平台问题。
-- 当前小步：统一送审闭环；继续补充用户实测。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+- `0.1.0-alpha.31`：将 `$cockpit-closeout` 的本地两阶段收束与可选平台进度登记解耦。缺少可信会话或 MCP 不可用时不阻断本地文档整理、commit 和已明确授权的普通 push；基线可来自已记录的任务起点或明确版本记录。解除 closeout 元数据的必需 MCP 依赖，同步 handoff/progress 文案；正式 handoff 仍保留 active session、revision CAS 与 `cockpitVerified: true` 门槛。不修改生产 API、数据库 schema 或送审/合并逻辑。
+- 当前小步：本地收束与平台登记解耦，统一送审已有用户实测记录。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+
+### alpha.31 收束与验收（2026-09-03）
+
+本轮基线 `33e547f4948af8411d264e4314c34473e98fec75`，依据为本次规则修复开始前已保存的 alpha.30 交付；仅收束 closeout/handoff/progress 技能、对应当前说明、版本字段及既有送审实测补记。起点工作区干净；本轮 10 个已跟踪文件修改分别来自 Antigravity 的规则修复和宿主的版本/验收记录，无新增未跟踪交付文件。未修改生产源码、API、数据库 schema、安装器或业务仓库。
+
+Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 Antigravity 实施（`task-20260903-030106-bee064`）；宿主指出回执不确定不能冒充登记失败后，由新任务 `task-20260903-030742-c1e17a` 精确修正。最终技能保留本地来源/归属/证据门槛，分开报告本地成果、已授权 push 结果与可选平台登记；终态 handoff 仍须可信会话、revision 和 `cockpitVerified: true`。
+
+验证对象为上述基线加本次提交的技能工作树：`node --test test/cockpit-skills.test.mjs` 最终 12/12 通过，技能校验与 `git diff --check` 通过。该专项是既有契约/安装器检查；实际决策边界另由宿主复核，不将文字匹配测试当作真实 MCP 成功证明。3 个技能正文及 closeout 元数据已精确同步共享 `.agents/skills` 和 Codex `.codex/skills`，三方 SHA-256 一致。`npm run build:web` 通过，运行服务健康检查为 `0.1.0-alpha.31`，schema 仍为 19、完整性正常，服务更新前后业务记录数量一致。未重复全量/Phase 0 回归；alpha.30 的送审验证仍对应未变化的生产代码，真实送审及无会话去重证据见 [统一送审实测](UNIFIED_SUBMIT.md)。
+
+当前上下文缺少最近 MCP 返回的可信会话信息，本轮不调用 progress、不重新 init 或接力，平台检查点未登记；这不否定本地收束，也不阻塞用户已明确授权的普通 push。平台登记状态与 Git 提交/上传结果分别如实报告，不以服务健康检查冒充 MCP 检查点回执。
 
 ## 产品方向：晨间工作简报
 
@@ -82,11 +93,11 @@
 - 存在尚未交接的旧会话：保持“会话已接入”，展示最近确认节点；只有用户显式 relay、handoff 或 takeover 才转换状态；
 - 代码位置身份变化：停止，要求用户重新选择，绝不自动重绑。
 
-消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。阶段需要收束时，用户可显式调用 `$cockpit-closeout`：AI 先从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现当前 canonical source，再核对当前阶段 delta、完整 tracked/untracked 归属和绑定到 source state 的验证证据；Preflight 通过后才修正确定的对齐项、运行必要验证，并记录指向本地 commit SHA 的一个非终态 progress 检查点，不因该 commit 再额外记录。来源、归属或证据无法证明时只报告并停止。上下文堆积时，用户可显式调用 `$cockpit-relay`：准备只复用已知事实和本阶段已观察到的未对齐项，不扫描全仓、运行测试、修文档或创建 commit；新聊天调用 `ugk_work_resume` 继续同一工作会话，恢复模式不执行对齐检查。只有用户显式选择结束阶段时，才通过 `$cockpit-handoff` 收束；选择 `completed` 时在同一手动 handoff 工作流中先执行或复用对当前 HEAD 仍有效的完整 closeout，`blocked`/`abandoned` 不要求 closeout。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
+消息复制后页面只显示“等待 AI 接入”。AI 在当前项目目录调用 `ugk_work_init`，校验项目绑定并保留现有改动后显示“会话已接入”；这只确认接入节点，不声称 Agent 进程持续在线。最近交接存在时随 init 返回。工作中通过 `$cockpit-progress` 报告里程碑。阶段需要收束时，用户可显式调用 `$cockpit-closeout`：AI 先从适用项目级 `AGENTS.md` 与根 README/等价入口一跳发现当前 canonical source，再核对当前阶段 delta、完整 tracked/untracked 归属和绑定到 source state 的验证证据；Preflight 通过后才修正确定的对齐项、运行必要验证，形成或复用本地 commit。普通本地收束与 commit 独立成功；具备 active 会话与 MCP 条件时可选登记指向本地 commit SHA 的非终态 progress 检查点，不因该 commit 再额外记录，登记跳过或失败不阻断本地成果和已授权普通 push。来源、归属或证据无法证明等本地门槛缺失时只报告并停止。上下文堆积时，用户可显式调用 `$cockpit-relay`：准备只复用已知事实和本阶段已观察到的未对齐项，不扫描全仓、运行测试、修文档或创建 commit；新聊天调用 `ugk_work_resume` 继续同一工作会话，恢复模式不执行对齐检查。只有用户显式选择结束阶段时，才通过 `$cockpit-handoff` 收束；选择 `completed` 时在同一手动 handoff 工作流中伴随执行或复用对当前 HEAD 仍有效的本地 closeout 成果，不以 progress 回执为硬前置，`blocked`/`abandoned` 不要求 closeout。普通用户不需要理解 MCP、heartbeat、lease、revision 或 snapshot。
 
 ### 5. 结束工作
 
-用户明确要求结束当前阶段并选择结果后，AI 才通过 `ugk_work_handoff` 提交标准交接字段、建议技能和文件引用。选择 `completed` 时，在同一手动 handoff 工作流中先执行或复用对当前 `HEAD` 仍有效的完整 closeout；若 closeout 未完成，不得进行 completed handoff，向用户报告并等待处理。选择 `blocked` 或 `abandoned` 不要求 closeout，只如实携带未解决事项。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
+用户明确要求结束当前阶段并选择结果后，AI 才通过 `ugk_work_handoff` 提交标准交接字段、建议技能和文件引用。选择 `completed` 时，在同一手动 handoff 工作流中先执行或复用对当前 `HEAD` 仍有效的本地 closeout 成果（而非必须存在 progress 回执）；若本地 closeout 未完成，不得进行 completed handoff，向用户报告并等待处理。选择 `blocked` 或 `abandoned` 不要求 closeout，只如实携带未解决事项。系统重新只读采集代码状态并保存可供下一次直接读取的交接手册；网页并列显示“Agent 报告”和 Cockpit 验证结果，最终确认与接管仍由用户完成。
 
 如果出现外部代码保存点、未归属改动、工作线变化或检查中状态变化，不能显示“已完成”，必须解释原因并给出安全动作。
 
@@ -108,7 +119,7 @@
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 只复用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 13 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
+- 本机 stdio MCP 的普通路径使用 `ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 13 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

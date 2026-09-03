@@ -4,7 +4,11 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.30` — 修正送审内容检查范围：只送审已提交代码时，不读取无关工作文件内容；保存改动时仅对选中文件做内容检查。主项目里的截图、视频和未选中文件不再因体积过大阻塞送审，无需清理 build。Skill 同时明确：用户确认的分支成果可以包含其他会话的提交，不冒称已验收，也不因换过会话拒绝接纳。
+`0.1.0-alpha.31` — 将本地阶段收束与 Cockpit 进度登记分开：没有会话信息或 MCP 不可用时，仍可整理文档、保存提交，并执行用户明确授权的普通 push；只如实说明平台登记状态，不要求为版本保存重新 init 或接力。正式 handoff 仍须用户明确结束并通过平台校验。
+
+当前开发版本以 `VERSION` 为准；版本与阶段验收的当前事实源是 [阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+
+保留 `alpha.30` 的送审内容范围修复：只送审已提交代码时，不读取无关工作文件内容；保存改动时仅对选中文件做内容检查。主项目里的截图、视频和未选中文件不再因体积过大阻塞送审，无需清理 build。用户确认的分支成果可以包含其他会话的提交，不冒称已验收，也不因换过会话拒绝接纳。
 
 统一分支送审不要求提前 init 或由平台创建分支。平台先核对已登记项目、当前代码权限、本次文件范围及最新远端 main，再保存必要提交、普通推送并生成主项目审核待办。重复送审复用记录，新版本使旧审核失效；冲突不会被标成可合并。
 
@@ -14,7 +18,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 项目卡片现在统一通过 init 指令“交给 AI”：空项目、刚派发的新任务和已经开发到一半的项目使用同一入口。Agent 调用 `$cockpit-init` 后，Skill 通过 MCP 建立 active session；Cockpit 将调用时的代码状态作为接入基线，保留全部已有改动，并在存在标准交接手册时一并返回最近上下文。接入前的改动不会被自动归属给 Agent。
 
-工作中的 AI 可通过 `$cockpit-progress` 主动记录进展；成功 commit、改变 `HEAD` 的 merge/rebase/cherry-pick、发布 tag 等有效 Git 检查点也会尽量自动记录，`status`、`diff`、`log`、`add` 和失败命令不会制造噪声。需要核对当前阶段 delta 时，用户显式调用 `$cockpit-closeout`；它先只读发现并核对适用项目入口声明的 canonical 来源，完整列出 tracked/untracked 状态和归属，绑定验证证据到 source state，只有 Preflight 通过后才修正确定的对齐项、运行必要验证，并以本地 commit SHA 记录一个非终态 progress 检查点，不因该 commit 再额外触发通用 progress。无法判定 canonical、归属或证据适用性时只报告，不编辑或记录 progress。需要换聊天但继续同一阶段时，用户显式调用 `$cockpit-relay`；只有用户显式选择结束结果时，才调用 `$cockpit-handoff` 生成标准交接手册；选择 `completed` 会在同一手动 handoff 工作流中伴随执行或复用 closeout。功能完成、测试通过、Git commit 或上下文堆积都不会自动结束阶段。Cockpit 生成的短期接入与接力消息不含本地路径和 API token。
+工作中的 AI 可通过 `$cockpit-progress` 主动记录进展；成功 commit、改变 `HEAD` 的 merge/rebase/cherry-pick、发布 tag 等有效 Git 检查点也会尽量自动记录，`status`、`diff`、`log`、`add` 和失败命令不会制造噪声。需要核对当前阶段 delta 时，用户显式调用 `$cockpit-closeout`；它先只读发现并核对适用项目入口声明的 canonical 来源，完整列出 tracked/untracked 状态和归属，绑定验证证据到 source state，只有 Preflight 通过后才修正确定的对齐项、运行必要验证，形成或复用本地 commit；普通本地收束与 commit 独立成功，具备活跃会话与 MCP 条件时可选记录一个非终态 progress 检查点，不因该 commit 再额外触发通用 progress，登记跳过或失败不阻断本地成果和已授权的普通 push。无法判定 canonical、归属或证据适用性等本地门槛缺失时只报告，不编辑或 commit。需要换聊天但继续同一阶段时，用户显式调用 `$cockpit-relay`；只有用户显式选择结束结果时，才调用 `$cockpit-handoff` 生成标准交接手册；选择 `completed` 会在同一手动 handoff 工作流中伴随执行或复用对当前 HEAD 仍有效的本地 closeout，不以 progress 回执为硬前置。功能完成、测试通过、Git commit 或上下文堆积都不会自动结束阶段。Cockpit 生成的短期接入与接力消息不含本地路径和 API token。
 
 Phase 0 已验证的基础能力继续保留：
 
@@ -52,7 +56,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit
 
 ## 配套 Skills
 
-仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；`completed` handoff 的选择可伴随执行 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 安装到当前用户的 Codex：
 

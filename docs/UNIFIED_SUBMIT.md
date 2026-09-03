@@ -1,6 +1,6 @@
 # 统一分支交付送审
 
-状态：初版 `0.1.0-alpha.29` 已实现并完成下述本地验收（2026-09-03），原始基线 `bae906e` / `0.1.0-alpha.28`；当前修正版为 `0.1.0-alpha.30`，增量记录见文末。
+状态：初版 `0.1.0-alpha.29` 已实现并完成下述本地验收（2026-09-03），原始基线 `bae906e` / `0.1.0-alpha.28`；内容范围修正随 `0.1.0-alpha.30` 交付，增量与用户实测记录见文末。项目当前版本以根目录 `VERSION` 为准。
 
 ## 用户需求与不变量
 
@@ -54,7 +54,7 @@ Agy 完成前置摸排、Git 模块实现及两路只读审查；宿主复核发
 - `cockpit-submit` 已同步共享 `.agents/skills` 与 Codex `.codex/skills`；正文及元数据 SHA-256 与仓库版本相同。旧聊天需刷新 Skill / 重连 MCP，以发现新增工具。
 - 工作台服务已切换到 `0.1.0-alpha.29`，首页与健康检查成功；数据库自动备份后从 schema 18 升到 19，完整性检查正常，升级前后项目、工作副本、会话、写入权限、接手记录及审核记录数量一致。备份保存在 `%LOCALAPPDATA%/UGK Cockpit/backups`。
 
-真实 GitHub 私有仓库认证与用户实际送审尚未实测，不将本地 bare remote 测试当作该项证据。本次不 push、不打发布标签，也不操作用户业务仓库的分支或 PR。
+alpha.29 验收时，真实 GitHub 私有仓库认证与用户实际送审尚未实测，不将本地 bare remote 测试当作该项证据。当轮不 push、不打发布标签，也不操作用户业务仓库的分支或 PR；后续用户实测见文末。
 
 ## alpha.30：内容范围修正
 
@@ -65,3 +65,11 @@ Agy 完成前置摸排、Git 模块实现及两路只读审查；宿主复核发
 本轮遵照用户快速开发要求，仅做直接相关的小范围验证和原问题只读复核，不跑全量/Phase 0 回归，也不追加独立多轮审查。上方 223/89 等测试结果属于 alpha.29，不能当作本次重新执行的结果。
 
 本轮验收：Agy 任务 `task-20260903-020345-0c8d15` 在核验工作目录后完成修改，`delivery-ops` 22/22、`delivery-intake` 11/11 通过；宿主复核实际差异，并在原报错的来源与主项目执行只读探测，两处均成功，主项目 398 个未跟踪路径保持原状。语法检查、Web 构建、Skill 校验及 `git diff --check` 通过。`cockpit-submit` 正文已同步 `.agents/skills` 和 `.codex/skills`，三份 SHA-256 一致。工作台健康检查返回 `0.1.0-alpha.30`；schema 仍为 19、数据库完整性正常、升级前后业务记录数量一致。未对业务仓库实际送审、清理或改写，也未 push 或打标签。
+
+### 用户实测补记（2026-09-03，alpha.30）
+
+用户在自己的 Agent 会话完成送审后，宿主只读核对平台记录：`submission_f2ede298546c5e6800dc1df17e50be4c` 已归入 `ugk-android-new`，源 `b0f18590c0222de96a2decd784bd2b12aa3816d0`，目标 `11d764ad33e17c8dcf5bf4bff53267449ec8d22f`，状态 `pending`、revision 0、deliveryVersion 1。预检 `files: []`、`clean`、fastForward、无冲突，提交命令已完成且 `localSaved/pushed` 均为 true；源成果此前已上传，未制造额外代码提交。
+
+另一未 init 的会话再次预检，实际请求没有 sessionId/revision，平台返回 `DELIVERY_ALREADY_SUBMITTED` 并复用同一记录；同源版本记录仍为 1，审核领取和合并操作均为 0。这验证的是无会话重复送审识别，不冒充无会话首次创建新记录已完成真实验收。
+
+宿主通过 GitHub CLI 只读查询 [PR #6](https://github.com/mhgd3250905/awesome-ugk-agent-android/pull/6)：当时源/目标完整 SHA 与上述送审相同，14 个 PR 提交逐一属于送审源提交历史，范围一致。平台记录本身未关联 PR URL，`pullRequestVerified` 仍为 false；外部核对不冒充平台已验证 PR，更不表示代码审核通过。此次记录只证明送审及去重行为，不验收分支代码质量，也未执行合并。

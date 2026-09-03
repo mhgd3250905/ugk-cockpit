@@ -13,7 +13,7 @@ description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP
 
 ## `completed` 的收束前置
 
-仅当用户明确选择 `outcome: "completed"` 时，才要求并检查完整 closeout：在调用 `ugk_work_handoff` 前，必须在同一手动 handoff 工作流中执行或复用一个针对当前 `HEAD` 仍有效的 `$cockpit-closeout` 结果，其中包含已核对的 `commit SHA`、必要验证和对应的非终态检查点。该 `completed` 选择本身就是执行 closeout 前置的用户授权，不要求用户额外再点名 `$cockpit-closeout`；closeout 仍不得由普通完成、commit、测试或其他非终态动作隐式触发。
+仅当用户明确选择 `outcome: "completed"` 时，才要求并检查完整 closeout：在调用 `ugk_work_handoff` 前，必须在同一手动 handoff 工作流中执行或复用一个针对当前 `HEAD` 仍有效的 `$cockpit-closeout` 本地收束成果，其中包含已核对的 `commit SHA`、必要验证和对齐结论，而非必须存在 progress 回执。该 `completed` 选择本身就是执行 closeout 前置的用户授权，不要求用户额外再点名 `$cockpit-closeout`；closeout 仍不得由普通完成、commit、测试或其他非终态动作隐式触发。
 
 如果 closeout 未完成、验证已失效、当前 `HEAD` 已变化，或缺少可信 `commit SHA`，不得以 `completed` 调用 `ugk_work_handoff`；向用户说明代码是否受影响、closeout 失败的原因和推荐下一步，并等待处理。`blocked` 或 `abandoned` 不要求 closeout，只如实携带未解决事项。功能完成、commit、测试通过或上下文堆积都不能隐式触发 closeout 或 terminal handoff。
 
@@ -44,6 +44,6 @@ description: 阶段结束时从事实整理紧凑交接并调用 UGK Cockpit MCP
 ## 成功标准与重试
 
 - 只有工具结果中严格出现布尔值 `cockpitVerified: true`（且不是工具错误）才向用户宣告“交接已由 Cockpit 验证并完成”。只有 `ok: true`、Markdown 或本地推断都不能替代该字段。
+- 缺少 active session、MCP 不可用、缺少 `cockpitVerified: true` 或 revision 冲突时，只向用户报告未完成平台 handoff（说明发生了什么、代码是否受影响及建议下一步），绝不否定本地已完成的收束成果；不能绕过失败 CAS 继续终态调用，也不得声称交接成功。提示用户安装/启用 `ugk-cockpit` 本地 MCP 或按 MCP 返回的事实处理。
 - 传输结果不确定时，使用同一个 `clientRequestId` 重发完全相同的 payload；不要换 ID、猜 revision、重复结束操作或再调用另一个终态工具。
-- MCP 报错、不可用、缺少 `cockpitVerified: true` 或 revision 冲突时，说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用 `ugk-cockpit` 本地 MCP 或按 MCP 返回的事实处理。不得声称交接成功。
 - 请求不得携带 `path`、`projectId` 或 `worktreeId`；不要在 Skill 内复制状态机或绕过 MCP 权限。

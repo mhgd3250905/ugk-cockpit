@@ -40,10 +40,11 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 
 `status` 只能使用非终态的 `working` 或 `in_progress`，不要用 progress 伪造终态。只有用户明确要求结束当前 Cockpit 阶段时，才改用 `$cockpit-handoff`（`ugk_work_handoff`）；功能完成、commit、测试通过或上下文堆积都不能由 AI 自行推断为结束。只有用户明确要求换聊天继续时，才改用 `$cockpit-relay`，不要因上下文长度自动接力。
 
-成功后只把 MCP 返回的 `revision` 作为下一次 `expectedRevision`，不自行递增或猜测。没有 active session、没有可信的 session/revision，或请求失败时不要调用或声称已记录；显式场景下向用户说明需要先接入/恢复会话。
+成功后只把 MCP 返回的 `revision` 作为下一次 `expectedRevision`，不自行递增或猜测。没有 active session、没有可信的 session/revision，或请求失败时不要调用或声称已记录；补充登记缺失或失败不影响已成功 Git 成果或后续已授权 Git 操作，不诱导仅做本地收束或普通 Git 的场景去 init，显式要求平台记录时向用户说明需要先接入/恢复会话。
 
 ## 重试与不可用
 
 - 传输结果不确定时，用同一个 `clientRequestId` 重发完全相同的 payload；不要换 ID、改 revision 或再次执行 Git。
+- 平台登记缺失、跳过或失败时，只报告平台进展未登记，不影响已成功 Git 或后续已授权 Git；不回滚、撤销 commit 或阻塞授权 push。
 - MCP 不可用时明确提示安装/启用 `ugk-cockpit` 本地 MCP 后重试，不声称完成。
 - MCP 负责权限、CAS revision、幂等和事务；不要在 payload 中加入 `path`、`projectId` 或 `worktreeId`，也不要在 Skill 内复制状态机。
