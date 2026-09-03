@@ -2,6 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createApiClient } from './api.js';
 import { SUBMIT_MESSAGE, deliveryStatusLabel } from './delivery-view.mjs';
+import {
+  timelineConnectorEnd,
+  timelineCurvePath,
+  timelineCurveSourceY,
+  timelineEntryNodeOffset,
+  timelineRailEndY,
+} from './timeline-geometry.mjs';
 import './styles.css';
 
 const STATUS = {
@@ -66,7 +73,123 @@ const TIMELINE_KINDS = {
   progress: { code: 'PROGRESS', label: '工作进展' },
   relay: { code: 'RELAY', label: '聊天接力' },
   handoff: { code: 'HANDOFF', label: '阶段交接' },
+  integration: { code: 'INTEGRATED', label: '接入主项目' },
 };
+
+const TIMELINE_SPACE_COLORS = [
+  'var(--timeline-space-line)',
+  'var(--timeline-space-alt-line)',
+  'var(--timeline-space-third-line)',
+];
+
+function stableLaneColor(lane) {
+  if (lane.role === 'main') return 'var(--timeline-main-line)';
+  if (lane.role === 'unknown') return 'var(--timeline-unknown-line)';
+  const key = String(lane.key || lane.spaceId || lane.worktreeId || 'space');
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1) {
+    hash = ((hash << 5) - hash + key.charCodeAt(index)) | 0;
+  }
+  return TIMELINE_SPACE_COLORS[Math.abs(hash) % TIMELINE_SPACE_COLORS.length];
+}
+
+function timelineTimestamp(value) {
+  const parsed = Date.parse(value ?? '');
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function getTimelineLanes(timeline, items = []) {
+  const lanes = [];
+  const known = new Map();
+  const supplied = Array.isArray(timeline?.lanes) ? timeline.lanes : [];
+
+  for (const lane of supplied) {
+    if (!lane?.key || known.has(lane.key)) continue;
+    const normalized = {
+      key: lane.key,
+      role: lane.role || 'unknown',
+      label: lane.label || '来源未确认',
+      worktreeId: lane.worktreeId ?? null,
+      spaceId: lane.spaceId ?? null,
+      origin: lane.origin ?? null,
+      eventCount: Number(lane.eventCount ?? 0),
+    };
+    known.set(normalized.key, normalized);
+    lanes.push(normalized);
+  }
+
+  for (const item of items) {
+    const key = item?.laneKey || 'unknown';
+    if (known.has(key)) continue;
+    const normalized = {
+      key,
+      role: item?.laneRole || 'unknown',
+      label: item?.laneLabel || '来源未确认',
+      worktreeId: item?.worktreeId ?? null,
+      spaceId: item?.spaceId ?? null,
+      origin: null,
+      eventCount: 0,
+    };
+    known.set(key, normalized);
+    lanes.push(normalized);
+  }
+
+  if (lanes.length === 0) {
+    lanes.push({
+      key: 'unknown',
+      role: 'unknown',
+      label: '来源未确认',
+      worktreeId: null,
+      spaceId: null,
+      origin: null,
+      eventCount: 0,
+    });
+  }
+
+  return lanes.map((lane, index) => ({
+    ...lane,
+    index,
+    color: stableLaneColor(lane),
+  }));
+}
+
+function getTimelineEntries(timeline, lanes) {
+  const items = Array.isArray(timeline?.items) ? timeline.items : [];
+  const entries = items.map((item) => ({ ...item, entryKind: 'event' }));
+  const oldestItemTime = items.reduce((oldest, item) => {
+    const timestamp = timelineTimestamp(item.timestamp);
+    return oldest === null || timestamp < oldest ? timestamp : oldest;
+  }, null);
+
+  for (const lane of lanes) {
+    const origin = lane.origin;
+    if (lane.role !== 'development_space' || !origin?.createdAt) continue;
+    const originTime = timelineTimestamp(origin.createdAt);
+    const originOutsideLoadedWindow = Boolean(
+      timeline?.hasMore && oldestItemTime !== null && originTime < oldestItemTime,
+    );
+    entries.push({
+      id: `origin:${lane.key}`,
+      entryKind: originOutsideLoadedWindow ? 'origin-continuation' : 'origin',
+      kind: 'origin',
+      laneKey: lane.key,
+      laneLabel: lane.label,
+      laneRole: lane.role,
+      timestamp: origin.createdAt,
+      origin,
+      originOutsideLoadedWindow,
+      summary: `开发空间已创建 · ${lane.label}`,
+    });
+  }
+
+  return entries.sort((left, right) => {
+    const timeDiff = timelineTimestamp(right.timestamp) - timelineTimestamp(left.timestamp);
+    if (timeDiff !== 0) return timeDiff;
+    // At the same timestamp, show the actual event before its source row.
+    if (left.entryKind !== right.entryKind) return left.entryKind === 'event' ? -1 : 1;
+    return String(right.id).localeCompare(String(left.id));
+  });
+}
 
 const THEME_OPTIONS = [
   { mode: 'light', label: '亮色', icon: SunIcon },
@@ -1234,6 +1357,19 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   const git = project.git ?? {};
   const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
   const revision = project.activeWork?.revision ?? project.activeRun?.revision ?? null;
+  const [focusedLaneKey, setFocusedLaneKey] = useState(null);
+  const timelineItems = Array.isArray(timeline?.items) ? timeline.items : [];
+  const timelineLanes = useMemo(() => getTimelineLanes(timeline, timelineItems), [timeline, timelineItems]);
+  const timelineEntries = useMemo(
+    () => getTimelineEntries(timeline, timelineLanes),
+    [timeline, timelineLanes],
+  );
+
+  useEffect(() => {
+    if (focusedLaneKey && !timelineLanes.some((lane) => lane.key === focusedLaneKey)) {
+      setFocusedLaneKey(null);
+    }
+  }, [focusedLaneKey, timelineLanes]);
 
   return (
     <>
@@ -1354,23 +1490,30 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
           <div>
             <span className="timeline-overline">WORK HISTORY</span>
             <h3 id="timeline-title">运行节点</h3>
-            <p>最新确认的节点在上方；只展示有意义的工作动作。</p>
+            <p>最新确认的节点在上方；工作副本沿各自工作线延续。</p>
           </div>
           <span className="timeline-count">{timeline.total} 个节点</span>
         </div>
 
-        {timeline.items.length === 0 ? (
+        <TimelineLaneControls
+          lanes={timelineLanes}
+          focusedLaneKey={focusedLaneKey}
+          onFocusLane={setFocusedLaneKey}
+        />
+
+        {timelineEntries.length === 0 ? (
           <div className="timeline-empty">
             <span aria-hidden="true" />
             <h4>还没有运行节点</h4>
             <p>项目接入 AI 后，重要进展会从这里开始记录。</p>
           </div>
         ) : (
-          <ol className="project-timeline" aria-label="最新在上的项目运行节点">
-            {timeline.items.map((item, index) => (
-              <TimelineNode key={`${item.kind}-${item.id}`} item={item} index={index} />
-            ))}
-          </ol>
+          <TimelineHistory
+            entries={timelineEntries}
+            lanes={timelineLanes}
+            focusedLaneKey={focusedLaneKey}
+            onFocusLane={setFocusedLaneKey}
+          />
         )}
 
         {loadError && timeline.items.length > 0 && (
@@ -1388,7 +1531,419 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   );
 }
 
-function TimelineNode({ item, index }) {
+function TimelineLaneControls({ lanes, focusedLaneKey, onFocusLane }) {
+  const visibleLanes = lanes.filter((lane) => (
+    lane.eventCount > 0 || lane.origin?.createdAt || lane.role === 'main'
+  ));
+
+  return (
+    <div className="timeline-lane-controls" role="toolbar" aria-label="选择要突出显示的工作线">
+      <div className="timeline-lane-filters">
+        {visibleLanes.map((lane) => (
+          <button
+            type="button"
+            className="timeline-lane-filter"
+            key={lane.key}
+            style={{ '--timeline-lane-color': lane.color }}
+            aria-pressed={focusedLaneKey === lane.key}
+            onClick={() => onFocusLane(lane.key)}
+          >
+            <span className="timeline-lane-swatch" aria-hidden="true" />
+            <span>{lane.label}</span>
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="timeline-focus-clear"
+        aria-pressed={focusedLaneKey === null}
+        onClick={() => onFocusLane(null)}
+      >
+        显示全部
+      </button>
+      <span className="timeline-focus-status" role="status" aria-live="polite">
+        {focusedLaneKey
+          ? `已突出显示${lanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选'}工作线`
+          : '全部工作线'}
+      </span>
+    </div>
+  );
+}
+
+function timelineEntryKey(entry) {
+  return entry.entryKind === 'origin' || entry.entryKind === 'origin-continuation'
+    ? `origin:${entry.laneKey}`
+    : `event:${entry.kind}:${entry.id}`;
+}
+
+function timelineRailWidth(laneCount, contentWidth) {
+  const narrow = contentWidth <= 560;
+  const min = narrow ? 52 : 72;
+  const max = narrow ? 108 : 132;
+  const step = narrow ? 17 : 22;
+  const padding = narrow ? 16 : 20;
+  return Math.min(max, Math.max(min, laneCount * step + padding));
+}
+
+function timelineLaneX(lane, laneCount, railWidth) {
+  if (laneCount <= 1) return railWidth / 2;
+  const edge = Math.min(18, Math.max(11, railWidth / (laneCount + 1)));
+  return edge + ((railWidth - edge * 2) * lane.index) / (laneCount - 1);
+}
+
+function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
+  if (!geometry) return null;
+
+  const laneByKey = new Map(lanes.map((lane) => [lane.key, lane]));
+  const mainLane = lanes.find((lane) => lane.role === 'main') || lanes[0];
+  const activeLaneKeys = new Set(entries.flatMap((entry) => [entry.laneKey, entry.sourceLaneKey].filter(Boolean)));
+  const focusOpacity = (laneKey) => (
+    focusedLaneKey && focusedLaneKey !== laneKey ? 0.28 : 1
+  );
+  const paths = [];
+
+  for (const lane of lanes) {
+    if (!activeLaneKeys.has(lane.key)) continue;
+    const x = geometry.laneX.get(lane.key);
+    if (x === undefined) continue;
+    const railEndY = geometry.railEndY.get(lane.key) ?? Math.max(3, geometry.height - 3);
+    paths.push(
+      <path
+        key={`rail:${lane.key}`}
+        className="timeline-graph-rail"
+        d={`M ${x} 3 V ${railEndY}`}
+        stroke={lane.color}
+        style={{ opacity: focusOpacity(lane.key) }}
+      />,
+    );
+  }
+
+  for (const entry of entries) {
+    const point = geometry.points.get(timelineEntryKey(entry));
+    const lane = laneByKey.get(entry.laneKey);
+    if (!point || !lane) continue;
+
+    if (entry.entryKind === 'origin') {
+      const childX = geometry.laneX.get(lane.key);
+      const sourceX = mainLane ? geometry.laneX.get(mainLane.key) : null;
+      if (childX === undefined || sourceX === undefined || childX === sourceX) continue;
+      const sourceY = timelineCurveSourceY(
+        point.y,
+        geometry.railEndY.get(mainLane.key) ?? Math.max(3, geometry.height - 3),
+      );
+      const path = timelineCurvePath({
+        sourceX,
+        targetX: childX,
+        sourceY,
+        targetY: point.y,
+      });
+      if (path) {
+        paths.push(
+          <path
+            key={`origin:${entry.laneKey}`}
+            className="timeline-graph-origin"
+            d={path}
+            stroke={lane.color}
+            style={{ opacity: focusedLaneKey && focusedLaneKey !== lane.key && focusedLaneKey !== mainLane?.key ? 0.24 : 1 }}
+          />,
+        );
+      }
+      continue;
+    }
+
+    if (entry.kind === 'integration' && entry.sourceLaneKey) {
+      const sourceLane = laneByKey.get(entry.sourceLaneKey);
+      const targetX = geometry.laneX.get(entry.laneKey);
+      const sourceX = geometry.laneX.get(entry.sourceLaneKey);
+      if (sourceLane && sourceX !== undefined && targetX !== undefined && sourceX !== targetX) {
+        const sourceY = timelineCurveSourceY(
+          point.y,
+          geometry.railEndY.get(entry.sourceLaneKey) ?? Math.max(3, geometry.height - 3),
+        );
+        const path = timelineCurvePath({
+          sourceX,
+          targetX,
+          sourceY,
+          targetY: point.y,
+        });
+        if (path) {
+          paths.push(
+            <path
+              key={`integration:${timelineEntryKey(entry)}`}
+              className="timeline-graph-integration"
+              d={path}
+              stroke={sourceLane.color}
+              style={{ opacity: focusedLaneKey && focusedLaneKey !== entry.laneKey && focusedLaneKey !== entry.sourceLaneKey ? 0.28 : 1 }}
+            />,
+          );
+        }
+      }
+    }
+
+    const connectorEnd = timelineConnectorEnd(point.x, geometry.railWidth);
+    paths.push(
+      <path
+        key={`connector:${timelineEntryKey(entry)}`}
+        className={`timeline-graph-connector${entry.entryKind === 'origin-continuation' ? ' timeline-graph-continuation' : ''}`}
+        d={`M ${point.x + 7} ${point.y} H ${connectorEnd}`}
+        stroke="var(--timeline-connector)"
+        style={{ opacity: focusOpacity(entry.laneKey) * 0.68 }}
+      />,
+    );
+  }
+
+  return (
+    <svg
+      className="timeline-graph-svg"
+      aria-hidden="true"
+      viewBox={`0 0 ${geometry.railWidth} ${Math.max(1, geometry.height)}`}
+      preserveAspectRatio="none"
+    >
+      {paths}
+    </svg>
+  );
+}
+
+function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
+  const historyRef = useRef(null);
+  const rowRefs = useRef(new Map());
+  const [geometry, setGeometry] = useState(null);
+
+  useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return undefined;
+
+    const measure = () => {
+      const rootRect = history.getBoundingClientRect();
+      const railWidth = timelineRailWidth(lanes.length, history.clientWidth);
+      const points = new Map();
+      for (const entry of entries) {
+        const row = rowRefs.current.get(timelineEntryKey(entry));
+        if (!row) continue;
+        const rowRect = row.getBoundingClientRect();
+        points.set(timelineEntryKey(entry), {
+          x: timelineLaneX(
+            lanes.find((lane) => lane.key === entry.laneKey) || lanes[0],
+            lanes.length,
+            railWidth,
+          ),
+          y: rowRect.top - rootRect.top + timelineEntryNodeOffset(entry.entryKind),
+        });
+      }
+      const railEndY = new Map(lanes.map((lane) => {
+        const originEntry = entries.find((entry) => (
+          entry.laneKey === lane.key
+          && (entry.entryKind === 'origin' || entry.entryKind === 'origin-continuation')
+        ));
+        const originPoint = originEntry ? points.get(timelineEntryKey(originEntry)) : null;
+        return [lane.key, timelineRailEndY({
+          laneRole: lane.role,
+          originY: originPoint?.y,
+          historyHeight: Math.max(history.scrollHeight, history.clientHeight),
+        })];
+      }));
+      setGeometry({
+        railWidth,
+        height: Math.max(history.scrollHeight, history.clientHeight),
+        laneX: new Map(lanes.map((lane) => [lane.key, timelineLaneX(lane, lanes.length, railWidth)])),
+        railEndY,
+        points,
+      });
+    };
+
+    const frame = typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame(measure)
+      : setTimeout(measure, 0);
+    const cancelFrame = () => {
+      if (typeof cancelAnimationFrame === 'function' && typeof frame === 'number') {
+        cancelAnimationFrame(frame);
+      } else {
+        clearTimeout(frame);
+      }
+    };
+    const resizeObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(measure)
+      : null;
+    resizeObserver?.observe(history);
+    for (const row of rowRefs.current.values()) resizeObserver?.observe(row);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      cancelFrame();
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [entries, lanes]);
+
+  const historyStyle = {
+    '--timeline-rail-width': `${geometry?.railWidth ?? timelineRailWidth(lanes.length, 800)}px`,
+  };
+
+  return (
+    <div
+      ref={historyRef}
+      className={`timeline-history${focusedLaneKey ? ' has-focused-lane' : ''}`}
+      style={historyStyle}
+      data-lane-count={lanes.length}
+    >
+      <div className="timeline-graph" aria-hidden="true">
+        <TimelineGraph
+          geometry={geometry}
+          entries={entries}
+          lanes={lanes}
+          focusedLaneKey={focusedLaneKey}
+        />
+      </div>
+      {geometry && (
+        <div className="timeline-graph-targets">
+          {entries.map((entry) => {
+            const point = geometry.points.get(timelineEntryKey(entry));
+            const lane = lanes.find((candidate) => candidate.key === entry.laneKey) || lanes[0];
+            if (!point || !lane) return null;
+            const isFocused = focusedLaneKey === lane.key;
+            return (
+              <button
+                type="button"
+                className={`timeline-rail-node${entry.entryKind === 'origin' || entry.entryKind === 'origin-continuation' ? ' is-origin' : ''}`}
+                key={`target:${timelineEntryKey(entry)}`}
+                style={{
+                  '--timeline-node-x': `${point.x}px`,
+                  '--timeline-node-y': `${point.y}px`,
+                  '--timeline-lane-color': lane.color,
+                }}
+                aria-label={`突出显示${lane.label}工作线`}
+                aria-pressed={isFocused}
+                onClick={() => onFocusLane(lane.key)}
+              >
+                <span aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <ol className="project-timeline" aria-label="最新在上的项目运行节点">
+        {entries.map((entry, index) => {
+          const lane = lanes.find((candidate) => candidate.key === entry.laneKey) || lanes[0];
+          const isFocused = focusedLaneKey === lane.key;
+          const isDimmed = Boolean(focusedLaneKey && !isFocused);
+          const rowClass = [
+            'timeline-node',
+            entry.entryKind === 'origin' || entry.entryKind === 'origin-continuation'
+              ? 'timeline-node-origin'
+              : `timeline-node-${entry.kind}`,
+            entry.entryKind === 'origin-continuation' ? 'is-origin-continuation' : '',
+            isFocused ? 'is-lane-focused' : '',
+            isDimmed ? 'is-lane-dimmed' : '',
+          ].filter(Boolean).join(' ');
+          const rowStyle = {
+            '--timeline-index': Math.min(index, 9),
+            '--timeline-lane-color': lane.color,
+          };
+          const setRowRef = (node) => {
+            const key = timelineEntryKey(entry);
+            if (node) rowRefs.current.set(key, node);
+            else rowRefs.current.delete(key);
+          };
+
+          if (entry.entryKind === 'origin' || entry.entryKind === 'origin-continuation') {
+            return (
+              <TimelineOriginNode
+                key={timelineEntryKey(entry)}
+                ref={setRowRef}
+                entry={entry}
+                lane={lane}
+                className={rowClass}
+                style={rowStyle}
+                focusedLaneKey={focusedLaneKey}
+                onFocusLane={onFocusLane}
+              />
+            );
+          }
+
+          return (
+            <TimelineNode
+              key={timelineEntryKey(entry)}
+              ref={setRowRef}
+              item={entry}
+              index={index}
+              lane={lane}
+              className={rowClass}
+              style={rowStyle}
+              focusedLaneKey={focusedLaneKey}
+              onFocusLane={onFocusLane}
+            />
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+const TimelineOriginNode = React.forwardRef(function TimelineOriginNode({
+  entry,
+  lane,
+  className,
+  style,
+  focusedLaneKey,
+  onFocusLane,
+}, ref) {
+  const origin = entry.origin ?? {};
+  const baseCommit = origin.baseCommit ? origin.baseCommit.slice(0, 7) : null;
+  const isContinuation = entry.entryKind === 'origin-continuation';
+  const onCardClick = (event) => {
+    if (event.target?.closest?.('button, a, summary, input, select, textarea')) return;
+    onFocusLane(lane.key);
+  };
+
+  return (
+    <li ref={ref} className={className} style={style} data-lane-key={lane.key}>
+      <article className="timeline-origin-card" onClick={onCardClick}>
+        <header className="timeline-origin-header">
+          <button
+            type="button"
+            className="timeline-lane-focus"
+            style={{ '--timeline-lane-color': lane.color }}
+            aria-pressed={focusedLaneKey === lane.key}
+            aria-label={`突出显示${lane.label}工作线`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onFocusLane(lane.key);
+            }}
+          >
+            <span className="timeline-lane-swatch" aria-hidden="true" />
+            <span>{lane.label}</span>
+          </button>
+          <span className="timeline-origin-label">{isContinuation ? '来源较早记录' : '工作副本来源'}</span>
+          <time dateTime={entry.timestamp}>{formatTime(entry.timestamp)}</time>
+        </header>
+        {isContinuation ? (
+          <>
+            <p><strong>来源记录在当前页之外</strong>，继续加载更早记录可查看完整上下文。</p>
+            <small>这条工作线保持在原位；当前页面未把未加载记录算作已展示。</small>
+          </>
+        ) : (
+          <>
+            <p><strong>开发空间已创建</strong>，从这里开始沿独立工作线记录。</p>
+            <small>
+              创建时采用的基线 {baseCommit ? <code>{baseCommit}</code> : '未记录'}
+              {origin.branch ? <> · 工作线 <code>{origin.branch}</code></> : ''}
+            </small>
+          </>
+        )}
+      </article>
+    </li>
+  );
+});
+
+const TimelineNode = React.forwardRef(function TimelineNode({
+  item,
+  index,
+  lane,
+  className,
+  style,
+  focusedLaneKey,
+  onFocusLane,
+}, ref) {
   const kind = TIMELINE_KINDS[item.kind] ?? { code: 'EVENT', label: item.typeLabel || '运行节点' };
   const detailGroups = [
     ['已完成', item.completedItems],
@@ -1410,15 +1965,36 @@ function TimelineNode({ item, index }) {
     detailGroups.length > 0
   );
 
+  const onCardClick = (event) => {
+    if (event.target?.closest?.('button, a, summary, input, select, textarea')) return;
+    onFocusLane(lane.key);
+  };
+
   return (
     <li
-      className={`timeline-node timeline-node-${item.kind}`}
-      style={{ '--timeline-index': Math.min(index, 9) }}
+      ref={ref}
+      className={className}
+      style={style}
+      data-lane-key={lane.key}
+      data-lane-role={lane.role}
     >
-      <div className="timeline-rail" aria-hidden="true"><span /></div>
-      <article className="timeline-bubble">
+      <article className="timeline-bubble" onClick={onCardClick}>
         <header className="timeline-node-header">
           <div className="timeline-kind-wrap">
+            <button
+              type="button"
+              className="timeline-lane-focus"
+              style={{ '--timeline-lane-color': lane.color }}
+              aria-pressed={focusedLaneKey === lane.key}
+              aria-label={`突出显示${lane.label}工作线`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onFocusLane(lane.key);
+              }}
+            >
+              <span className="timeline-lane-swatch" aria-hidden="true" />
+              <span>{lane.label}</span>
+            </button>
             <span className="timeline-kind-code">{kind.code}</span>
             <strong>{kind.label}</strong>
           </div>
@@ -1426,8 +2002,14 @@ function TimelineNode({ item, index }) {
         </header>
 
         <div className="timeline-context-row">
-          <span className="timeline-agent">AI · {item.agent || '未记录'}</span>
-          {item.git ? (
+          {item.kind !== 'integration' && <span className="timeline-agent">AI · {item.agent || '未记录'}</span>}
+          {item.kind === 'integration' ? (
+            <>
+              <span className="integration-receipt-chip">已确认接入</span>
+              {item.sourceBranch && <span className="git-chip git-branch">来源 {item.sourceBranch}</span>}
+              {item.integratedCommit && <span className="git-chip git-commit">主项目 {item.integratedCommit.slice(0, 7)}</span>}
+            </>
+          ) : item.git ? (
             item.git.coherence === 'coherent' ? (
               <>
                 {item.git.branch && <span className="git-chip git-branch">{item.git.branch}</span>}
@@ -1457,12 +2039,6 @@ function TimelineNode({ item, index }) {
             <span className="handoff-status-chip">阶段已交接</span>
           )}
         </div>
-
-        {item.git?.branchChanged && (
-          <div className="branch-change-note">
-            分支从 <code>{item.git.previousBranch}</code> 切换到 <code>{item.git.branch}</code>
-          </div>
-        )}
 
         <h4>{item.summary || item.note || kind.label}</h4>
 
@@ -1567,7 +2143,7 @@ function TimelineNode({ item, index }) {
       </article>
     </li>
   );
-}
+});
 
 function ConfirmAddModal({ selection, onClose, onRegister, busy, notice }) {
   const [name, setName] = useState(selection?.folderName || '');

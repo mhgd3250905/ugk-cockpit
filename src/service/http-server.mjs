@@ -2098,11 +2098,15 @@ export async function createCockpitHttpServer({
         const developmentSpaces = listDevelopmentSpaces(db, { projectId }).map((space) => ({
           spaceId: space.spaceId,
           name: space.name || '通用开发空间',
+          branch: space.branch,
+          baseCommit: space.baseCommit,
+          worktreeId: space.worktreeId,
           status: space.status,
           statusReason: space.statusReason,
           revision: space.revision,
           createdAt: space.createdAt,
           updatedAt: space.updatedAt,
+          archivedAt: space.archivedAt,
         }));
         const submissions = listSubmissions(db, { projectId }).map((submission) => ({
           submissionId: submission.submissionId,

@@ -285,7 +285,7 @@ test('project detail and timeline aggregate init, progress, relay, and handoff i
   assert.equal(items[0].git.shortHead, newHead.slice(0, 7));
   assert.equal(items[0].git.coherence, 'coherent');
   assert.ok(items[0].git.observedAt);
-  assert.equal(items[0].git.branchChanged, false);
+  assert.equal(Object.hasOwn(items[0].git, 'branchChanged'), false);
   assert.deepEqual(items[0].completedItems, ['紧凑卡片', '详情 Dialog', '时间线动效']);
   assert.deepEqual(items[0].pendingItems, ['最终发布 readiness 检查']);
   assert.deepEqual(items[0].decisions, ['保持克制动效']);

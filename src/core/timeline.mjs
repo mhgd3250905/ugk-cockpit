@@ -26,6 +26,91 @@ function truncateLegacyNote(note, maxLength = 80) {
   return candidate.trim() + '…';
 }
 
+function timelineLaneResolver(db, projectId) {
+  const project = db.prepare(`
+    SELECT worktree_id
+    FROM projects
+    WHERE id = ?
+  `).get(projectId) ?? null;
+  const spaces = db.prepare(`
+    SELECT id, name, branch, base_commit, worktree_id, created_at, archived_at
+    FROM development_spaces
+    WHERE project_id = ?
+    ORDER BY created_at ASC, id ASC
+  `).all(projectId);
+  const spaceByWorktree = new Map(spaces.map((space) => [space.worktree_id, space]));
+  const lanes = new Map();
+
+  function addLane(worktreeId) {
+    if (worktreeId && worktreeId === project?.worktree_id) {
+      const lane = {
+        key: 'main',
+        role: 'main',
+        label: '主项目',
+        worktreeId,
+        spaceId: null,
+        origin: null,
+      };
+      lanes.set(lane.key, lane);
+      return lane;
+    }
+
+    const space = worktreeId ? spaceByWorktree.get(worktreeId) : null;
+    if (space) {
+      const lane = {
+        key: `space:${space.id}`,
+        role: 'development_space',
+        label: space.name || '通用开发空间',
+        worktreeId: space.worktree_id,
+        spaceId: space.id,
+        origin: {
+          kind: 'development_space_created',
+          createdAt: space.created_at,
+          branch: space.branch ?? null,
+          baseCommit: space.base_commit ?? null,
+        },
+      };
+      lanes.set(lane.key, lane);
+      return lane;
+    }
+
+    const key = worktreeId ? `worktree:${worktreeId}` : 'unknown';
+    const lane = {
+      key,
+      role: 'unknown',
+      label: '来源未确认',
+      worktreeId: worktreeId ?? null,
+      spaceId: null,
+      origin: null,
+    };
+    lanes.set(lane.key, lane);
+    return lane;
+  }
+
+  if (project?.worktree_id) addLane(project.worktree_id);
+  for (const space of spaces) addLane(space.worktree_id);
+
+  return {
+    forWorktree(worktreeId) {
+      return addLane(worktreeId ?? null);
+    },
+    all() {
+      return Array.from(lanes.values());
+    },
+  };
+}
+
+function attachTimelineLane(item, resolver) {
+  const lane = resolver.forWorktree(item.worktreeId);
+  return {
+    ...item,
+    laneKey: lane.key,
+    laneRole: lane.role,
+    laneLabel: lane.label,
+    spaceId: lane.spaceId,
+  };
+}
+
 /**
  * Read the reverse-chronological timeline of work events for a project.
  * Fixed node semantics:
@@ -33,8 +118,10 @@ function truncateLegacyNote(note, maxLength = 80) {
  * - 'progress': Meaningful checkpoints/progress notes
  * - 'relay': Mid-session conversational relays
  * - 'handoff': Stage completion handoffs
+ * - 'integration': Main-project integration receipts with an integrated commit
  */
 export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = {}) {
+  const laneResolver = timelineLaneResolver(db, projectId);
   const handoffRows = db.prepare(`
     SELECT h.id, h.sequence, h.assignment_id, h.project_id, h.worktree_id,
            h.session_id, h.run_id, h.client_request_id, h.expected_revision, h.revision,
@@ -56,7 +143,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
   const receiptRows = db.prepare(`
     SELECT hr.id AS receipt_id, hr.run_id, hr.outcome, hr.summary, hr.next_step,
            hr.payload_json, hr.created_at,
-           r.agent_claim, r.goal, r.revision, r.created_at AS run_created_at, r.finished_at,
+           r.worktree_id, r.agent_claim, r.goal, r.revision, r.created_at AS run_created_at, r.finished_at,
            s.head AS snapshot_head, s.branch AS snapshot_branch,
            s.coherence AS snapshot_coherence, s.observed_at AS snapshot_observed_at
     FROM handoff_receipts hr
@@ -65,6 +152,21 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     LEFT JOIN snapshots s ON s.run_id = r.id AND s.phase = 'final'
     WHERE p.id = ?
   `).all(projectId).filter((r) => !handoffSessionIds.has(r.run_id) && !handoffRunIds.has(r.run_id));
+
+  // An integration edge is safe to draw only from an append-only receipt that
+  // says the source was integrated and records the resulting main commit.
+  const integrationReceiptRows = db.prepare(`
+    SELECT ir.id AS receipt_id, ir.submission_id, ir.project_id, ir.space_id,
+           ir.source_commit, ir.target_head, ir.integrated_commit, ir.outcome,
+           ir.summary, ir.payload_json, ir.created_at,
+           s.source_worktree_id, s.target_worktree_id,
+           s.source_branch, s.target_branch
+    FROM integration_receipts ir
+    JOIN submissions s ON s.id = ir.submission_id
+    WHERE ir.project_id = ?
+      AND ir.outcome = 'integrated'
+      AND ir.integrated_commit IS NOT NULL
+  `).all(projectId);
 
   const relayRows = db.prepare(`
     SELECT rel.id, rel.sequence, rel.assignment_id, rel.project_id, rel.worktree_id,
@@ -86,7 +188,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            pe.expected_revision, pe.revision, pe.status, pe.summary, pe.details_json,
            pe.note, pe.git_head, pe.git_branch, pe.git_coherence, pe.git_observed_at,
            pe.created_at,
-           a.agent_id, a.task_id,
+           a.worktree_id, a.agent_id, a.task_id,
            r.agent_claim
     FROM progress_events pe
     JOIN assignments a ON a.id = pe.assignment_id
@@ -97,7 +199,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 
   const assignmentRows = db.prepare(`
     SELECT a.id AS assignment_id, a.agent_id, a.task_id, a.scope_json, a.status AS assignment_status,
-           a.session_id, a.revision AS assignment_revision, a.accepted_at, a.created_at,
+           a.worktree_id, a.session_id, a.revision AS assignment_revision, a.accepted_at, a.created_at,
            pe.note AS adopted_note, pe.created_at AS adopted_at,
            s.head AS baseline_head, s.branch AS baseline_branch,
            s.coherence AS baseline_coherence, s.observed_at AS baseline_observed_at,
@@ -112,7 +214,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
   const initSessionIds = new Set(assignmentRows.map((r) => r.session_id).filter(Boolean));
 
   const standaloneRuns = db.prepare(`
-    SELECT r.id AS run_id, r.agent_claim, r.goal, r.created_at, r.revision,
+    SELECT r.id AS run_id, r.worktree_id, r.agent_claim, r.goal, r.created_at, r.revision,
            s.head AS baseline_head, s.branch AS baseline_branch,
            s.coherence AS baseline_coherence, s.observed_at AS baseline_observed_at
     FROM runs r
@@ -127,6 +229,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     typeLabel: '阶段交接',
     timestamp: row.created_at,
     agent: row.agent_id || null,
+    worktreeId: row.worktree_id ?? null,
     revision: row.revision ?? 1,
     sequence: row.sequence ?? 1,
     git: (row.snapshot_branch || row.snapshot_head || row.snapshot_coherence || row.snapshot_observed_at) ? {
@@ -156,6 +259,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     typeLabel: '阶段交接',
     timestamp: row.created_at || row.finished_at || row.run_created_at,
     agent: row.agent_claim || null,
+    worktreeId: row.worktree_id ?? null,
     revision: row.revision ?? 1,
     sequence: 1,
     git: (row.snapshot_branch || row.snapshot_head || row.snapshot_coherence || row.snapshot_observed_at) ? {
@@ -179,6 +283,46 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     bodyMarkdown: null,
   }));
 
+  const mainWorktreeId = laneResolver.all().find((lane) => lane.role === 'main')?.worktreeId ?? null;
+  const integrationItems = integrationReceiptRows
+    .filter((row) => row.target_worktree_id === mainWorktreeId
+      && row.source_worktree_id !== row.target_worktree_id)
+    .map((row) => {
+      const sourceLane = laneResolver.forWorktree(row.source_worktree_id);
+      return {
+        id: `integration_${row.receipt_id}`,
+        kind: 'integration',
+        typeLabel: '接入主项目',
+        timestamp: row.created_at,
+        agent: null,
+        worktreeId: row.target_worktree_id,
+        sourceWorktreeId: row.source_worktree_id,
+        sourceLaneKey: sourceLane.key,
+        targetWorktreeId: row.target_worktree_id,
+        sourceBranch: row.source_branch ?? null,
+        targetBranch: row.target_branch ?? null,
+        sourceCommit: row.source_commit ?? null,
+        targetHead: row.target_head ?? null,
+        integratedCommit: row.integrated_commit,
+        integrationReceiptId: row.receipt_id,
+        revision: 1,
+        sequence: 1,
+        git: null,
+        summary: row.summary || '已确认接入主项目',
+        details: [],
+        note: null,
+        nextSessionFocus: null,
+        currentState: '已由集成回执确认主项目接入',
+        completedItems: [],
+        pendingItems: [],
+        decisions: [],
+        artifactRefs: [],
+        risks: [],
+        suggestedSkills: [],
+        bodyMarkdown: null,
+      };
+    });
+
   const relayItems = relayRows.map((row) => {
     const gitEvidence = (row.git_branch || row.git_head || row.git_coherence || row.git_observed_at) ? {
       branch: row.git_branch ?? null,
@@ -193,6 +337,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       typeLabel: '聊天接力',
       timestamp: row.created_at,
       agent: row.agent_id || row.agent_claim || null,
+      worktreeId: row.worktree_id ?? null,
       revision: row.revision ?? 1,
       sequence: row.sequence ?? 1,
       git: gitEvidence,
@@ -231,6 +376,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       typeLabel: '工作进展',
       timestamp: row.created_at,
       agent: row.agent_id || row.agent_claim || null,
+      worktreeId: row.worktree_id ?? null,
       revision: row.revision ?? 1,
       sequence: row.revision ?? 1,
       git: gitEvidence,
@@ -257,6 +403,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       typeLabel: '接入项目',
       timestamp: row.adopted_at || row.accepted_at || row.run_created_at || row.created_at,
       agent: row.agent_id || row.agent_claim || null,
+      worktreeId: row.worktree_id ?? null,
       revision: 1,
       sequence: 1,
       git: (row.baseline_branch || row.baseline_head || row.baseline_coherence || row.baseline_observed_at) ? {
@@ -284,6 +431,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       typeLabel: '接入项目',
       timestamp: row.created_at,
       agent: row.agent_claim || null,
+      worktreeId: row.worktree_id ?? null,
       revision: 1,
       sequence: 1,
       git: (row.baseline_branch || row.baseline_head || row.baseline_coherence || row.baseline_observed_at) ? {
@@ -313,9 +461,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     ...relayItems,
     ...handoffItems,
     ...receiptItems,
-  ];
+    ...integrationItems,
+  ].map((item) => attachTimelineLane(item, laneResolver));
 
-  // Track branch switches chronologically
+  // Sort only for display order. A branch name changing between adjacent
+  // events is not evidence of a checkout, ancestry, or a cross-worktree
+  // transition.
   allItems.sort((a, b) => {
     const timeA = new Date(a.timestamp).getTime();
     const timeB = new Date(b.timestamp).getTime();
@@ -328,19 +479,6 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     if (seqA !== seqB) return seqA - seqB;
     return String(a.id).localeCompare(String(b.id));
   });
-
-  let previousBranch = null;
-  for (const item of allItems) {
-    if (item.git?.branch) {
-      if (previousBranch && previousBranch !== item.git.branch) {
-        item.git.branchChanged = true;
-        item.git.previousBranch = previousBranch;
-      } else {
-        item.git.branchChanged = false;
-      }
-      previousBranch = item.git.branch;
-    }
-  }
 
   // Reverse chronological sort (newest first)
   allItems.sort((a, b) => {
@@ -359,12 +497,21 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
   const total = allItems.length;
   const paged = allItems.slice(offset, offset + limit);
   const hasMore = offset + paged.length < total;
+  const counts = new Map();
+  for (const item of allItems) {
+    counts.set(item.laneKey, (counts.get(item.laneKey) ?? 0) + 1);
+  }
+  const lanes = laneResolver.all().map((lane) => ({
+    ...lane,
+    eventCount: counts.get(lane.key) ?? 0,
+  }));
 
   return {
     total,
     offset,
     limit,
     hasMore,
+    lanes,
     items: paged,
   };
 }

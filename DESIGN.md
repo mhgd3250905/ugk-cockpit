@@ -45,6 +45,12 @@ Mission Control Shell
   --accent-ink: #1c1105;
   --accent-soft: #2b1a0e;
   --accent-soft-border: #7c4a1d;
+  --timeline-main-line: #f97316;
+  --timeline-space-line: #62a6ad;
+  --timeline-space-alt-line: #b18b9d;
+  --timeline-space-third-line: #a3a36c;
+  --timeline-unknown-line: #8d8880;
+  --timeline-connector: #554d45;
   --state-attention-bg: #2b1a0e;  --state-attention-border: #7c4a1d;  --state-attention-text: #fb923c;
   --state-active-bg: #10241d;      --state-active-border: #2f6b52;      --state-active-text: #34d399;
   --state-ready-bg: #2a2410;       --state-ready-border: #6b5a1e;       --state-ready-text: #facc15;
@@ -69,6 +75,12 @@ Mission Control Shell
   --accent-ink: #ffffff;
   --accent-soft: #fff7ed;
   --accent-soft-border: #fdba74;
+  --timeline-main-line: #c2410c;
+  --timeline-space-line: #167982;
+  --timeline-space-alt-line: #8f4f70;
+  --timeline-space-third-line: #697029;
+  --timeline-unknown-line: #77706a;
+  --timeline-connector: #c6bbad;
   --state-attention-bg: #fff7ed;  --state-attention-border: #fdba74;  --state-attention-text: #9a3412;
   --state-active-bg: #ecfdf5;     --state-active-border: #6ee7b7;     --state-active-text: #065f46;
   --state-ready-bg: #fefce8;      --state-ready-border: #fde047;      --state-ready-text: #854d0e;
@@ -182,6 +194,8 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 | `<= 768px` | 顶部操作纵向、项目卡单列、主动作满宽、modal 接近满宽 |
 
 移动端活跃进展摘要最多显示两行，避免长文本挤压主动作；完整信息仍可在后续详情中读取。
+
+工作线时间线在左侧保留稳定多轨图带，主项目使用暖橙，开发空间使用低饱和区别色，状态色只表达事件状态。卡片共用同一左边界，节点到卡片使用淡连接段；卡片顶部依次突出工作副本、事件类型和时间，Agent、工作线名称与代码保存点作为次要证据。按 `worktreeId`/开发空间身份归轨，不按相邻事件、Agent 或分支名推断关系；来源未知时使用独立中性轨。点击任意轨道节点或卡片空白处突出整条工作线，其他卡片仍保持原位并保留可读正文；「显示全部」恢复默认。分支创建来源只在有平台来源记录时绘制，主项目接入只接受真实 `integrated` 回执；送审、审核通过和普通交接均不绘制合流。
 
 ## 8. 动效与无障碍
 
