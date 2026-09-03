@@ -2303,6 +2303,419 @@ summary:focus-visible {
 }
 
 /* ==========================================================================
+   Submit Notes Inbox (工作说明收件箱)
+   ========================================================================== */
+
+.submit-notes-inbox {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-subtle);
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.inbox-header {
+  margin-bottom: 14px;
+}
+
+.inbox-header h3 {
+  margin: 3px 0 2px;
+  font-size: 18px;
+  color: var(--ink-primary);
+}
+
+.inbox-header p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.inbox-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.btn-filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--ink-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn-filter-tab:hover {
+  background: var(--surface-raised);
+  border-color: var(--border-hover);
+  color: var(--ink-primary);
+}
+
+.btn-filter-tab.active {
+  background: var(--surface-raised);
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.tab-count {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.inbox-error-alert {
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--state-attention-border);
+  border-radius: var(--radius-control);
+  background: var(--state-attention-bg);
+  color: var(--state-attention-text);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.inbox-error-alert p {
+  margin: 0;
+}
+
+.inbox-card-list {
+  display: grid;
+  gap: 14px;
+}
+
+.submit-note-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-card);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.note-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.note-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.note-card-title-group h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink-primary);
+}
+
+.note-card-time {
+  font-size: 12px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.note-badge-pending {
+  background: var(--state-attention-bg);
+  border: 1px solid var(--state-attention-border);
+  color: var(--state-attention-text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.note-badge-handled {
+  background: var(--state-ready-bg);
+  border: 1px solid var(--state-ready-border);
+  color: var(--state-ready-text);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.note-badge-archived {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+}
+
+.note-disclaimer {
+  font-size: 12px;
+  color: var(--ink-muted);
+  padding: 6px 10px;
+  background: var(--surface-sunken);
+  border-left: 3px solid var(--border-subtle);
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+}
+
+.note-body-box {
+  padding: 12px 14px;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-subtle);
+}
+
+.note-body-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.safe-external-link {
+  color: var(--brand-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.safe-external-link:hover {
+  color: var(--brand-hover);
+}
+
+.note-references-section {
+  display: grid;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.note-references-section h5 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.note-references-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.note-reference-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  flex-wrap: wrap;
+}
+
+.ref-type-tag {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.ref-commit-chip {
+  padding: 1px 6px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ref-note-text {
+  color: var(--ink-muted);
+}
+
+.note-source-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-muted);
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.source-label {
+  font-weight: 500;
+  color: var(--ink-secondary);
+}
+
+.source-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.note-handling-note-display {
+  padding: 8px 12px;
+  background: var(--state-ready-bg);
+  border: 1px solid var(--state-ready-border);
+  border-radius: var(--radius-control);
+  font-size: 13px;
+  color: var(--state-ready-text);
+  line-height: 1.5;
+}
+
+.note-remark-input-group {
+  display: grid;
+  gap: 4px;
+}
+
+.note-remark-input-group label {
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.note-remark-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-control);
+  background: var(--surface-sunken);
+  color: var(--ink-primary);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.note-remark-textarea:focus {
+  outline: none;
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 2px var(--brand-focus);
+}
+
+.note-action-error {
+  padding: 8px 12px;
+  background: var(--state-attention-bg);
+  border: 1px solid var(--state-attention-border);
+  border-radius: var(--radius-control);
+  color: var(--state-attention-text);
+  font-size: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.note-action-error p {
+  margin: 0;
+}
+
+.note-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.note-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.note-tech-details {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.note-tech-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.note-tech-dl {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.note-tech-dl div {
+  display: flex;
+  gap: 8px;
+}
+
+.note-tech-dl dt {
+  color: var(--ink-muted);
+  min-width: 90px;
+}
+
+.note-tech-dl dd {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.inbox-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+
+.pagination-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.legacy-review-details {
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--surface-sunken);
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.legacy-review-details summary {
+  cursor: pointer;
+  font-weight: 500;
+  user-select: none;
+}
+
+.legacy-review-details[open] summary {
+  margin-bottom: 12px;
+}
+
+/* ==========================================================================
    Reduced Motion
    ========================================================================== */
 

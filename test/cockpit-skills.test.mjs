@@ -30,7 +30,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
   const expectedTools = new Map([
     ['cockpit-init', ['ugk_work_init']],
     ['cockpit-progress', ['ugk_work_progress']],
-    ['cockpit-submit', ['ugk_work_submit']],
+    ['cockpit-submit', ['ugk_work_submit_note']],
     ['cockpit-relay', ['ugk_work_relay', 'ugk_work_resume']],
     ['cockpit-closeout', ['ugk_work_progress']],
     ['cockpit-handoff', ['ugk_work_handoff']],
@@ -60,22 +60,20 @@ test('only progress may be selected implicitly', () => {
   assert.match(progressMetadata, /allow_implicit_invocation:\s*true/);
 });
 
-test('cockpit-submit is explicit, MCP-only, idempotent, and reports partial push state', () => {
+test('cockpit-submit is explicit, MCP-only, idempotent, and publishes work note without forced git coupling', () => {
   const instructions = readFileSync(
     path.join(repositoryRoot, 'skills', 'cockpit-submit', 'SKILL.md'),
     'utf8',
   );
   assert.match(instructions, /只能由用户显式调用/);
-  assert.match(instructions, /ugk_work_submit/);
-  assert.match(instructions, /sessionId/);
+  assert.match(instructions, /ugk_work_submit_note/);
   assert.match(instructions, /clientRequestId/);
-  assert.match(instructions, /expectedRevision/);
-  assert.match(instructions, /summary/);
+  assert.match(instructions, /body/);
   assert.match(instructions, /同一个 `clientRequestId`/);
-  assert.match(instructions, /localSaved/);
-  assert.match(instructions, /pushed/);
-  assert.match(instructions, /不得自行执行 `git add`、`git commit`、`git push`/);
-  assert.doesNotMatch(instructions, /"path"|"projectId"|"worktreeId"|"branch"|"remote"|"token"/);
+  assert.match(instructions, /裸 submit 只发说明/);
+  assert.match(instructions, /零增量/);
+  assert.match(instructions, /严禁静默回退/);
+  assert.doesNotMatch(instructions, /"path"|"projectId"|"worktreeId"|"sessionId"|"token"/);
 });
 
 test('completed handoff explicitly accompanies closeout without requiring a second skill invocation', () => {

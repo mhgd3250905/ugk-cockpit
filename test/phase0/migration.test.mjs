@@ -725,12 +725,13 @@ test('version 15 database upgrades through current schema creating empty_folder_
 });
 
 function removeDeliveryMigration(db) {
+  db.exec('DROP TRIGGER IF EXISTS submit_notes_immutable_content; DROP TABLE IF EXISTS submit_notes;');
+  db.prepare('DELETE FROM schema_migrations WHERE version >= 19').run();
   db.exec(`DROP TABLE delivery_attempts; DROP TABLE delivery_preflights; DROP TABLE delivery_sources;
     DROP INDEX idx_submission_delivery_line;
     ALTER TABLE submissions DROP COLUMN delivery_json;
     ALTER TABLE submissions DROP COLUMN delivery_line_key;
     ALTER TABLE submissions DROP COLUMN delivery_version;`);
-  db.prepare('DELETE FROM schema_migrations WHERE version = 19').run();
 }
 
 test('version 16 database upgrades to version 17 creating durable submission attempts', (t) => {
@@ -788,6 +789,32 @@ test('version 18 upgrades repeatably without losing existing project or receipt 
     assert.ok(upgraded.prepare('PRAGMA table_info(submissions)').all().some((column) => column.name === 'delivery_json'));
     upgraded.close();
   }
+});
+
+test('version 19 database upgrades to version 20 creating submit_notes table', (t) => {
+  const dbPath = fixture(t, 'migration-v19');
+  const legacy = openCockpitDatabase(dbPath);
+  legacy.exec('DROP TRIGGER IF EXISTS submit_notes_immutable_content; DROP TABLE IF EXISTS submit_notes;');
+  legacy.prepare('DELETE FROM schema_migrations WHERE version = 20').run();
+  legacy.exec('PRAGMA user_version = 19;');
+  legacy.close();
+
+  const upgraded = openCockpitDatabase(dbPath);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 20);
+  const cols = upgraded.prepare('PRAGMA table_info(submit_notes)').all().map((r) => r.name);
+  assert.ok(cols.includes('id'));
+  assert.ok(cols.includes('project_id'));
+  assert.ok(cols.includes('command_id'));
+  assert.ok(cols.includes('title'));
+  assert.ok(cols.includes('body'));
+  assert.ok(cols.includes('status'));
+  assert.ok(cols.includes('revision'));
+  assert.ok(cols.includes('source_json'));
+  assert.ok(cols.includes('references_json'));
+  assert.ok(cols.includes('handling_note'));
+  assert.ok(cols.includes('created_at'));
+  assert.ok(cols.includes('updated_at'));
+  upgraded.close();
 });
 
 test('database from a newer product version is rejected without mutation', (t) => {

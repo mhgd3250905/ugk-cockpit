@@ -1,4 +1,13 @@
-export const SUBMIT_MESSAGE = '本次分支任务已完成，请使用 $cockpit-submit 提交审核。先通过 MCP 核对平台项目、当前工作线、本次文件范围和最新 main 的合并关系，再保存并上传。不需要补做 init，不接管其他会话；存在冲突、目录未授权或项目不明确时先告知我。成功后报告平台审核任务与固定代码版本，不自动合并。';
+export const SUBMIT_MESSAGE = '请使用 $cockpit-submit 向当前项目发布一条工作说明。根据已有事实整理当前进展与待办，不需要假设任务已完成，不默认执行保存、上传或预检。';
+
+export function noteStatusLabel(status) {
+  const labels = {
+    pending: '待处理',
+    handled: '已处理',
+    archived: '已归档',
+  };
+  return labels[status] ?? status;
+}
 
 export function deliveryStatusLabel(submission) {
   const labels = {
@@ -7,5 +16,5 @@ export function deliveryStatusLabel(submission) {
     changes_requested: '审核要求修改', rejected: '审核未通过', blocked: '需要处理后继续',
     cancelled: '已取消', withdrawn: '已撤回', merging: '正在接入主项目', push_failed: '保存成功，上传待恢复',
   };
-  return labels[submission.status] ?? '需要查看审核结果';
+  return labels[submission?.status] ?? '需要查看审核结果';
 }

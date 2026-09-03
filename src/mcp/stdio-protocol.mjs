@@ -2,13 +2,17 @@ import readline from 'node:readline';
 import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { sanitizeIntegrationErrorPayload } from './service-client.mjs';
+import { normalizeReferences } from '../core/submit-notes-contract.mjs';
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const PROGRESS_STATUSES = ['working', 'in_progress'];
-const INTEGRATION_TOOL_NAMES = new Set([
+const STRUCTURED_TOOL_NAMES = new Set([
   'ugk_integration_begin',
   'ugk_integration_review',
   'ugk_integration_merge',
+  'ugk_work_submit_note',
+  'ugk_submit_note_get',
+  'ugk_submit_note_update',
 ]);
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   DEFAULT_PROTOCOL_VERSION,
@@ -112,7 +116,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_submit_preflight',
-    description: 'After explicit submit intent, verify the registered project, authorized current directory, selected changes and latest remote target without changing user code. No init required. selectFolder opens a user-controlled folder authorization dialog.',
+    description: '[旧代码交付预检，普通工作说明请直接使用 ugk_work_submit_note] After explicit submit intent, verify the registered project, authorized current directory, selected changes and latest remote target without changing user code. No init required. selectFolder opens a user-controlled folder authorization dialog.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -128,7 +132,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_submit',
-    description: 'Explicitly save, normally push and register a fixed-version review task after a valid MCP preflight; no prior init or development-space session required. Never merge automatically.',
+    description: '[旧代码交付工具，普通工作说明请使用 ugk_work_submit_note] Explicitly save, normally push and register a fixed-version review task after a valid MCP preflight; no prior init or development-space session required. Never merge automatically.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -147,6 +151,98 @@ export const TOOLS = [
         }
       },
       required: ['preflightId', 'clientRequestId', 'summary'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_work_submit_note',
+    description: '向已确定的所属主项目发布工作说明（如本地提交、PR审核或工作摘要），轻量发布，不搬运或修改代码。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clientRequestId: {
+          type: 'string',
+          description: '客户端幂等请求标识符'
+        },
+        body: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 20000,
+          description: '工作说明正文内容（非空）'
+        },
+        title: {
+          type: 'string',
+          maxLength: 200,
+          description: '可选的工作说明标题'
+        },
+        references: {
+          type: 'array',
+          maxItems: 20,
+          items: {
+            type: 'object',
+            properties: {
+              target: { type: 'string', minLength: 1, maxLength: 1024, description: '1..1024非空原始定位字符串' },
+              type: { type: 'string', maxLength: 64, description: '可选类型，默认reference' },
+              commit: { type: 'string', maxLength: 128, description: '可选关联commit' },
+              title: { type: 'string', maxLength: 200, description: '可选标题' },
+              note: { type: 'string', maxLength: 1000, description: '可选备注说明' },
+            },
+            required: ['target'],
+            additionalProperties: false,
+          },
+          description: '可选的引用结构列表'
+        }
+      },
+      required: ['clientRequestId', 'body'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_submit_note_get',
+    description: '按当前工作目录授权项目读取指定工作说明的最新状态与复制处理内容，无副作用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        noteId: {
+          type: 'string',
+          description: '工作说明编号'
+        }
+      },
+      required: ['noteId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ugk_submit_note_update',
+    description: '更新指定工作说明的状态（pending|handled|archived）与处理备注，使用消息 revision 进行乐观并发控制。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        noteId: {
+          type: 'string',
+          description: '工作说明编号'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: '客户端幂等请求标识符'
+        },
+        expectedRevision: {
+          type: 'integer',
+          minimum: 1,
+          description: '消息当前的 revision 版本号'
+        },
+        status: {
+          type: 'string',
+          enum: ['pending', 'handled', 'archived'],
+          description: '更新后的消息状态'
+        },
+        handlingNote: {
+          type: 'string',
+          maxLength: 4000,
+          description: '可选的处理备注说明'
+        }
+      },
+      required: ['noteId', 'clientRequestId', 'expectedRevision', 'status'],
       additionalProperties: false
     }
   },
@@ -879,6 +975,78 @@ function validateResumeArgs(args) {
   return null;
 }
 
+function validateSubmitNoteArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowed = ['clientRequestId', 'body', 'title', 'references'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowed.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.clientRequestId !== 'string' || !args.clientRequestId.trim()) {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (typeof args.body !== 'string' || !args.body.trim()) {
+    return 'Missing or invalid required field: body (must be non-empty string)';
+  }
+  if (args.body.length > 20000) {
+    return 'Invalid field: body exceeds maximum length of 20000 characters';
+  }
+  if (args.title !== undefined && (typeof args.title !== 'string' || args.title.length > 200)) {
+    return 'Invalid field: title (must be string up to 200 characters)';
+  }
+  if (args.references !== undefined) {
+    try {
+      normalizeReferences(args.references);
+    } catch (err) {
+      return err.message;
+    }
+  }
+  return null;
+}
+
+function validateSubmitNoteGetArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (key !== 'noteId') return `Unexpected property: ${key}`;
+  }
+  if (typeof args.noteId !== 'string' || !args.noteId.trim()) {
+    return 'Missing or invalid required field: noteId (must be non-empty string)';
+  }
+  return null;
+}
+
+function validateSubmitNoteUpdateArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowed = ['noteId', 'clientRequestId', 'expectedRevision', 'status', 'handlingNote'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowed.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.noteId !== 'string' || !args.noteId.trim()) {
+    return 'Missing or invalid required field: noteId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || !args.clientRequestId.trim()) {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  if (!['pending', 'handled', 'archived'].includes(args.status)) {
+    return "Missing or invalid required field: status (must be 'pending', 'handled', or 'archived')";
+  }
+  if (args.handlingNote !== undefined && (typeof args.handlingNote !== 'string' || args.handlingNote.length > 4000)) {
+    return 'Invalid field: handlingNote (must be string up to 4000 characters)';
+  }
+  return null;
+}
+
 export async function dispatchMessage(message, { handlers = {}, stderr = null } = {}) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     return {
@@ -978,6 +1146,12 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateDeliveryRequest(toolArgs, 'submit');
       } else if (toolName === 'ugk_work_submit_preflight') {
         validationError = validateDeliveryRequest(toolArgs, 'preflight');
+      } else if (toolName === 'ugk_work_submit_note') {
+        validationError = validateSubmitNoteArgs(toolArgs);
+      } else if (toolName === 'ugk_submit_note_get') {
+        validationError = validateSubmitNoteGetArgs(toolArgs);
+      } else if (toolName === 'ugk_submit_note_update') {
+        validationError = validateSubmitNoteUpdateArgs(toolArgs);
       } else if (toolName === 'ugk_integration_begin') {
         validationError = validateIntegrationArgs(toolArgs, 'begin');
       } else if (toolName === 'ugk_integration_review') {
@@ -1032,7 +1206,7 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
 
       try {
         const handlerResult = await handler(toolArgs);
-        if (INTEGRATION_TOOL_NAMES.has(toolName)) {
+        if (STRUCTURED_TOOL_NAMES.has(toolName)) {
           const isFailed = (handlerResult?.ok === false
             || (Boolean(handlerResult?.code) && handlerResult?.ok !== true))
             && handlerResult?.isError === undefined;
@@ -1073,7 +1247,7 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
             stderr.write(`[ugk-mcp] Handler error for ${toolName}: ${err?.message || err}\n`);
           } catch {}
         }
-        if (INTEGRATION_TOOL_NAMES.has(toolName) || err?.isIntegrationError) {
+        if (STRUCTURED_TOOL_NAMES.has(toolName) || err?.isIntegrationError) {
           const safePayload = sanitizeIntegrationErrorPayload(
             err?.integrationPayload ?? err,
             err?.code ?? 'REQUEST_FAILED'

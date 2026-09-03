@@ -39,6 +39,12 @@ function timelineLaneResolver(db, projectId) {
     ORDER BY created_at ASC, id ASC
   `).all(projectId);
   const spaceByWorktree = new Map(spaces.map((space) => [space.worktree_id, space]));
+  const sources = db.prepare(`
+    SELECT d.id, d.worktree_id, w.canonical_path
+    FROM delivery_sources d JOIN worktrees w ON w.id = d.worktree_id
+    WHERE d.project_id = ?
+  `).all(projectId);
+  const sourceByWorktree = new Map(sources.map((source) => [source.worktree_id, source]));
   const lanes = new Map();
 
   function addLane(worktreeId) {
@@ -74,6 +80,17 @@ function timelineLaneResolver(db, projectId) {
       return lane;
     }
 
+    const source = sourceByWorktree.get(worktreeId);
+    if (source) {
+      const directoryName = source.canonical_path.split(/[\\/]/).filter(Boolean).at(-1);
+      const lane = {
+        key: `source:${source.id}`, role: 'delivery_source',
+        label: `外部工作副本 · ${directoryName || '已登记位置'}`,
+        worktreeId, spaceId: null, origin: null,
+      };
+      lanes.set(lane.key, lane);
+      return lane;
+    }
     const key = worktreeId ? `worktree:${worktreeId}` : 'unknown';
     const lane = {
       key,
@@ -222,6 +239,19 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     LEFT JOIN snapshots s ON s.run_id = r.id AND s.phase = 'baseline'
     WHERE p.id = ?
   `).all(projectId).filter((r) => !initSessionIds.has(r.run_id));
+
+  let submitNoteRows = [];
+  try {
+    submitNoteRows = db.prepare(`
+      SELECT id, project_id, command_id, title, body, status, revision,
+             source_json, references_json, handling_note, created_at, updated_at,
+             handled_at, archived_at
+      FROM submit_notes
+      WHERE project_id = ?
+    `).all(projectId);
+  } catch (err) {
+    if (!err.message?.includes('no such table')) throw err;
+  }
 
   const handoffItems = handoffRows.map((row) => ({
     id: row.id,
@@ -455,6 +485,61 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     })),
   ];
 
+  const submitNoteItems = submitNoteRows.map((row) => {
+    const source = parseJson(row.source_json, {});
+    const references = parseJson(row.references_json, []);
+    const gitEvidence = (source.branch || source.head || source.observedAt) ? {
+      branch: source.branch ?? null,
+      head: source.head ?? null,
+      shortHead: source.shortHead ?? (source.head ? source.head.slice(0, 7) : null),
+      coherence: source.headUnconfirmed ? 'unconfirmed' : 'coherent',
+      observedAt: source.observedAt ?? null,
+    } : null;
+
+    const agent = typeof source.attribution === 'object' && source.attribution?.agentId
+      ? source.attribution.agentId
+      : (source.attribution === 'unattributed' ? null : (source.attribution || null));
+
+    const summary = row.title || truncateLegacyNote(row.body, 80) || '工作说明';
+
+    return {
+      id: row.id,
+      kind: 'submit_note',
+      typeLabel: '工作说明',
+      timestamp: row.created_at,
+      agent,
+      worktreeId: source.worktreeId ?? null,
+      // This is one immutable publication event, not a status-update event.
+      revision: 1,
+      sequence: 1,
+      noteRevision: row.revision,
+      git: gitEvidence,
+      summary,
+      details: [],
+      note: row.body,
+      nextSessionFocus: null,
+      currentState: null,
+      completedItems: [],
+      pendingItems: [],
+      decisions: [],
+      artifactRefs: Array.isArray(references) ? references.map((r) => r.target).filter(Boolean) : [],
+      risks: [],
+      suggestedSkills: [],
+      bodyMarkdown: row.body,
+      noteId: row.id,
+      title: row.title,
+      body: row.body,
+      status: row.status,
+      handlingNote: row.handling_note,
+      source,
+      references,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      handledAt: row.handled_at,
+      archivedAt: row.archived_at,
+    };
+  });
+
   const allItems = [
     ...initItems,
     ...progressItems,
@@ -462,6 +547,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     ...handoffItems,
     ...receiptItems,
     ...integrationItems,
+    ...submitNoteItems,
   ].map((item) => attachTimelineLane(item, laneResolver));
 
   // Sort only for display order. A branch name changing between adjacent

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createApiClient } from './api.js';
-import { SUBMIT_MESSAGE, deliveryStatusLabel } from './delivery-view.mjs';
+import { SUBMIT_MESSAGE, deliveryStatusLabel, noteStatusLabel } from './delivery-view.mjs';
+import { SubmitNotesInbox, renderSafeTextWithLinks } from './submit-notes-view.mjs';
 import {
   timelineCurvePath,
   timelineCurveSourceY,
@@ -72,6 +73,7 @@ const TIMELINE_KINDS = {
   relay: { code: 'RELAY', label: '聊天接力' },
   handoff: { code: 'HANDOFF', label: '阶段交接' },
   integration: { code: 'INTEGRATED', label: '接入主项目' },
+  submit_note: { code: 'NOTE', label: '工作说明' },
 };
 
 const TIMELINE_SPACE_COLORS = [
@@ -1230,6 +1232,7 @@ function App() {
             onCreateSpace={createDevelopmentSpaceFromDetail}
             onAssignSpace={assignDevelopmentSpace}
             onCopyReviewPrompt={copyIntegrationPrompt}
+            onNoteStatusChange={refreshOpenProjectDetail}
           />
         ) : (
           <>
@@ -1425,7 +1428,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     name: '项目详情',
@@ -1492,6 +1495,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             onCreateSpace={onCreateSpace}
             onAssignSpace={onAssignSpace}
             onCopyReviewPrompt={onCopyReviewPrompt}
+            onNoteStatusChange={onNoteStatusChange}
           />
         ) : (
           <DetailErrorState
@@ -1534,19 +1538,31 @@ function DetailErrorState({ notice, onRetry, retryLabel = '重新读取详情' }
 
 function SubmitHelp() {
   const [copied, setCopied] = useState(false);
-  return <details className="review-prompt-fallback">
-    <summary>外部或已有分支如何送审？</summary>
-    <p>无论是否提前接入过平台，都可以在完成功能的会话中调用 cockpit-submit。首次访问新目录会请你选择文件夹授权。</p>
-    <button type="button" className="btn btn-secondary btn-sm" onClick={async () => {
-      try { await navigator.clipboard.writeText(SUBMIT_MESSAGE); setCopied(true); }
-      catch { setCopied(false); }
-    }}>{copied ? '送审消息已复制' : '复制分支送审消息'}</button>
-    <pre>{SUBMIT_MESSAGE}</pre>
-    <p>外部机器无法连接本机平台时，交付消息只表示“待接入”，不能当作平台已收到。</p>
-  </details>;
+  return (
+    <details className="review-prompt-fallback">
+      <summary>外部或已有分支如何发布工作说明？</summary>
+      <p>在任意已授权的代码分支或审核副本会话中输入 $cockpit-submit 发布工作说明。AI 会根据当前上下文整理进展与待办，不需要假设任务已完成，不默认执行保存、上传或预检。</p>
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(SUBMIT_MESSAGE);
+            setCopied(true);
+          } catch {
+            setCopied(false);
+          }
+        }}
+      >
+        {copied ? '指令已复制' : '复制发布说明指令'}
+      </button>
+      <pre>{SUBMIT_MESSAGE}</pre>
+      <p>外部机器无法连接本机平台时，交付消息只表示“待接入”，不能当作平台已收到。</p>
+    </details>
+  );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt }) {
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const git = project.git ?? {};
   const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
@@ -1639,19 +1655,23 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
         )}
       </section>
 
-      <section className="review-section" aria-labelledby="review-title">
-        <div className="workspace-heading">
-          <div>
-            <span className="timeline-overline">MAIN REVIEW</span>
-            <h3 id="review-title">主项目待办</h3>
-            <p>功能送达后，从这里复制标准审核提示词。</p>
-          </div>
-        </div>
-        <SubmitHelp />
+      {/* 独立“工作说明”收件箱 */}
+      <SubmitNotesInbox
+        key={project.id}
+        projectId={project.id}
+        api={api}
+        onNoteStatusChange={onNoteStatusChange}
+      />
+
+      <SubmitHelp />
+
+      {/* 旧版代码送审记录（明确标识并默认折叠，保留原有API与历史） */}
+      <details className="legacy-review-details">
+        <summary>旧版代码送审记录（共 {submissions.length} 条）</summary>
         {submissions.length === 0 ? (
-          <p className="workspace-empty">当前没有等待处理的功能。</p>
+          <p className="workspace-empty" style={{ marginTop: '10px' }}>当前没有旧版代码送审记录。</p>
         ) : (
-          <div className="workspace-list">
+          <div className="workspace-list" style={{ marginTop: '10px' }}>
             {submissions.map((submission) => (
               <article className="workspace-card review-card" key={submission.submissionId}>
                 <div>
@@ -1677,7 +1697,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
             ))}
           </div>
         )}
-      </section>
+      </details>
 
       <section className="timeline-section" aria-labelledby="timeline-title">
         <div className="timeline-heading">
@@ -2160,7 +2180,8 @@ const TimelineNode = React.forwardRef(function TimelineNode({
   ].filter(([, values]) => Array.isArray(values) && values.length > 0);
   const relayInfo = getRelayStateInfo(item);
   const isRelayOrHandoff = item.kind === 'relay' || item.kind === 'handoff';
-  const hasCollapsibleContext = isRelayOrHandoff || item.kind === 'init';
+  const isSubmitNote = item.kind === 'submit_note';
+  const hasCollapsibleContext = isRelayOrHandoff || item.kind === 'init' || isSubmitNote;
   const hasCounts = isRelayOrHandoff && (
     (item.completedItems?.length > 0) ||
     (item.pendingItems?.length > 0) ||
@@ -2169,7 +2190,8 @@ const TimelineNode = React.forwardRef(function TimelineNode({
   );
   const hasContextDetails = Boolean(
     (item.currentState && item.currentState !== item.summary) ||
-    detailGroups.length > 0
+    detailGroups.length > 0 ||
+    (isSubmitNote && (item.body || item.note || item.references?.length > 0 || item.handlingNote))
   );
 
   const onCardClick = (event) => {
@@ -2209,7 +2231,13 @@ const TimelineNode = React.forwardRef(function TimelineNode({
         </header>
 
         <div className="timeline-context-row">
-          {item.kind !== 'integration' && <span className="timeline-agent">AI · {item.agent || '未记录'}</span>}
+          {item.kind !== 'integration' && (
+            <span className="timeline-agent">
+              {isSubmitNote
+                ? (item.agent ? `提交方 · ${item.agent}` : '提交方 · 未归属')
+                : `AI · ${item.agent || '未记录'}`}
+            </span>
+          )}
           {item.kind === 'integration' ? (
             <>
               <span className="integration-receipt-chip">已确认接入</span>
@@ -2245,6 +2273,11 @@ const TimelineNode = React.forwardRef(function TimelineNode({
           {item.kind === 'handoff' && (
             <span className="handoff-status-chip">阶段已交接</span>
           )}
+          {isSubmitNote && (
+            <span className={`note-status-chip note-badge-${item.status || 'pending'}`}>
+              {noteStatusLabel(item.status)}
+            </span>
+          )}
         </div>
 
         <h4>{item.summary || item.note || kind.label}</h4>
@@ -2277,20 +2310,49 @@ const TimelineNode = React.forwardRef(function TimelineNode({
                 ? '查看接力上下文'
                 : item.kind === 'handoff'
                   ? '查看交接详情'
-                  : '查看接入状态'}</summary>
+                  : isSubmitNote
+                    ? '查看说明正文与引用'
+                    : '查看接入状态'}</summary>
               <div className="timeline-details-content">
-                {item.currentState && item.currentState !== item.summary && (
-                  <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
-                )}
-                {detailGroups.length > 0 && (
-                  <div className="timeline-detail-groups">
-                    {detailGroups.map(([label, values]) => (
-                      <section key={label}>
-                        <h5>{label}</h5>
-                        <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
-                      </section>
-                    ))}
+                {isSubmitNote ? (
+                  <div className="timeline-submit-note-details">
+                    <p className="note-disclaimer">提示：说明与引用均为提交方原始资料，不构成平台背书或自动执行授权。</p>
+                    <div className="note-body-text">{renderSafeTextWithLinks(item.body || item.note)}</div>
+                    {item.references?.length > 0 && (
+                      <div className="timeline-references-list" style={{ marginTop: '8px' }}>
+                        <strong style={{ fontSize: '12px' }}>引用项（{item.references.length}）：</strong>
+                        <ul style={{ margin: '4px 0 0 16px', padding: 0, fontSize: '12px' }}>
+                          {item.references.map((ref, rIdx) => (
+                            <li key={rIdx}>
+                              [{ref.type || '引用'}] {ref.target} {ref.commit ? `(commit: ${ref.commit.slice(0, 7)})` : ''} {ref.title ? `- ${ref.title}` : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {item.handlingNote && (
+                      <div className="timeline-handling-note" style={{ marginTop: '8px', fontSize: '12px' }}>
+                        <strong>处理备注：</strong>
+                        <span>{renderSafeTextWithLinks(item.handlingNote)}</span>
+                      </div>
+                    )}
                   </div>
+                ) : (
+                  <>
+                    {item.currentState && item.currentState !== item.summary && (
+                      <p className="timeline-current-state"><span>当前状态</span>{item.currentState}</p>
+                    )}
+                    {detailGroups.length > 0 && (
+                      <div className="timeline-detail-groups">
+                        {detailGroups.map(([label, values]) => (
+                          <section key={label}>
+                            <h5>{label}</h5>
+                            <ul>{values.map((value, valueIndex) => <li key={`${label}-${valueIndex}`}>{value}</li>)}</ul>
+                          </section>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </details>
@@ -2334,7 +2396,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
           </>
         )}
 
-        {item.bodyMarkdown && (
+        {!isSubmitNote && item.bodyMarkdown && (
           <details className="timeline-full-record">
             <summary>查看完整交接记录</summary>
             <pre>{item.bodyMarkdown}</pre>

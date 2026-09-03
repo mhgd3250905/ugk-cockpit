@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 19;
+export const SUPPORTED_SCHEMA_VERSION = 20;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -666,6 +666,50 @@ ALTER TABLE submissions ADD COLUMN delivery_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE submissions ADD COLUMN delivery_line_key TEXT;
 ALTER TABLE submissions ADD COLUMN delivery_version INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX idx_submission_delivery_line ON submissions(delivery_line_key, delivery_version);
+`,
+  },
+  {
+    version: 20,
+    name: 'submit-notes-inbox',
+    sql: `
+CREATE TABLE IF NOT EXISTS submit_notes (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  command_id TEXT UNIQUE REFERENCES commands(id),
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'handled', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  source_json TEXT NOT NULL DEFAULT '{}',
+  references_json TEXT NOT NULL DEFAULT '[]',
+  handling_note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  handled_at TEXT,
+  archived_at TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_submit_notes_project_status
+  ON submit_notes(project_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_submit_notes_created
+  ON submit_notes(created_at DESC);
+
+DROP TRIGGER IF EXISTS submit_notes_immutable_content;
+CREATE TRIGGER submit_notes_immutable_content
+BEFORE UPDATE ON submit_notes
+BEGIN
+  SELECT CASE
+    WHEN OLD.id IS NOT NEW.id
+      OR OLD.project_id IS NOT NEW.project_id
+      OR OLD.command_id IS NOT NEW.command_id
+      OR OLD.title IS NOT NEW.title
+      OR OLD.body IS NOT NEW.body
+      OR OLD.source_json IS NOT NEW.source_json
+      OR OLD.references_json IS NOT NEW.references_json
+      OR OLD.created_at IS NOT NEW.created_at
+    THEN RAISE(ABORT, 'submit_notes content is immutable')
+  END;
+END;
 `,
   },
 ];

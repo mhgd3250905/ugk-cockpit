@@ -12,6 +12,9 @@
 | Run | AI 工作会话 |
 | Snapshot | 开始前状态 / 结束时状态 |
 | HandoffReceipt | 接手记录 |
+| Submit note | 工作说明 |
+| Note inbox | 工作说明待办 |
+| Note handled | 已处理（不代表代码已合并） |
 | Write lease | 当前有人正在编辑 |
 | Heartbeat | 最近记录时间（不代表 AI 在线） |
 | Stale | 较早前的活动记录 |

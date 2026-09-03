@@ -371,3 +371,119 @@ test('integration service handlers provide safe retry instruction without claimi
     },
   );
 });
+
+test('MCP submit-note handlers forward arguments and cwd without establishing new binding', async () => {
+  const calls = [];
+  const handlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    workingDirectory: 'E:\\fixture\\submit-notes-project',
+    fetchImpl: async (url, options) => {
+      calls.push({ url: url.toString(), options });
+      return new Response(JSON.stringify({
+        ok: true,
+        noteId: 'note_123',
+        status: 'pending',
+        revision: 1,
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+
+  const noteArgs = {
+    clientRequestId: 'note-req-1',
+    body: 'Audit main matches, reviewing PR 123',
+    title: 'Audit note',
+    references: [{ type: 'pull_request', target: '#123', commit: 'abcdef' }],
+  };
+  const submitResult = await handlers.ugk_work_submit_note(noteArgs);
+  assert.equal(submitResult.noteId, 'note_123');
+  assert.equal(calls[0].url, 'http://127.0.0.1:41737/api/v1/mcp/work/submit-note');
+  assert.equal(calls[0].options.headers.authorization, `Bearer ${'x'.repeat(32)}`);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    ...noteArgs,
+    mcpWorkingDirectory: 'E:\\fixture\\submit-notes-project',
+  });
+
+  const getArgs = { noteId: 'note_123' };
+  await handlers.ugk_submit_note_get(getArgs);
+  assert.equal(calls[1].url, 'http://127.0.0.1:41737/api/v1/mcp/submit-notes/get');
+  assert.deepEqual(JSON.parse(calls[1].options.body), {
+    ...getArgs,
+    mcpWorkingDirectory: 'E:\\fixture\\submit-notes-project',
+  });
+
+  const updateArgs = {
+    noteId: 'note_123',
+    clientRequestId: 'update-req-1',
+    expectedRevision: 1,
+    status: 'handled',
+    handlingNote: 'reviewed and verified',
+  };
+  await handlers.ugk_submit_note_update(updateArgs);
+  assert.equal(calls[2].url, 'http://127.0.0.1:41737/api/v1/mcp/submit-notes/update');
+  assert.deepEqual(JSON.parse(calls[2].options.body), {
+    ...updateArgs,
+    mcpWorkingDirectory: 'E:\\fixture\\submit-notes-project',
+  });
+});
+
+test('MCP submit-note handlers preserve noteId, currentRevision, and expectedRevision on error and transport failure', async () => {
+  // 1. Conflict error preserves noteId, currentRevision, expectedRevision
+  const conflictHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    workingDirectory: 'E:\\fixture\\submit-notes-project',
+    fetchImpl: async () => new Response(JSON.stringify({
+      ok: false,
+      code: 'NOTE_REVISION_CONFLICT',
+      message: 'Revision conflict',
+      noteId: 'note_conflict_1',
+      currentRevision: 3,
+      expectedRevision: 2,
+    }), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+
+  await assert.rejects(
+    conflictHandlers.ugk_submit_note_update({
+      noteId: 'note_conflict_1',
+      clientRequestId: 'req-conflict',
+      expectedRevision: 2,
+      status: 'handled',
+    }),
+    (err) => {
+      assert.equal(err.code, 'NOTE_REVISION_CONFLICT');
+      assert.equal(err.integrationPayload?.noteId, 'note_conflict_1');
+      assert.equal(err.integrationPayload?.currentRevision, 3);
+      assert.equal(err.integrationPayload?.expectedRevision, 2);
+      return true;
+    },
+  );
+
+  // 2. Transport failure preserves noteId and sets retryable: true
+  const transportHandlers = createServiceHandlers({
+    token: 'x'.repeat(32),
+    workingDirectory: 'E:\\fixture\\submit-notes-project',
+    fetchImpl: async () => {
+      throw new Error('fetch failed: network down');
+    },
+  });
+
+  await assert.rejects(
+    transportHandlers.ugk_submit_note_update({
+      noteId: 'note_transport_1',
+      clientRequestId: 'req-transport',
+      expectedRevision: 1,
+      status: 'handled',
+    }),
+    (err) => {
+      assert.equal(err.code, 'SERVICE_UNAVAILABLE');
+      assert.equal(err.integrationPayload?.noteId, 'note_transport_1');
+      assert.equal(err.integrationPayload?.retryable, true);
+      return true;
+    },
+  );
+});

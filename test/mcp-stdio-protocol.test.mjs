@@ -18,6 +18,9 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
     'ugk_work_progress',
     'ugk_work_submit_preflight',
     'ugk_work_submit',
+    'ugk_work_submit_note',
+    'ugk_submit_note_get',
+    'ugk_submit_note_update',
     'ugk_integration_begin',
     'ugk_integration_review',
     'ugk_integration_merge',
@@ -1320,4 +1323,82 @@ test('dispatchMessage keeps generic/unexpected failures safe for integration too
   assert.equal(resAccept.id, 205);
   assert.equal(resAccept.result.isError, true);
   assert.match(resAccept.result.content[0].text, /暂时无法完成/);
+});
+
+test('dispatchMessage formats submit-note errors as safe structured JSON with noteId and revision fields', async () => {
+  const handlers = {
+    ugk_submit_note_update: async (args) => {
+      if (args.noteId === 'note-conflict') {
+        const error = new Error('Revision conflict');
+        error.isIntegrationError = true;
+        error.integrationPayload = {
+          code: 'NOTE_REVISION_CONFLICT',
+          message: 'Note revision conflict',
+          noteId: 'note-conflict',
+          currentRevision: 4,
+          expectedRevision: 3,
+        };
+        throw error;
+      }
+      if (args.noteId === 'note-transport') {
+        const error = new Error('Transport error');
+        error.isIntegrationError = true;
+        error.integrationPayload = {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Service unavailable',
+          noteId: 'note-transport',
+          retryable: true,
+        };
+        throw error;
+      }
+      return { ok: true };
+    },
+  };
+
+  // Conflict test
+  const resConflict = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 301,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_submit_note_update',
+      arguments: {
+        noteId: 'note-conflict',
+        clientRequestId: 'req-301',
+        expectedRevision: 3,
+        status: 'handled',
+      },
+    },
+  }, { handlers });
+
+  assert.equal(resConflict.id, 301);
+  assert.equal(resConflict.result.isError, true);
+  const payloadConflict = JSON.parse(resConflict.result.content[0].text);
+  assert.equal(payloadConflict.code, 'NOTE_REVISION_CONFLICT');
+  assert.equal(payloadConflict.noteId, 'note-conflict');
+  assert.equal(payloadConflict.currentRevision, 4);
+  assert.equal(payloadConflict.expectedRevision, 3);
+
+  // Transport test
+  const resTransport = await dispatchMessage({
+    jsonrpc: '2.0',
+    id: 302,
+    method: 'tools/call',
+    params: {
+      name: 'ugk_submit_note_update',
+      arguments: {
+        noteId: 'note-transport',
+        clientRequestId: 'req-302',
+        expectedRevision: 1,
+        status: 'archived',
+      },
+    },
+  }, { handlers });
+
+  assert.equal(resTransport.id, 302);
+  assert.equal(resTransport.result.isError, true);
+  const payloadTransport = JSON.parse(resTransport.result.content[0].text);
+  assert.equal(payloadTransport.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(payloadTransport.noteId, 'note-transport');
+  assert.equal(payloadTransport.retryable, true);
 });

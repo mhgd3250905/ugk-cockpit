@@ -238,3 +238,74 @@ test('timeline keeps interleaved worktree lanes stable and only draws confirmed 
 
   db.close();
 });
+
+test('timeline includes submit_note on its origin work line without integration merge arrow', (t) => {
+  const db = fixture(t);
+
+  // Insert a submit note on Space A
+  const noteCreatedAt = '2026-09-03T05:00:00.000Z';
+  const sourceA = {
+    projectId,
+    projectName: 'Project Work Lines',
+    worktreeId: spaceAWorktreeId,
+    canonicalPath: `E:\\work-lines\\${spaceAWorktreeId}`,
+    branch: 'feature-a',
+    head: 'note-head-a1234567890',
+    shortHead: 'note-he',
+    attribution: 'unattributed',
+    observedAt: noteCreatedAt,
+  };
+  db.prepare(`
+    INSERT INTO commands (id, kind, state, request_json, request_digest, response_json, created_at, updated_at)
+    VALUES ('cmd-note-1', 'submit_note', 'committed', '{}', 'digest-1', '{}', ?, ?)
+  `).run(noteCreatedAt, noteCreatedAt);
+  db.prepare(`
+    INSERT INTO submit_notes (
+      id, project_id, command_id, title, body, status, revision,
+      source_json, references_json, handling_note, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'pending', 1, ?, '[]', '', ?, ?)
+  `).run(
+    'note-space-a',
+    projectId,
+    'cmd-note-1',
+    'Space A 说明',
+    '这是 Space A 的一条工作说明',
+    JSON.stringify(sourceA),
+    noteCreatedAt,
+    noteCreatedAt,
+  );
+
+  const timelineBefore = readProjectTimeline(db, projectId, { limit: 100, offset: 0 });
+  assert.equal(timelineBefore.total, 10); // 9 previous + 1 submit_note
+
+  const laneA = timelineBefore.lanes.find((lane) => lane.worktreeId === spaceAWorktreeId);
+  const noteItem = timelineBefore.items.find((item) => item.id === 'note-space-a');
+  assert.ok(noteItem);
+  assert.equal(noteItem.kind, 'submit_note');
+  assert.equal(noteItem.typeLabel, '工作说明');
+  assert.equal(noteItem.laneKey, laneA.key);
+  assert.equal(noteItem.timestamp, noteCreatedAt);
+  assert.equal(noteItem.status, 'pending');
+  // Confirm NO integration arrow / targetWorktreeId
+  assert.equal(noteItem.integratedCommit, undefined);
+  assert.equal(noteItem.sourceWorktreeId, undefined);
+
+  // Update note status to handled and check that timeline event does NOT move or duplicate
+  const updatedTime = '2026-09-03T06:00:00.000Z';
+  db.prepare(`
+    UPDATE submit_notes
+    SET status = 'handled', revision = 2, handling_note = '已完成核对', updated_at = ?
+    WHERE id = 'note-space-a'
+  `).run(updatedTime);
+
+  const timelineAfter = readProjectTimeline(db, projectId, { limit: 100, offset: 0 });
+  assert.equal(timelineAfter.total, 10);
+  const notesAfter = timelineAfter.items.filter((item) => item.id === 'note-space-a');
+  assert.equal(notesAfter.length, 1);
+  assert.equal(notesAfter[0].timestamp, noteCreatedAt); // fixed createdAt
+  assert.equal(notesAfter[0].status, 'handled');
+  assert.equal(notesAfter[0].handlingNote, '已完成核对');
+  assert.equal(notesAfter[0].laneKey, laneA.key);
+
+  db.close();
+});

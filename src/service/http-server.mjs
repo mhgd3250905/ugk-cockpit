@@ -42,6 +42,18 @@ import {
 } from '../core/integration-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
+import {
+  createSubmitNote,
+  readSubmitNote,
+  updateSubmitNote,
+  listSubmitNotes,
+} from '../core/submit-notes.mjs';
+import {
+  validateSubmitNoteBody,
+  validateSubmitNoteGetBody,
+  validateSubmitNoteUpdateBody,
+  validateBrowserStatusBody,
+} from '../core/submit-notes-contract.mjs';
 import { serveWebAsset } from './web-assets.mjs';
 import { VERSION } from '../version.mjs';
 
@@ -587,6 +599,12 @@ const PUBLIC_ERRORS = {
     impact: '平台没有自动清理、回退或覆盖代码。',
     requiredAction: '请查看开发空间状态并重试；若持续失败，请人工核对 Git 状态。',
   },
+  SUBMISSION_NOT_FOUND: {
+    status: 404,
+    message: '找不到这条送审记录。',
+    impact: '没有领取审核，也没有修改代码。',
+    requiredAction: '请核对送审编号后重试。',
+  },
   MAIN_SESSION_REQUIRED: {
     status: 409,
     message: '这项审核必须从主项目的 AI 工作会话开始。',
@@ -718,6 +736,30 @@ const PUBLIC_ERRORS = {
     message: '主项目代码位置已不是平台记录的那一份。',
     impact: '平台已停止审核或合并，没有修改代码。',
     requiredAction: '请回项目页重新确认代码位置。',
+  },
+  NOTE_NOT_FOUND: {
+    status: 404,
+    message: '没有找到这条工作说明。',
+    impact: '代码和已有记录都没有被修改。',
+    requiredAction: '请确认说明编号是否正确，或刷新项目页面查看收件箱。',
+  },
+  NOTE_REVISION_CONFLICT: {
+    status: 409,
+    message: '这条工作说明刚刚被其他操作更新。',
+    impact: '本次状态更新被拒绝，没有覆盖新的状态。',
+    requiredAction: '请重新读取该说明获取最新版本后重试。',
+  },
+  PROJECT_MISMATCH: {
+    status: 403,
+    message: '无权跨项目查看或更新工作说明。',
+    impact: '没有修改任何记录，代码不受影响。',
+    requiredAction: '请切换到该说明所属的项目工作目录后再试。',
+  },
+  DELIVERY_PROJECT_AMBIGUOUS: {
+    status: 409,
+    message: '当前工作目录对应多个已登记项目，暂时无法确定所属项目。',
+    impact: '没有发布工作说明，也没有修改代码。',
+    requiredAction: '请在 UGK Cockpit 平台核对项目对应关系，不要猜测目标。',
   },
 };
 
@@ -2265,13 +2307,90 @@ export async function createCockpitHttpServer({
           createdAt: submission.createdAt,
           updatedAt: submission.updatedAt,
         }));
+        const submitNotes = listSubmitNotes(db, { projectId, limit: 30, offset: 0 });
         sendJson(response, 200, {
           ok: true,
           refreshedAt: new Date().toISOString(),
           ...detail,
           developmentSpaces,
           submissions,
+          submitNotes,
         });
+        return;
+      }
+
+      const projectSubmitNotesMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/submit-notes$/);
+      if (request.method === 'GET' && projectSubmitNotesMatch) {
+        const projectId = decodeURIComponent(projectSubmitNotesMatch[1]);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const statusParam = url.searchParams.get('status');
+        let status = null;
+        if (statusParam) {
+          if (!['pending', 'handled', 'archived'].includes(statusParam)) {
+            sendError(response, 'INVALID_REQUEST');
+            return;
+          }
+          status = statusParam;
+        }
+        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+
+        const countRows = db.prepare(`
+          SELECT status, COUNT(*) AS count
+          FROM submit_notes
+          WHERE project_id = ?
+          GROUP BY status
+        `).all(projectId);
+
+        const counts = { pending: 0, handled: 0, archived: 0 };
+        for (const row of countRows) {
+          if (row.status in counts) {
+            counts[row.status] = row.count;
+          }
+        }
+
+        const total = status ? (counts[status] ?? 0) : (counts.pending + counts.handled + counts.archived);
+        const items = listSubmitNotes(db, { projectId, limit, offset, status });
+        const hasMore = offset + items.length < total;
+
+        sendJson(response, 200, {
+          ok: true,
+          items,
+          total,
+          hasMore,
+          counts,
+        });
+        return;
+      }
+
+      const submitNoteStatusMatch = url.pathname.match(/^\/api\/v1\/submit-notes\/([^/]+)\/status$/);
+      if (request.method === 'POST' && submitNoteStatusMatch) {
+        const noteId = decodeURIComponent(submitNoteStatusMatch[1]);
+        const body = await readJson(request);
+        try {
+          validateBrowserStatusBody(body);
+          const result = await updateSubmitNote(db, {
+            noteId,
+            clientRequestId: body.clientRequestId,
+            expectedRevision: body.expectedRevision,
+            status: body.status,
+            handlingNote: body.handlingNote,
+          }, { skipPathCheck: true, faultInjector });
+          sendJson(response, 200, { ok: true, note: result });
+        } catch (error) {
+          sendError(response, error.code ?? 'REQUEST_FAILED', {
+            extra: {
+              noteId,
+              currentRevision: error.currentRevision ?? null,
+              expectedRevision: error.expectedRevision ?? null,
+              ...(error.publicMessage ? { message: error.publicMessage } : {}),
+            },
+          });
+        }
         return;
       }
 
@@ -2867,6 +2986,58 @@ export async function createCockpitHttpServer({
           commandId: id('delivery_submit', `${body.preflightId}:${body.clientRequestId}`),
         }, { faultInjector });
         sendJson(response, 200, deliveryResponse(result));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit-note') {
+        const body = await readJson(request);
+        try {
+          validateSubmitNoteBody(body);
+          const result = await createSubmitNote(db, body, { faultInjector });
+          sendJson(response, 200, result);
+        } catch (error) {
+          sendError(response, error.code ?? 'REQUEST_FAILED', {
+            extra: {
+              ...(error.publicMessage ? { message: error.publicMessage } : {}),
+            },
+          });
+        }
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/submit-notes/get') {
+        const body = await readJson(request);
+        try {
+          validateSubmitNoteGetBody(body);
+          const result = await readSubmitNote(db, body);
+          sendJson(response, 200, result);
+        } catch (error) {
+          sendError(response, error.code ?? 'REQUEST_FAILED', {
+            extra: {
+              noteId: body?.noteId ?? null,
+              ...(error.publicMessage ? { message: error.publicMessage } : {}),
+            },
+          });
+        }
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/submit-notes/update') {
+        const body = await readJson(request);
+        try {
+          validateSubmitNoteUpdateBody(body);
+          const result = await updateSubmitNote(db, body, { faultInjector });
+          sendJson(response, 200, result);
+        } catch (error) {
+          sendError(response, error.code ?? 'REQUEST_FAILED', {
+            extra: {
+              noteId: body?.noteId ?? null,
+              currentRevision: error.currentRevision ?? null,
+              expectedRevision: error.expectedRevision ?? null,
+              ...(error.publicMessage ? { message: error.publicMessage } : {}),
+            },
+          });
+        }
         return;
       }
 

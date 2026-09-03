@@ -30,6 +30,7 @@ const STRING_FIELDS = [
   'currentTargetHead',
   'expectedSourceCommit',
   'expectedTargetHead',
+  'noteId',
 ];
 
 const BOOLEAN_FIELDS = [
@@ -118,6 +119,9 @@ export function createIntegrationTransportError(arguments_ = {}, cause = null) {
   if (typeof arguments_?.claimId === 'string' && arguments_.claimId.trim()) {
     payload.claimId = arguments_.claimId.trim();
   }
+  if (typeof arguments_?.noteId === 'string' && arguments_.noteId.trim()) {
+    payload.noteId = arguments_.noteId.trim();
+  }
   return createIntegrationError(payload, cause);
 }
 
@@ -164,7 +168,11 @@ export function createServiceHandlers({
   }
 
   async function call(pathname, arguments_) {
-    const isIntegration = typeof pathname === 'string' && pathname.startsWith('/api/v1/mcp/integration/');
+    const isStructured = typeof pathname === 'string' && (
+      pathname.startsWith('/api/v1/mcp/integration/')
+      || pathname.startsWith('/api/v1/mcp/submit-notes/')
+      || pathname === '/api/v1/mcp/work/submit-note'
+    );
     let response = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const bearer = token ?? scopedToken ?? await bootstrapScopedToken();
@@ -178,7 +186,7 @@ export function createServiceHandlers({
           body: JSON.stringify(arguments_),
         });
       } catch (cause) {
-        if (isIntegration) {
+        if (isStructured) {
           throw createIntegrationTransportError(arguments_, cause);
         }
         throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
@@ -188,7 +196,7 @@ export function createServiceHandlers({
       if (response.status !== 401 || token || attempt === 1) break;
       scopedToken = null;
     }
-    if (isIntegration) {
+    if (isStructured) {
       let body;
       try {
         body = await response.json();
@@ -266,6 +274,19 @@ export function createServiceHandlers({
     }),
     ugk_work_submit: (arguments_) => call('/api/v1/mcp/work/submit', {
       ...arguments_, mcpWorkingDirectory: workingDirectory,
+    }),
+    ugk_work_submit_note: (arguments_) => call('/api/v1/mcp/work/submit-note', {
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
+      ...(bridgeBinding ? { bridgeBinding: { ...bridgeBinding } } : {}),
+    }),
+    ugk_submit_note_get: (arguments_) => call('/api/v1/mcp/submit-notes/get', {
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
+    }),
+    ugk_submit_note_update: (arguments_) => call('/api/v1/mcp/submit-notes/update', {
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
     }),
     ugk_integration_begin: (arguments_) => call('/api/v1/mcp/integration/begin', arguments_),
     ugk_integration_review: (arguments_) => call('/api/v1/mcp/integration/review', arguments_),
