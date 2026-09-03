@@ -54,7 +54,7 @@ import {
   validateSubmitNoteUpdateBody,
   validateBrowserStatusBody,
 } from '../core/submit-notes-contract.mjs';
-import { serveWebAsset } from './web-assets.mjs';
+import { serveWebAsset as defaultServeWebAsset } from './web-assets.mjs';
 import { VERSION } from '../version.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -71,6 +71,12 @@ class AtomicHandoffAbort extends Error {
 }
 
 const PUBLIC_ERRORS = {
+  SERVICE_UNAVAILABLE: {
+    status: 503,
+    message: '本地控制台静态资源暂不可用。',
+    impact: '代码和已有记录都没有被修改。',
+    requiredAction: '请确认前端资源已构建或服务环境完整后重试。',
+  },
   AUTH_REQUIRED: {
     status: 401,
     message: '本地控制台身份已失效。',
@@ -1609,6 +1615,7 @@ export async function createCockpitHttpServer({
   folderGrants = null,
   emptyFolderGrants = null,
   webRoot = DEFAULT_WEB_ROOT,
+  serveWebAsset = defaultServeWebAsset,
   faultInjector,
   createGitWorktree,
   checkBranchExists,
@@ -2006,6 +2013,11 @@ export async function createCockpitHttpServer({
         webRoot,
         sessionToken: browserSessionToken,
       })) return;
+
+      if (url.pathname === '/') {
+        sendError(response, 'SERVICE_UNAVAILABLE');
+        return;
+      }
 
       if (!allowedOrigin(request.headers.origin, currentPort)) {
         sendError(response, 'ORIGIN_REJECTED');

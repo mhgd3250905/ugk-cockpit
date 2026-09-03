@@ -246,3 +246,27 @@ test('Git filters are rejected before staging or committing', async (t) => {
   assert.equal(git(f.spacePath, ['rev-parse', 'HEAD']), f.baseHead);
   assert.match(git(f.spacePath, ['status', '--short']), /\.gitattributes/);
 });
+
+test('COMMIT_IDENTITY_MISSING is preserved by submitDevelopmentSpace without being masked', async (t) => {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.spacePath, 'change.txt'), 'content\n');
+  const missingIdentityError = new Error('No identity');
+  missingIdentityError.code = 'COMMIT_IDENTITY_MISSING';
+
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-identity-missing',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: 'missing identity test',
+  }, {
+    ensureLocalCommitIdentity: async () => {
+      throw missingIdentityError;
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'COMMIT_IDENTITY_MISSING');
+  const attempt = readSubmissionAttempt(f.db, 'submit-identity-missing');
+  assert.equal(attempt.lastErrorCode, 'COMMIT_IDENTITY_MISSING');
+});
+

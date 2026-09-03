@@ -60,7 +60,7 @@ MCP server 通过 loopback service 使用同一数据库事实源，不直接接
 npm run mcp
 ```
 
-Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node E:\AII\ugk-cockpit\src\mcp\main.mjs`。本仓库只提供配置片段，不会自动修改用户级 Agent 配置。
+Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node <仓库绝对路径>\src\mcp\main.mjs`（例如 `node E:\AII\ugk-cockpit\src\mcp\main.mjs`）。本仓库只提供配置片段，不会自动修改用户级 Agent 配置。
 
 ## 配套 Skills
 
