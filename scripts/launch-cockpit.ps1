@@ -176,46 +176,49 @@ function Test-IsUgkCockpit {
     [string]$DataDir
   )
 
-  # 1. Confirm that the same PID still owns the target listener.
-  $currentListeningPid = (Get-ListeningProcessId -TargetPort $TargetPort)
-  if ($currentListeningPid -ne $ProcessId) {
-    return $false
-  }
-
-  # 2. Lock file binding verification:
-  # The service.lock file in $DataDir MUST exist, be valid JSON, and its .pid MUST match $ProcessId.
   $lockFilePath = Join-Path $DataDir 'service.lock'
-  $lockPid = (Get-LockProcessId -LockFilePath $lockFilePath)
+  $maxAttempts = 4
 
-  if ($lockPid -ne $ProcessId) {
-    return $false
-  }
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    # Re-check the listener and lock together on every attempt. This tolerates
+    # a short startup transition without weakening the PID binding.
+    $currentListeningPid = (Get-ListeningProcessId -TargetPort $TargetPort)
+    $lockPid = (Get-LockProcessId -LockFilePath $lockFilePath)
 
-  # 3. HTTP response verification:
-  # The listening process must respond to /health or / with verified UGK Cockpit signatures.
-  $httpVerified = $false
-  $healthUrl = "http://${TargetHost}:${TargetPort}/health"
-  $healthResult = (Invoke-HttpGet -Uri $healthUrl -TimeoutMs 2500)
-  if ($healthResult.Success -and $healthResult.StatusCode -eq 200) {
-    try {
-      $healthJson = (ConvertFrom-Json $healthResult.Body -ErrorAction SilentlyContinue)
-      if ($null -ne $healthJson -and $healthJson.status -eq 'ok' -and (-not [string]::IsNullOrWhiteSpace($healthJson.version))) {
-        $httpVerified = $true
+    if (($currentListeningPid -eq $ProcessId) -and ($lockPid -eq $ProcessId)) {
+      $httpVerified = $false
+      $healthUrl = "http://${TargetHost}:${TargetPort}/health"
+      $healthResult = (Invoke-HttpGet -Uri $healthUrl -TimeoutMs 2500)
+      if ($healthResult.Success -and $healthResult.StatusCode -eq 200) {
+        try {
+          $healthJson = (ConvertFrom-Json $healthResult.Body -ErrorAction SilentlyContinue)
+          if ($null -ne $healthJson -and $healthJson.status -eq 'ok' -and (-not [string]::IsNullOrWhiteSpace($healthJson.version))) {
+            $httpVerified = $true
+          }
+        } catch {}
       }
-    } catch {}
-  }
 
-  if (-not $httpVerified) {
-    $rootUrl = "http://${TargetHost}:${TargetPort}/"
-    $rootResult = (Invoke-HttpGet -Uri $rootUrl -TimeoutMs 2500)
-    if ($rootResult.StatusCode -eq 200 -and $rootResult.Body -match 'UGK Cockpit') {
-      $httpVerified = $true
-    } elseif ($rootResult.StatusCode -eq 503 -and $rootResult.Body -match 'SERVICE_UNAVAILABLE') {
-      $httpVerified = $true
+      if (-not $httpVerified) {
+        $rootUrl = "http://${TargetHost}:${TargetPort}/"
+        $rootResult = (Invoke-HttpGet -Uri $rootUrl -TimeoutMs 2500)
+        if ($rootResult.StatusCode -eq 200 -and $rootResult.Body -match 'UGK Cockpit') {
+          $httpVerified = $true
+        } elseif ($rootResult.StatusCode -eq 503 -and $rootResult.Body -match 'SERVICE_UNAVAILABLE') {
+          $httpVerified = $true
+        }
+      }
+
+      if ($httpVerified) {
+        return $true
+      }
+    }
+
+    if ($attempt -lt $maxAttempts) {
+      Start-Sleep -Milliseconds 250
     }
   }
 
-  return $httpVerified
+  return $false
 }
 
 function Stop-UgkCockpitService {

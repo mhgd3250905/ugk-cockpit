@@ -417,7 +417,20 @@ test('positive proof: mock service WITH valid service.lock binding and HTTP veri
   const mock1Path = path.join(mockAppDir, 'mock1.mjs');
   writeFileSync(mock1Path, `
 import { createServer } from 'node:http';
+let transientFailuresRemaining = 0;
 const server = createServer((req, res) => {
+  if (req.url === '/arm-transient-failure') {
+    transientFailuresRemaining = 2;
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+  if (transientFailuresRemaining > 0) {
+    transientFailuresRemaining -= 1;
+    res.writeHead(503, { 'content-type': 'text/plain' });
+    res.end('warming');
+    return;
+  }
   if (req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', version: '0.1.0' }));
@@ -463,6 +476,10 @@ server.listen(${mockPort}, '127.0.0.1');
   cleanupPidFiles.push(replacementPidFile);
 
   assert.ok(await waitForHttp(`http://127.0.0.1:${mockPort}/health`), 'Mock process 1 failed to start');
+  const armResponse = await fetch(`http://127.0.0.1:${mockPort}/arm-transient-failure`, {
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(armResponse.status, 204);
 
   const result = await runPowerShell([
     '-File', launcherPs1Path,
