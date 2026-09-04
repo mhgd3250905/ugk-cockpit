@@ -281,6 +281,19 @@ test('stageProjectAvatar and resolveProjectAvatar: format validation, size bound
     }),
     (err) => err.code === 'IMAGE_NOT_FOUND'
   );
+
+  // 8. Direct buffer staging for all formats
+  for (const fmt of formats) {
+    const buf = Buffer.from(`BUFFER_DATA_FOR_${fmt.ext}`);
+    const stagedBuf = stageProjectAvatar({
+      content: buf,
+      originalName: `upload${fmt.ext}`,
+      storageRoot: avatarStorageRoot,
+      projectId,
+    });
+    assert.equal(stagedBuf.mimeType, fmt.mime);
+    assert.ok(stagedBuf.avatarPath.endsWith(fmt.ext.toLowerCase()));
+  }
 });
 
 test('HTTP API: avatar select, cancel, preview, save, cross-project key rejection, and surviving source image deletion', async (t) => {
@@ -490,6 +503,108 @@ test('HTTP API: avatar select, cancel, preview, save, cross-project key rejectio
   assert.equal(clearedAvatarRes.status, 404);
 });
 
+test('HTTP API: direct avatar upload via multipart FormData and raw binary, size limits, and format checks', async (t) => {
+  const { container, repoRoot, dbPath, avatarStorageRoot, db, cleanup } = createFixture(t, { registerHook: false });
+
+  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
+
+  const reg = registerProject(db, {
+    commandId: 'reg-upload-p1',
+    name: 'Upload Test Project',
+    observation: sampleObservation(repoRoot),
+  });
+  db.close();
+
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [repoRoot],
+    avatarStorageRoot,
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup();
+  });
+
+  const req = (pathname, options = {}) =>
+    fetch(`http://${service.host}:${service.port}${pathname}`, {
+      ...options,
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        ...(options.headers || {}),
+      },
+    });
+
+  // 1. Multipart FormData upload
+  const formData = new FormData();
+  const file = new Blob([pngHeader], { type: 'image/png' });
+  formData.append('file', file, 'avatar.png');
+
+  const uploadRes = await req(`/api/v1/projects/${reg.projectId}/avatar/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  assert.equal(uploadRes.status, 200);
+  const uploadBody = await uploadRes.json();
+  assert.equal(uploadBody.ok, true);
+  assert.equal(uploadBody.cancelled, false);
+  assert.ok(uploadBody.avatarPath.startsWith(`${reg.projectId}/`));
+  assert.equal(uploadBody.mimeType, 'image/png');
+
+  // Preview works
+  const previewRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=${encodeURIComponent(uploadBody.avatarPath)}`);
+  assert.equal(previewRes.status, 200);
+  assert.deepEqual(Buffer.from(await previewRes.arrayBuffer()), pngHeader);
+
+  // 2. Raw binary upload with content-type
+  const rawRes = await req(`/api/v1/projects/${reg.projectId}/avatar/upload?filename=raw-photo.jpg`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/jpeg' },
+    body: Buffer.from('JPEG_RAW_DATA_123'),
+  });
+  assert.equal(rawRes.status, 200);
+  const rawBody = await rawRes.json();
+  assert.equal(rawBody.ok, true);
+  assert.equal(rawBody.mimeType, 'image/jpeg');
+
+  // 3. Oversize upload (>5MB) rejected with 413 IMAGE_TOO_LARGE
+  const hugeBuf = Buffer.alloc(MAX_AVATAR_FILE_SIZE + 10);
+  const hugeRes = await req(`/api/v1/projects/${reg.projectId}/avatar/upload?filename=huge.png`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png' },
+    body: hugeBuf,
+  });
+  assert.equal(hugeRes.status, 413);
+  const hugeBody = await hugeRes.json();
+  assert.equal(hugeBody.code, 'IMAGE_TOO_LARGE');
+
+  // 4. Invalid format (svg) rejected with 415 INVALID_IMAGE_TYPE
+  const svgRes = await req(`/api/v1/projects/${reg.projectId}/avatar/upload?filename=vector.svg`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/svg+xml' },
+    body: '<svg></svg>',
+  });
+  assert.equal(svgRes.status, 415);
+  const svgBody = await svgRes.json();
+  assert.equal(svgBody.code, 'INVALID_IMAGE_TYPE');
+
+  // 5. Empty body rejected with 400 INVALID_IMAGE_PATH
+  const emptyRes = await req(`/api/v1/projects/${reg.projectId}/avatar/upload?filename=empty.png`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/png' },
+    body: Buffer.alloc(0),
+  });
+  assert.equal(emptyRes.status, 400);
+
+  // 6. Unknown project rejected with 404 PROJECT_NOT_FOUND
+  const notFoundRes = await req('/api/v1/projects/non-existent-proj/avatar/upload?filename=test.png', {
+    method: 'POST',
+    headers: { 'content-type': 'image/png' },
+    body: pngHeader,
+  });
+  assert.equal(notFoundRes.status, 404);
+});
+
 test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal prevent backdrop click dismissal and contain no scan UI', () => {
   const mainJsxPath = path.resolve('web/src/main.jsx');
   const mainJsx = readFileSync(mainJsxPath, 'utf8');
@@ -512,9 +627,10 @@ test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal preven
   assert.doesNotMatch(mainJsx, /candidate-images/);
   assert.doesNotMatch(mainJsx, /从已授权项目目录检索图片/);
 
-  // Verify clear "选择图片" button is present
+  // Verify clear "选择图片" button is present and uses file input
   assert.match(mainJsx, /选择图片/);
-  assert.match(mainJsx, /\/avatar\/select/);
+  assert.match(mainJsx, /\/avatar\/(select|upload)/);
+  assert.match(mainJsx, /type="file"/);
 });
 
 test('Fail-closed: replacing avatarStorageRoot or ancestor with junction/symlink blocks staging and avatar access', async (t) => {

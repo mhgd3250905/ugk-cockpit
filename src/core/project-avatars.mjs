@@ -21,6 +21,14 @@ const IMAGE_MIME_TYPES = new Map([
   ['.webp', 'image/webp'],
 ]);
 
+const MIME_TO_EXTENSION = new Map([
+  ['image/png', '.png'],
+  ['image/jpeg', '.jpg'],
+  ['image/jpg', '.jpg'],
+  ['image/gif', '.gif'],
+  ['image/webp', '.webp'],
+]);
+
 function avatarError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -38,15 +46,34 @@ function validateProjectId(projectId) {
   }
 }
 
-function validateExtension(filePath) {
-  const extension = filePath.startsWith('.')
-    ? filePath.toLowerCase()
-    : path.extname(filePath).toLowerCase();
-  const mimeType = IMAGE_MIME_TYPES.get(extension);
-  if (!mimeType) {
-    throw avatarError('INVALID_IMAGE_TYPE', '仅支持 PNG、JPG、JPEG、GIF 或 WebP 图片。');
+function resolveImageFormat({ sourcePath, originalName, extension, mimeType } = {}) {
+  const nameCandidate = originalName || sourcePath;
+  if (nameCandidate && typeof nameCandidate === 'string') {
+    const rawExt = nameCandidate.startsWith('.') ? nameCandidate.toLowerCase() : path.extname(nameCandidate).toLowerCase();
+    const resolvedMime = IMAGE_MIME_TYPES.get(rawExt);
+    if (resolvedMime) {
+      return { extension: rawExt, mimeType: resolvedMime };
+    }
   }
-  return { extension, mimeType };
+  if (extension && typeof extension === 'string') {
+    const rawExt = extension.startsWith('.') ? extension.toLowerCase() : `.${extension.toLowerCase()}`;
+    const resolvedMime = IMAGE_MIME_TYPES.get(rawExt);
+    if (resolvedMime) {
+      return { extension: rawExt, mimeType: resolvedMime };
+    }
+  }
+  if (mimeType && typeof mimeType === 'string') {
+    const normalizedMime = mimeType.split(';')[0].trim().toLowerCase();
+    const resolvedExt = MIME_TO_EXTENSION.get(normalizedMime);
+    if (resolvedExt) {
+      return { extension: resolvedExt, mimeType: normalizedMime === 'image/jpg' ? 'image/jpeg' : normalizedMime };
+    }
+  }
+  throw avatarError('INVALID_IMAGE_TYPE', '仅支持 PNG、JPG、JPEG、GIF 或 WebP 图片。');
+}
+
+function validateExtension(filePath) {
+  return resolveImageFormat({ sourcePath: filePath });
 }
 
 function readBoundedImage(sourcePath) {
@@ -73,18 +100,45 @@ function readBoundedImage(sourcePath) {
   }
 }
 
-export function stageProjectAvatar({ sourcePath, storageRoot, projectId }) {
+export function stageProjectAvatar({
+  sourcePath,
+  content,
+  originalName,
+  extension,
+  mimeType,
+  storageRoot,
+  projectId,
+}) {
   validateProjectId(projectId);
   if (typeof storageRoot !== 'string' || !storageRoot.trim()) {
     throw avatarError('INVALID_IMAGE_PATH', '头像存储路径无效。');
   }
-  if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) {
-    throw avatarError('INVALID_IMAGE_PATH', '系统选择器没有返回有效的图片文件。');
+
+  let fileContent;
+  let format;
+
+  if (content !== undefined && content !== null) {
+    if (!Buffer.isBuffer(content) && !(content instanceof Uint8Array)) {
+      throw avatarError('INVALID_IMAGE_PATH', '所选头像大小无效。');
+    }
+    if (content.length <= 0) {
+      throw avatarError('INVALID_IMAGE_PATH', '所选头像文件为空。');
+    }
+    if (content.length > MAX_AVATAR_FILE_SIZE) {
+      throw avatarError('IMAGE_TOO_LARGE', '所选头像超过 5MB。');
+    }
+    format = resolveImageFormat({ originalName, extension, mimeType, sourcePath });
+    fileContent = Buffer.isBuffer(content) ? content : Buffer.from(content);
+  } else {
+    if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) {
+      throw avatarError('INVALID_IMAGE_PATH', '系统选择器没有返回有效的图片文件。');
+    }
+    format = validateExtension(sourcePath);
+    fileContent = readBoundedImage(sourcePath);
   }
-  const { extension, mimeType } = validateExtension(sourcePath);
-  const content = readBoundedImage(sourcePath);
-  const digest = createHash('sha256').update(content).digest('hex');
-  const fileName = `${digest}${extension}`;
+
+  const digest = createHash('sha256').update(fileContent).digest('hex');
+  const fileName = `${digest}${format.extension}`;
   const projectRoot = path.join(storageRoot, projectId);
   mkdirSync(projectRoot, { recursive: true });
   rejectSymbolicPath(projectRoot);
@@ -95,15 +149,15 @@ export function stageProjectAvatar({ sourcePath, storageRoot, projectId }) {
   }
   const destination = path.join(projectReal, fileName);
   try {
-    writeFileSync(destination, content, { flag: 'wx' });
+    writeFileSync(destination, fileContent, { flag: 'wx' });
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
     rejectSymbolicPath(destination);
   }
   return {
     avatarPath: `${projectId}/${fileName}`,
-    mimeType,
-    size: content.length,
+    mimeType: format.mimeType,
+    size: fileContent.length,
   };
 }
 

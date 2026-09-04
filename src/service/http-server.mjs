@@ -32,7 +32,11 @@ import {
   registerProject,
   updateProject,
 } from '../core/projects.mjs';
-import { resolveProjectAvatar, stageProjectAvatar } from '../core/project-avatars.mjs';
+import {
+  resolveProjectAvatar,
+  stageProjectAvatar,
+  MAX_AVATAR_FILE_SIZE,
+} from '../core/project-avatars.mjs';
 import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
 import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
@@ -49,8 +53,7 @@ import {
   recordSessionIntegrationReview,
 } from '../core/integration-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
-import { selectFolder } from '../platform/select-folder.mjs';
-import { selectImage } from '../platform/select-image.mjs';
+import { closeFolderPicker, selectFolder } from '../platform/select-folder.mjs';
 import {
   createSubmitNote,
   readSubmitNote,
@@ -1561,6 +1564,94 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
+  const hardLimit = maxBytes + 128 * 1024;
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > hardLimit) {
+      const error = new Error('所选头像超过 5MB。');
+      error.code = 'IMAGE_TOO_LARGE';
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  const rawBuffer = Buffer.concat(chunks);
+  const contentType = request.headers['content-type'] || '';
+
+  if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+    const webReq = new Request(`http://${request.headers.host || '127.0.0.1'}${request.url}`, {
+      method: request.method,
+      headers: request.headers,
+      body: rawBuffer,
+    });
+    const formData = await webReq.formData();
+    const file = formData.get('file') || formData.get('avatar');
+    if (!file || typeof file.arrayBuffer !== 'function') {
+      const error = new Error('未提供有效的头像文件。');
+      error.code = 'INVALID_IMAGE_PATH';
+      throw error;
+    }
+    const buf = Buffer.from(await file.arrayBuffer());
+    if (buf.length > maxBytes) {
+      const error = new Error('所选头像超过 5MB。');
+      error.code = 'IMAGE_TOO_LARGE';
+      throw error;
+    }
+    return {
+      content: buf,
+      originalName: file.name || '',
+      mimeType: file.type || '',
+    };
+  }
+
+  if (contentType.toLowerCase().startsWith('application/json')) {
+    if (rawBuffer.length === 0) {
+      const error = new Error('未提供有效的头像文件。');
+      error.code = 'INVALID_IMAGE_PATH';
+      throw error;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(rawBuffer.toString('utf8'));
+    } catch {
+      const error = new Error('提交的信息不完整或格式不正确。');
+      error.code = 'INVALID_REQUEST';
+      throw error;
+    }
+    if (parsed.content || parsed.data) {
+      const b64 = parsed.content || parsed.data;
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length > maxBytes) {
+        const error = new Error('所选头像超过 5MB。');
+        error.code = 'IMAGE_TOO_LARGE';
+        throw error;
+      }
+      return {
+        content: buf,
+        originalName: parsed.originalName || parsed.filename || parsed.fileName || '',
+        mimeType: parsed.mimeType || parsed.type || '',
+      };
+    }
+    const error = new Error('未提供有效的头像文件。');
+    error.code = 'INVALID_IMAGE_PATH';
+    throw error;
+  }
+
+  if (rawBuffer.length > maxBytes) {
+    const error = new Error('所选头像超过 5MB。');
+    error.code = 'IMAGE_TOO_LARGE';
+    throw error;
+  }
+
+  // Raw binary (e.g. image/png, application/octet-stream, etc.)
+  return {
+    content: rawBuffer,
+    mimeType: contentType,
+  };
+}
+
 function tokenMatches(actual, expected) {
   if (!actual?.startsWith('Bearer ')) return false;
   const candidate = Buffer.from(actual.slice(7));
@@ -1663,7 +1754,7 @@ export async function createCockpitHttpServer({
   port = 0,
   probe = probeGitWorktree,
   folderPicker = selectFolder,
-  imagePicker = selectImage,
+  imagePicker = null,
   avatarStorageRoot = path.join(path.dirname(dbPath), 'project-avatars'),
   folderGrants = null,
   emptyFolderGrants = null,
@@ -2119,7 +2210,14 @@ export async function createCockpitHttpServer({
         && (
           !request.headers.origin
           || request.headers['sec-fetch-site'] !== 'same-origin'
-          || !request.headers['content-type']?.toLowerCase().startsWith('application/json')
+          || (
+            !request.headers['content-type']?.toLowerCase().startsWith('application/json')
+            && !(
+              request.method === 'POST'
+              && /^\/api\/v1\/projects\/[^/]+\/avatar\/upload$/.test(url.pathname)
+              && request.headers['content-type']?.toLowerCase().startsWith('multipart/form-data')
+            )
+          )
         )
       ) {
         sendError(response, 'ORIGIN_REJECTED');
@@ -2384,12 +2482,60 @@ export async function createCockpitHttpServer({
         return;
       }
 
-      const projectAvatarSelectMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/avatar\/select$/);
-      if (request.method === 'POST' && projectAvatarSelectMatch) {
-        const projectId = decodeURIComponent(projectAvatarSelectMatch[1]);
+      const projectAvatarUploadMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/avatar\/(upload|select)$/);
+      if (request.method === 'POST' && projectAvatarUploadMatch) {
+        const projectId = decodeURIComponent(projectAvatarUploadMatch[1]);
         const project = readProjectContext(db, projectId);
         if (!project) {
           sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+
+        const isExplicitUpload = projectAvatarUploadMatch[2] === 'upload';
+        const contentType = request.headers['content-type'] || '';
+        const hasUploadContent = contentType.toLowerCase().startsWith('multipart/form-data')
+          || contentType.toLowerCase().startsWith('image/')
+          || contentType.toLowerCase().startsWith('application/octet-stream');
+
+        if (isExplicitUpload || hasUploadContent || typeof imagePicker !== 'function') {
+          let upload;
+          try {
+            upload = await readAvatarUploadBody(request);
+          } catch (err) {
+            sendError(response, err.code || 'INVALID_IMAGE_PATH', {
+              extra: { message: err.message },
+            });
+            return;
+          }
+
+          const queryFileName = url.searchParams.get('filename') || url.searchParams.get('name');
+          const headerFileName = request.headers['x-filename'];
+          const originalName = upload.originalName || queryFileName || headerFileName || '';
+
+          let staged;
+          try {
+            staged = stageProjectAvatar({
+              content: upload.content,
+              originalName,
+              mimeType: upload.mimeType,
+              storageRoot: avatarStorageRoot,
+              projectId,
+            });
+          } catch (err) {
+            sendError(response, err.code || 'INVALID_IMAGE_PATH', {
+              extra: { message: err.message },
+            });
+            return;
+          }
+
+          sendJson(response, 200, {
+            ok: true,
+            cancelled: false,
+            projectId,
+            avatarPath: staged.avatarPath,
+            mimeType: staged.mimeType,
+            size: staged.size,
+          });
           return;
         }
 
@@ -3555,6 +3701,11 @@ export async function createCockpitHttpServer({
       await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      if (folderPicker === selectFolder) {
+        try { await closeFolderPicker(); } catch {}
+      } else if (typeof folderPicker?.close === 'function') {
+        try { await folderPicker.close(); } catch {}
+      }
       db.close();
     },
   };

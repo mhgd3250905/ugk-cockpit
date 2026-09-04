@@ -2908,16 +2908,55 @@ function EditProjectModal({ project, onClose, onSave }) {
   const [selecting, setSelecting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
+  const fileInputRef = useRef(null);
   const busy = selecting || saving;
   const modalRef = useFocusTrap(Boolean(project), onClose, busy);
 
-  async function handleSelectImage() {
+  function handleSelectImageClick() {
+    if (busy) return;
+    fileInputRef.current?.click();
+  }
+
+  async function handleFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const allowedExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+    const ext = (file.name.match(/\.[^.]+$/)?.[0] || '').toLowerCase();
+    if (!allowedExtensions.includes(ext)) {
+      setNotice({
+        message: '仅支持 PNG、JPG、JPEG、GIF 或 WebP 图片。',
+        impact: '项目头像未被修改，代码和已有记录不受影响。',
+        requiredAction: '请选择支持的图片格式后重试。',
+      });
+      return;
+    }
+    if (file.size <= 0) {
+      setNotice({
+        message: '所选头像文件为空。',
+        impact: '项目头像未被修改，代码和已有记录不受影响。',
+        requiredAction: '请选择有效的图片文件后重试。',
+      });
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice({
+        message: '所选头像超过 5MB。',
+        impact: '项目头像未被修改，代码和已有记录不受影响。',
+        requiredAction: '请选择不超过 5MB 的图片后重试。',
+      });
+      return;
+    }
+
     setSelecting(true);
     setNotice(null);
     try {
-      const res = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/avatar/select`, {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/avatar/upload`, {
         method: 'POST',
-        body: '{}',
+        body: formData,
       });
       if (res?.cancelled) {
         return;
@@ -2927,7 +2966,7 @@ function EditProjectModal({ project, onClose, onSave }) {
       }
     } catch (err) {
       setNotice(createErrorNotice(err, {
-        message: '选择项目头像失败。',
+        message: '上传项目头像失败。',
         impact: '项目头像未被修改，代码和已有记录不受影响。',
         requiredAction: '请确认选择有效的图片文件后重试。',
       }));
@@ -2994,6 +3033,14 @@ function EditProjectModal({ project, onClose, onSave }) {
         </div>
 
         <div className="modal-body">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".png,.jpg,.jpeg,.gif,.webp,image/png,image/jpeg,image/gif,image/webp"
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+            disabled={busy}
+          />
           <div className="form-field">
             <label htmlFor="modal-edit-project-name" className="field-label">项目显示名称</label>
             <input
@@ -3022,10 +3069,10 @@ function EditProjectModal({ project, onClose, onSave }) {
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        onClick={handleSelectImage}
+                        onClick={handleSelectImageClick}
                         disabled={busy}
                       >
-                        {selecting ? '正在选择…' : '选择图片'}
+                        {selecting ? '正在上传…' : '选择图片'}
                       </button>
                       <button
                         type="button"
@@ -3048,10 +3095,10 @@ function EditProjectModal({ project, onClose, onSave }) {
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
-                      onClick={handleSelectImage}
+                      onClick={handleSelectImageClick}
                       disabled={busy}
                     >
-                      {selecting ? '正在选择…' : '选择图片'}
+                      {selecting ? '正在上传…' : '选择图片'}
                     </button>
                     <span className="field-hint">未选择头像，使用名称前两字作为默认图标</span>
                   </div>

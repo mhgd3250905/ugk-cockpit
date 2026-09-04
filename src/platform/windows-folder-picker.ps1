@@ -189,29 +189,52 @@ namespace UgkCockpit.Platform
 if (-not ([System.Management.Automation.PSTypeName]'UgkCockpit.Platform.NativeFolderPicker').Type) {
   Add-Type -TypeDefinition $csharpDefinition
 }
+# Signal readiness to host
+[Console]::Out.WriteLine('{"ok":true,"ready":true}')
+[Console]::Out.Flush()
 
-$owner = New-Object System.Windows.Forms.Form
-
-try {
-  # A visible, top-most owner keeps the native dialog in front of the browser.
-  # The owner itself is effectively invisible and never appears in the taskbar.
-  $owner.Text = 'UGK Cockpit'
-  $owner.ShowInTaskbar = $false
-  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-  $owner.ClientSize = New-Object System.Drawing.Size(1, 1)
-  $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
-  $owner.Opacity = 0.01
-  $owner.TopMost = $true
-  $owner.Show()
-  $owner.Activate()
-  $owner.BringToFront()
-  [System.Windows.Forms.Application]::DoEvents()
-
-  $selectedPath = [UgkCockpit.Platform.NativeFolderPicker]::Show($owner.Handle)
-  if (![string]::IsNullOrEmpty($selectedPath)) {
-    Write-Output $selectedPath
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  $trimmed = $line.Trim()
+  if ($trimmed -eq 'exit' -or $trimmed -eq 'quit' -or $trimmed -eq '{"action":"exit"}') {
+    break
   }
-} finally {
-  $owner.Close()
-  $owner.Dispose()
+  if ($trimmed -eq 'ping' -or $trimmed -eq '{"action":"ping"}') {
+    [Console]::Out.WriteLine('{"ok":true,"pong":true}')
+    [Console]::Out.Flush()
+    continue
+  }
+
+  $owner = New-Object System.Windows.Forms.Form
+
+  try {
+    # A visible, top-most owner keeps the native dialog in front of the browser.
+    # The owner itself is effectively invisible and never appears in the taskbar.
+    $owner.Text = 'UGK Cockpit'
+    $owner.ShowInTaskbar = $false
+    $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $owner.ClientSize = New-Object System.Drawing.Size(1, 1)
+    $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+    $owner.Opacity = 0.01
+    $owner.TopMost = $true
+    $owner.Show()
+    $owner.Activate()
+    $owner.BringToFront()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $selectedPath = [UgkCockpit.Platform.NativeFolderPicker]::Show($owner.Handle)
+    if (![string]::IsNullOrEmpty($selectedPath)) {
+      $escaped = $selectedPath.Replace('\', '\\').Replace('"', '\"')
+      [Console]::Out.WriteLine('{"ok":true,"path":"' + $escaped + '"}')
+    } else {
+      [Console]::Out.WriteLine('{"ok":true,"path":null}')
+    }
+    [Console]::Out.Flush()
+  } catch {
+    $errMsg = $_.Exception.Message.Replace('\', '\\').Replace('"', '\"')
+    [Console]::Out.WriteLine('{"ok":false,"error":"' + $errMsg + '"}')
+    [Console]::Out.Flush()
+  } finally {
+    $owner.Close()
+    $owner.Dispose()
+  }
 }

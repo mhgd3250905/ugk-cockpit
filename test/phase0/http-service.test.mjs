@@ -197,6 +197,51 @@ test('local web shell sets an HttpOnly session and browser mutations require sam
   assert.equal(pickerCalls, 1);
 });
 
+test('browser same-origin multipart avatar upload passes the mutation boundary', async (t) => {
+  const root = createRepository();
+  const dbPath = dataPath(root);
+  const db = openCockpitDatabase(dbPath);
+  const registered = registerProject(db, {
+    commandId: 'browser-avatar-upload-1',
+    name: '浏览器头像上传',
+    observation: fakeObservation(root),
+  });
+  db.close();
+
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+
+  const shell = await request(service, '/');
+  const cookie = shell.headers.get('set-cookie');
+  const formData = new FormData();
+  formData.append('file', new Blob([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  ], { type: 'image/png' }), 'avatar.png');
+
+  const response = await request(service, `/api/v1/projects/${registered.projectId}/avatar/upload`, {
+    method: 'POST',
+    headers: {
+      cookie,
+      origin: `http://127.0.0.1:${service.port}`,
+      'sec-fetch-site': 'same-origin',
+      'x-ugk-client-id': 'browser-avatar-client-0001',
+    },
+    body: formData,
+  });
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.mimeType, 'image/png');
+});
+
 test('durable folder grant can finish after a service restart with the same CLI identity', async (t) => {
   const root = createRepository();
   const dbPath = dataPath(root);

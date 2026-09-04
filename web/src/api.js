@@ -62,16 +62,25 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     const isRead = method === 'GET' || method === 'HEAD';
     if (!isRead) await ensureSession();
 
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    const customHeaders = options.headers ?? {};
+    const hasContentType = Object.keys(customHeaders).some(
+      (k) => k.toLowerCase() === 'content-type',
+    );
+    const headers = {
+      ...customHeaders,
+      'x-ugk-client-id': clientId(),
+    };
+    if (!isFormData && !hasContentType) {
+      headers['content-type'] = 'application/json';
+    }
+
     let response;
     try {
       response = await fetchImpl(path, {
         ...options,
         credentials: 'same-origin',
-        headers: {
-          ...(options.headers ?? {}),
-          'content-type': 'application/json',
-          'x-ugk-client-id': clientId(),
-        },
+        headers,
       });
     } catch (error) {
       throw connectionError(error);
