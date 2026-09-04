@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,15 @@ import {
   revalidateAuthorizedPath,
   revalidateEmptyDirectory,
 } from '../core/path-guard.mjs';
-import { readDashboard, readProjectContext, refreshProject, registerProject } from '../core/projects.mjs';
+import {
+  readDashboard,
+  readProjectContext,
+  refreshProject,
+  registerProject,
+  updateProject,
+  scanProjectImages,
+  resolveProjectImage,
+} from '../core/projects.mjs';
 import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
 import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
@@ -250,6 +259,36 @@ const PUBLIC_ERRORS = {
     message: '找不到这个项目。',
     impact: '没有创建任务，也没有修改代码。',
     requiredAction: '请刷新首页后从现有项目重新发起。',
+  },
+  PROJECT_NAME_REQUIRED: {
+    status: 400,
+    message: '项目显示名称不能为空。',
+    impact: '项目代码和已有记录不受影响。',
+    requiredAction: '请填写至少一个字符的项目显示名称后重试。',
+  },
+  IMAGE_NOT_FOUND: {
+    status: 404,
+    message: '找不到指定的图片文件。',
+    impact: '项目代码和已有记录不受影响。',
+    requiredAction: '请重新检索并选择有效的项目图片。',
+  },
+  INVALID_IMAGE_PATH: {
+    status: 400,
+    message: '图片路径不在已授权的项目目录内或格式无效。',
+    impact: 'Cockpit 没有读取越界文件，项目代码不受影响。',
+    requiredAction: '请选择项目授权根目录内的图片资源。',
+  },
+  IMAGE_TOO_LARGE: {
+    status: 413,
+    message: '选中的图片文件过大，无法作为头像加载。',
+    impact: '项目代码和已有记录不受影响。',
+    requiredAction: '请选择较小的图片（建议不超过 5MB）。',
+  },
+  INVALID_IMAGE_TYPE: {
+    status: 415,
+    message: '仅支持 PNG、JPG、JPEG、GIF、WebP 格式的安全位图图片。',
+    impact: '项目代码和已有记录不受影响。',
+    requiredAction: '请选择支持的图片格式，SVG 等可执行脚本格式已被安全策略拦截。',
   },
   DISPATCH_CODE_INVALID: {
     status: 404,
@@ -2328,6 +2367,116 @@ export async function createCockpitHttpServer({
           submissions,
           submitNotes,
         });
+        return;
+      }
+
+      const projectImagesMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/(images|avatar-candidates)$/);
+      if (request.method === 'GET' && projectImagesMatch) {
+        const projectId = decodeURIComponent(projectImagesMatch[1]);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const root = project.authorized_root || project.canonical_path;
+        let scanResult;
+        try {
+          scanResult = scanProjectImages(root);
+        } catch (err) {
+          sendError(response, err.code || 'PATH_NOT_AUTHORIZED', {
+            extra: { message: err.message },
+          });
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          projectId,
+          images: Array.from(scanResult),
+          truncated: Boolean(scanResult.truncated),
+          limitReached: scanResult.limitReached || null,
+        });
+        return;
+      }
+
+      const projectAvatarMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/(avatar|image|images\/raw)$/);
+      if ((request.method === 'GET' || request.method === 'HEAD') && projectAvatarMatch) {
+        const projectId = decodeURIComponent(projectAvatarMatch[1]);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const root = project.authorized_root || project.canonical_path;
+        const requestedPath = url.searchParams.get('path') || project.avatar_path;
+        if (!requestedPath) {
+          sendError(response, 'IMAGE_NOT_FOUND');
+          return;
+        }
+
+        let resolved;
+        try {
+          resolved = resolveProjectImage(root, requestedPath);
+        } catch (err) {
+          sendError(response, err.code || 'INVALID_IMAGE_PATH', {
+            extra: { message: err.message },
+          });
+          return;
+        }
+
+        response.writeHead(200, {
+          'content-type': resolved.mimeType,
+          'content-length': resolved.size,
+          'x-content-type-options': 'nosniff',
+          'cache-control': 'private, no-cache',
+        });
+        if (request.method === 'HEAD') {
+          response.end();
+          return;
+        }
+        const stream = createReadStream(resolved.filePath);
+        stream.on('error', () => {
+          if (!response.headersSent) {
+            sendError(response, 'IMAGE_NOT_FOUND');
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
+      const projectEditMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)(?:\/edit)?$/);
+      if ((request.method === 'POST' || request.method === 'PATCH') && projectEditMatch) {
+        const projectId = decodeURIComponent(projectEditMatch[1]);
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+
+        try {
+          const result = updateProject(db, {
+            commandId: body.commandId,
+            projectId,
+            name: body.name,
+            avatarPath: body.avatarPath,
+          });
+
+          if (result.ok) {
+            sendJson(response, 200, result);
+          } else {
+            sendError(response, result.code, {
+              commandId: body.commandId,
+              extra: { message: result.message },
+            });
+          }
+        } catch (err) {
+          if (err.code === 'COMMAND_CONFLICT') {
+            sendError(response, 'COMMAND_CONFLICT', {
+              commandId: body.commandId,
+              extra: { message: err.message },
+            });
+            return;
+          }
+          throw err;
+        }
         return;
       }
 

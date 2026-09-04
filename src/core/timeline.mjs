@@ -608,6 +608,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 export function readProjectDetail(db, projectId, options = {}) {
   const row = db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
+           projects.avatar_path,
            projects.last_observed_at, projects.status, projects.status_reason,
            projects.created_at, projects.updated_at,
            worktrees.canonical_path, worktrees.repository_identity, worktrees.identity_fingerprint,
@@ -693,6 +694,7 @@ export function readProjectDetail(db, projectId, options = {}) {
     id: row.id,
     name: row.name,
     stage: row.stage,
+    avatarPath: row.avatar_path || null,
     status: isWorking
       ? 'active'
       : (row.stage === 'paused'

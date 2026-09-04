@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 20;
+export const SUPPORTED_SCHEMA_VERSION = 21;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -711,6 +711,22 @@ BEGIN
   END;
 END;
 `,
+  },
+  {
+    version: 21,
+    name: 'project-avatar-path',
+    apply(db) {
+      const table = db.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projects'
+      `).get();
+      if (!table) return;
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(projects)').all().map((row) => row.name),
+      );
+      if (!columns.has('avatar_path')) {
+        db.exec("ALTER TABLE projects ADD COLUMN avatar_path TEXT NOT NULL DEFAULT '';");
+      }
+    },
   },
 ];
 

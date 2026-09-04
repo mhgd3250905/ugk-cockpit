@@ -544,6 +544,7 @@ function App() {
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
   const [projectDetail, setProjectDetail] = useState(null);
+  const [editingProject, setEditingProject] = useState(null);
   const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
   const projectDetailRef = useRef(projectDetail);
@@ -876,6 +877,54 @@ function App() {
         retry: () => copyDispatchMessage(),
       });
     }
+  }
+
+  async function saveProjectEdit(projectId, { name, avatarPath }) {
+    const commandId = crypto.randomUUID();
+    const result = await api(`/api/v1/projects/${encodeURIComponent(projectId)}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        commandId,
+        name,
+        avatarPath,
+      }),
+    });
+
+    setDashboard((previous) => {
+      if (!previous || !previous.projects) return previous;
+      return {
+        ...previous,
+        projects: previous.projects.map((p) => (
+          p.id === projectId
+            ? { ...p, name: result.name, avatarPath: result.avatarPath }
+            : p
+        )),
+      };
+    });
+
+    setProjectDetail((previous) => {
+      if (!previous) return previous;
+      const seed = previous.seed && previous.seed.id === projectId
+        ? { ...previous.seed, name: result.name, avatarPath: result.avatarPath }
+        : previous.seed;
+      const data = previous.data && previous.data.project && previous.data.project.id === projectId
+        ? {
+            ...previous.data,
+            project: {
+              ...previous.data.project,
+              name: result.name,
+              avatarPath: result.avatarPath,
+            },
+          }
+        : previous.data;
+      return {
+        ...previous,
+        seed,
+        data,
+      };
+    });
+
+    setEditingProject(null);
   }
 
   async function refreshOpenProjectDetail(actionNotice = null) {
@@ -1233,6 +1282,7 @@ function App() {
             onAssignSpace={assignDevelopmentSpace}
             onCopyReviewPrompt={copyIntegrationPrompt}
             onNoteStatusChange={refreshOpenProjectDetail}
+            onEdit={(projectToEdit) => setEditingProject(projectToEdit)}
           />
         ) : (
           <>
@@ -1297,6 +1347,14 @@ function App() {
           onClose={() => { setHandoffProject(null); setNotice(null); setDispatch(null); }}
           onCreate={createHandoff}
           onCopy={copyDispatchMessage}
+        />
+      )}
+
+      {editingProject && (
+        <EditProjectModal
+          project={editingProject}
+          onClose={() => setEditingProject(null)}
+          onSave={saveProjectEdit}
         />
       )}
 
@@ -1401,7 +1459,20 @@ function ProjectCard({ project, onAction, onOpen }) {
           <time className="card-time">{formatTime(confirmedAt)}</time>
         </div>
 
-        <h4 className="card-name">{project.name}</h4>
+        <div className="card-name-row">
+          {project.avatarPath ? (
+            <img
+              src={`/api/v1/projects/${encodeURIComponent(project.id)}/avatar?t=${encodeURIComponent(project.avatarPath)}`}
+              alt=""
+              className="project-avatar card-avatar"
+            />
+          ) : (
+            <div className="project-avatar-fallback card-avatar-fallback" aria-hidden="true">
+              {project.name ? project.name.slice(0, 2) : 'UGK'}
+            </div>
+          )}
+          <h4 className="card-name">{project.name}</h4>
+        </div>
         {showStage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
         <p className="card-what">{copy.title}</p>
         <p className="card-impact">{copy.detail}</p>
@@ -1428,12 +1499,14 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange, onEdit }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
+    id: projectId,
     name: '项目详情',
     stage: 'development',
   };
+  const effectiveProjectId = projectId || project.id;
   const statusReason = getProjectStatusReason(project);
   const statusCopy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const headingCopy = state?.loading
@@ -1472,8 +1545,35 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             {project.stage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
             <span className="badge badge-status">{eyebrow}</span>
           </div>
-          <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
-          <p>{headingCopy}</p>
+          <div className="detail-identity-row">
+            {project.avatarPath ? (
+              <img
+                src={`/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?t=${encodeURIComponent(project.avatarPath)}`}
+                alt=""
+                className="project-avatar detail-avatar"
+              />
+            ) : (
+              <div className="project-avatar-fallback detail-avatar-fallback" aria-hidden="true">
+                {project.name ? project.name.slice(0, 2) : 'UGK'}
+              </div>
+            )}
+            <div className="detail-title-group">
+              <div className="detail-title-action-row">
+                <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
+                {onEdit && !invalidRoute && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm btn-edit-project"
+                    onClick={() => onEdit({ ...project, id: effectiveProjectId })}
+                    disabled={busy}
+                  >
+                    编辑项目
+                  </button>
+                )}
+              </div>
+              <p>{headingCopy}</p>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -2423,9 +2523,6 @@ function ConfirmAddModal({ selection, onClose, onRegister, busy, notice }) {
     <div
       className="modal-backdrop"
       role="presentation"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
     >
       <section
         ref={modalRef}
@@ -2540,9 +2637,6 @@ function HandoffModal({
     <div
       className="modal-backdrop"
       role="presentation"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && !busy) onClose();
-      }}
     >
       <section
         ref={modalRef}
@@ -2696,5 +2790,214 @@ function HandoffModal({
     </div>
   );
 }
+
+const ConfirmFolderModal = ConfirmAddModal;
+
+function EditProjectModal({ project, onClose, onSave }) {
+  const [name, setName] = useState(project?.name || '');
+  const [avatarPath, setAvatarPath] = useState(project?.avatarPath || '');
+  const [candidateImages, setCandidateImages] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const modalRef = useFocusTrap(Boolean(project), onClose, busy);
+
+  async function handleScan() {
+    setScanning(true);
+    setNotice(null);
+    try {
+      const res = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/images`);
+      setCandidateImages(res.images || []);
+    } catch (err) {
+      setNotice(createErrorNotice(err, {
+        message: '检索项目图片失败。',
+        impact: '项目代码和已有记录不受影响。',
+        requiredAction: '请确认项目授权目录存在且可访问后重试。',
+      }));
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setNotice({
+        message: '项目显示名称不能为空。',
+        impact: '没有执行保存，原有设置未被修改。',
+        required_action: '请输入有效的项目显示名称后再保存。',
+      });
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      await onSave(project.id, {
+        name: trimmed,
+        avatarPath: avatarPath || '',
+      });
+    } catch (err) {
+      setNotice(createErrorNotice(err, {
+        message: '保存项目信息失败。',
+        impact: '项目代码和已有记录不受影响。',
+        requiredAction: '请检查输入内容后重试。',
+      }));
+      setBusy(false);
+    }
+  }
+
+  const previewAvatarUrl = avatarPath
+    ? `/api/v1/projects/${encodeURIComponent(project.id)}/avatar?path=${encodeURIComponent(avatarPath)}`
+    : null;
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        ref={modalRef}
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="edit-project-dialog-title"
+        tabIndex="-1"
+      >
+        <div className="modal-header">
+          <div>
+            <span className="badge badge-modal-kicker">项目设置 · 识别与头像</span>
+            <h2 id="edit-project-dialog-title" className="modal-title">编辑项目信息</h2>
+          </div>
+          <button
+            type="button"
+            className="modal-close-icon-btn"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="关闭"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className="form-field">
+            <label htmlFor="modal-edit-project-name" className="field-label">项目显示名称</label>
+            <input
+              id="modal-edit-project-name"
+              className="field-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={busy}
+              maxLength="100"
+              placeholder="请输入项目显示名称"
+            />
+          </div>
+
+          <div className="form-field">
+            <label className="field-label">项目头像</label>
+            <div className="avatar-current-row">
+              {previewAvatarUrl ? (
+                <div className="avatar-preview-box">
+                  <img
+                    src={previewAvatarUrl}
+                    alt="头像预览"
+                    className="project-avatar edit-avatar-preview"
+                  />
+                  <div className="avatar-preview-info">
+                    <span className="avatar-preview-path" title={avatarPath}>{avatarPath}</span>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setAvatarPath('')}
+                      disabled={busy}
+                    >
+                      移除头像
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="avatar-preview-box">
+                  <div className="project-avatar-fallback edit-avatar-preview" aria-hidden="true">
+                    {name ? name.slice(0, 2) : 'UGK'}
+                  </div>
+                  <span className="field-hint">未选择头像，使用名称前两字作为默认图标</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="form-field">
+            <div className="scan-images-header">
+              <label className="field-label">从已授权项目目录检索图片</label>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleScan}
+                disabled={busy || scanning}
+              >
+                {scanning ? '正在检索图片…' : '检索项目内图片'}
+              </button>
+            </div>
+            <p className="field-hint">
+              检索项目授权目录内的安全位图格式图片（支持 PNG、JPG、JPEG、GIF、WebP；基于安全策略不支持 SVG）。
+            </p>
+
+            {candidateImages !== null && (
+              <div className="candidate-images-wrapper">
+                {candidateImages.length === 0 ? (
+                  <p className="no-images-notice">在项目目录内未找到支持的位图图片文件。</p>
+                ) : (
+                  <div className="candidate-images-grid" role="listbox" aria-label="候选头像">
+                    {candidateImages.map((item) => {
+                      const isSelected = avatarPath === item.path;
+                      return (
+                        <button
+                          type="button"
+                          key={item.path}
+                          className={`candidate-image-card ${isSelected ? 'selected' : ''}`}
+                          onClick={() => setAvatarPath(item.path)}
+                          disabled={busy}
+                          title={`${item.path} (${(item.size / 1024).toFixed(1)} KB)`}
+                        >
+                          <img
+                            src={`/api/v1/projects/${encodeURIComponent(project.id)}/avatar?path=${encodeURIComponent(item.path)}`}
+                            alt={item.name}
+                            className="candidate-image-thumb"
+                          />
+                          <span className="candidate-image-name">{item.name}</span>
+                          {isSelected && <span className="candidate-selected-badge">✓ 已选</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {notice && <NoticeBanner notice={notice} busy={busy} />}
+        </div>
+
+        <div className="modal-footer">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleSave}
+            disabled={busy || !name.trim()}
+          >
+            {busy ? '正在保存…' : '保存设置'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export { ConfirmFolderModal, ConfirmAddModal, EditProjectModal };
 
 createRoot(document.getElementById('root')).render(<App />);

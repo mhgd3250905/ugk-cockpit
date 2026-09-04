@@ -26,14 +26,20 @@ function containsSymbolicSegment(rootReal, candidateInput) {
   return false;
 }
 
-function rejectSymbolicPath(inputPath) {
+export function rejectSymbolicPath(inputPath) {
   const resolved = path.resolve(inputPath);
   const parsed = path.parse(resolved);
   let cursor = parsed.root;
   for (const segment of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, segment);
-    if (lstatSync(cursor).isSymbolicLink()) {
-      throw new PathScopeError('所选文件夹经过了链接或 junction，默认不继续访问。', 'REPARSE_POINT');
+    try {
+      if (lstatSync(cursor).isSymbolicLink()) {
+        throw new PathScopeError('所选文件夹经过了链接或 junction，默认不继续访问。', 'REPARSE_POINT');
+      }
+    } catch (err) {
+      if (err.code === 'REPARSE_POINT' || err instanceof PathScopeError) throw err;
+      if (err.code === 'ENOENT') break;
+      throw err;
     }
   }
 }

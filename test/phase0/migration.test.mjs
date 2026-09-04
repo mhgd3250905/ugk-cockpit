@@ -795,12 +795,12 @@ test('version 19 database upgrades to version 20 creating submit_notes table', (
   const dbPath = fixture(t, 'migration-v19');
   const legacy = openCockpitDatabase(dbPath);
   legacy.exec('DROP TRIGGER IF EXISTS submit_notes_immutable_content; DROP TABLE IF EXISTS submit_notes;');
-  legacy.prepare('DELETE FROM schema_migrations WHERE version = 20').run();
+  legacy.prepare('DELETE FROM schema_migrations WHERE version >= 20;').run();
   legacy.exec('PRAGMA user_version = 19;');
   legacy.close();
 
   const upgraded = openCockpitDatabase(dbPath);
-  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 20);
+  assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   const cols = upgraded.prepare('PRAGMA table_info(submit_notes)').all().map((r) => r.name);
   assert.ok(cols.includes('id'));
   assert.ok(cols.includes('project_id'));
@@ -815,6 +815,23 @@ test('version 19 database upgrades to version 20 creating submit_notes table', (
   assert.ok(cols.includes('created_at'));
   assert.ok(cols.includes('updated_at'));
   upgraded.close();
+});
+
+test('version 20 database upgrades to version 21 adding avatar_path to projects repeatably', (t) => {
+  const dbPath = fixture(t, 'migration-v20');
+  const legacy = openCockpitDatabase(dbPath);
+  legacy.exec('ALTER TABLE projects DROP COLUMN avatar_path;');
+  legacy.prepare('DELETE FROM schema_migrations WHERE version = 21;').run();
+  legacy.exec('PRAGMA user_version = 20;');
+  legacy.close();
+
+  for (let i = 0; i < 2; i += 1) {
+    const upgraded = openCockpitDatabase(dbPath);
+    assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
+    const cols = upgraded.prepare('PRAGMA table_info(projects)').all().map((r) => r.name);
+    assert.ok(cols.includes('avatar_path'));
+    upgraded.close();
+  }
 });
 
 test('database from a newer product version is rejected without mutation', (t) => {
