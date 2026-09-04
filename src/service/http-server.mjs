@@ -31,9 +31,8 @@ import {
   refreshProject,
   registerProject,
   updateProject,
-  scanProjectImages,
-  resolveProjectImage,
 } from '../core/projects.mjs';
+import { resolveProjectAvatar, stageProjectAvatar } from '../core/project-avatars.mjs';
 import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
 import { listSubmissions } from '../core/integrations.mjs';
 import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
@@ -51,6 +50,7 @@ import {
 } from '../core/integration-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { selectFolder } from '../platform/select-folder.mjs';
+import { selectImage } from '../platform/select-image.mjs';
 import {
   createSubmitNote,
   readSubmitNote,
@@ -218,6 +218,18 @@ const PUBLIC_ERRORS = {
     impact: '没有添加项目，也没有修改文件。',
     requiredAction: '请重新点击“选择项目文件夹”；如果窗口被其他应用遮住，请从任务栏切换到它。',
   },
+  IMAGE_PICKER_UNAVAILABLE: {
+    status: 503,
+    message: '暂时无法打开系统图片选择器。',
+    impact: '头像未被更改，代码和已有记录不受影响。',
+    requiredAction: '请稍后重试；当前不需要手动填写路径。',
+  },
+  IMAGE_PICKER_TIMEOUT: {
+    status: 504,
+    message: '系统图片选择器没有正常返回。',
+    impact: '头像未被更改，代码和已有记录不受影响。',
+    requiredAction: '请重新点击“选择图片”；如果窗口被其他应用遮住，请从任务栏切换到它。',
+  },
   FOLDER_NOT_CODE_PROJECT: {
     status: 422,
     message: '这个文件夹里没有找到可识别的代码项目。',
@@ -270,13 +282,13 @@ const PUBLIC_ERRORS = {
     status: 404,
     message: '找不到指定的图片文件。',
     impact: '项目代码和已有记录不受影响。',
-    requiredAction: '请重新检索并选择有效的项目图片。',
+    requiredAction: '请重新选择有效的项目头像图片。',
   },
   INVALID_IMAGE_PATH: {
     status: 400,
-    message: '图片路径不在已授权的项目目录内或格式无效。',
+    message: '图片路径不在受控头像目录内或格式无效。',
     impact: 'Cockpit 没有读取越界文件，项目代码不受影响。',
-    requiredAction: '请选择项目授权根目录内的图片资源。',
+    requiredAction: '请重新选择有效的图片资源。',
   },
   IMAGE_TOO_LARGE: {
     status: 413,
@@ -1651,6 +1663,8 @@ export async function createCockpitHttpServer({
   port = 0,
   probe = probeGitWorktree,
   folderPicker = selectFolder,
+  imagePicker = selectImage,
+  avatarStorageRoot = path.join(path.dirname(dbPath), 'project-avatars'),
   folderGrants = null,
   emptyFolderGrants = null,
   webRoot = DEFAULT_WEB_ROOT,
@@ -2370,35 +2384,56 @@ export async function createCockpitHttpServer({
         return;
       }
 
-      const projectImagesMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/(images|avatar-candidates)$/);
-      if (request.method === 'GET' && projectImagesMatch) {
-        const projectId = decodeURIComponent(projectImagesMatch[1]);
+      const projectAvatarSelectMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/avatar\/select$/);
+      if (request.method === 'POST' && projectAvatarSelectMatch) {
+        const projectId = decodeURIComponent(projectAvatarSelectMatch[1]);
         const project = readProjectContext(db, projectId);
         if (!project) {
           sendError(response, 'PROJECT_NOT_FOUND');
           return;
         }
-        const root = project.authorized_root || project.canonical_path;
-        let scanResult;
+
+        let selectedPath;
         try {
-          scanResult = scanProjectImages(root);
+          selectedPath = await imagePicker();
         } catch (err) {
-          sendError(response, err.code || 'PATH_NOT_AUTHORIZED', {
+          sendError(response, err.code || 'IMAGE_PICKER_UNAVAILABLE', {
             extra: { message: err.message },
           });
           return;
         }
+
+        if (!selectedPath) {
+          sendJson(response, 200, { ok: true, cancelled: true, projectId });
+          return;
+        }
+
+        let staged;
+        try {
+          staged = stageProjectAvatar({
+            sourcePath: selectedPath,
+            storageRoot: avatarStorageRoot,
+            projectId,
+          });
+        } catch (err) {
+          sendError(response, err.code || 'INVALID_IMAGE_PATH', {
+            extra: { message: err.message },
+          });
+          return;
+        }
+
         sendJson(response, 200, {
           ok: true,
+          cancelled: false,
           projectId,
-          images: Array.from(scanResult),
-          truncated: Boolean(scanResult.truncated),
-          limitReached: scanResult.limitReached || null,
+          avatarPath: staged.avatarPath,
+          mimeType: staged.mimeType,
+          size: staged.size,
         });
         return;
       }
 
-      const projectAvatarMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/(avatar|image|images\/raw)$/);
+      const projectAvatarMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/avatar$/);
       if ((request.method === 'GET' || request.method === 'HEAD') && projectAvatarMatch) {
         const projectId = decodeURIComponent(projectAvatarMatch[1]);
         const project = readProjectContext(db, projectId);
@@ -2406,7 +2441,6 @@ export async function createCockpitHttpServer({
           sendError(response, 'PROJECT_NOT_FOUND');
           return;
         }
-        const root = project.authorized_root || project.canonical_path;
         const requestedPath = url.searchParams.get('path') || project.avatar_path;
         if (!requestedPath) {
           sendError(response, 'IMAGE_NOT_FOUND');
@@ -2415,7 +2449,11 @@ export async function createCockpitHttpServer({
 
         let resolved;
         try {
-          resolved = resolveProjectImage(root, requestedPath);
+          resolved = resolveProjectAvatar({
+            storageRoot: avatarStorageRoot,
+            projectId,
+            avatarPath: requestedPath,
+          });
         } catch (err) {
           sendError(response, err.code || 'INVALID_IMAGE_PATH', {
             extra: { message: err.message },
@@ -2457,7 +2495,7 @@ export async function createCockpitHttpServer({
             projectId,
             name: body.name,
             avatarPath: body.avatarPath,
-          });
+          }, { avatarStorageRoot });
 
           if (result.ok) {
             sendJson(response, 200, result);

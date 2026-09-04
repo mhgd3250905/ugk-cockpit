@@ -9,10 +9,12 @@ import {
   readDashboard,
   registerProject,
   updateProject,
-  scanProjectImages,
-  resolveProjectImage,
-  worktreeIdFor,
 } from '../src/core/projects.mjs';
+import {
+  stageProjectAvatar,
+  resolveProjectAvatar,
+  MAX_AVATAR_FILE_SIZE,
+} from '../src/core/project-avatars.mjs';
 import { readProjectDetail } from '../src/core/timeline.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 
@@ -32,6 +34,9 @@ function createFixture(t, { registerHook = true } = {}) {
   git(['commit', '-m', 'initial']);
 
   const dbPath = path.join(container, 'cockpit.db');
+  const avatarStorageRoot = path.join(container, 'project-avatars');
+  mkdirSync(avatarStorageRoot, { recursive: true });
+
   const db = openCockpitDatabase(dbPath);
 
   const cleanup = () => {
@@ -51,7 +56,7 @@ function createFixture(t, { registerHook = true } = {}) {
     t.after(cleanup);
   }
 
-  return { container, repoRoot, dbPath, db, cleanup };
+  return { container, repoRoot, dbPath, avatarStorageRoot, db, cleanup };
 }
 
 function sampleObservation(repoRoot) {
@@ -75,7 +80,7 @@ function sampleObservation(repoRoot) {
 }
 
 test('updateProject: updates display name and avatarPath, reflected in dashboard and detail', (t) => {
-  const { repoRoot, db } = createFixture(t);
+  const { repoRoot, avatarStorageRoot, container, db } = createFixture(t);
   const reg = registerProject(db, {
     commandId: 'reg-p1',
     name: '原始项目名',
@@ -97,7 +102,7 @@ test('updateProject: updates display name and avatarPath, reflected in dashboard
     commandId: 'cmd-update-1',
     projectId: reg.projectId,
     name: '新的项目名',
-  });
+  }, { avatarStorageRoot });
   assert.equal(update1.ok, true);
   assert.equal(update1.project.name, '新的项目名');
   assert.equal(update1.project.avatarPath, null);
@@ -105,31 +110,38 @@ test('updateProject: updates display name and avatarPath, reflected in dashboard
   dashboard = readDashboard(db);
   assert.equal(dashboard[0].name, '新的项目名');
 
-  // Create avatar file
-  mkdirSync(path.join(repoRoot, 'assets'), { recursive: true });
-  writeFileSync(path.join(repoRoot, 'assets', 'logo.png'), 'fake-avatar-data');
+  // Stage an external avatar file
+  const externalImage = path.join(container, 'external-logo.png');
+  writeFileSync(externalImage, Buffer.from('fake-avatar-data-content'));
+
+  const staged = stageProjectAvatar({
+    sourcePath: externalImage,
+    storageRoot: avatarStorageRoot,
+    projectId: reg.projectId,
+  });
+  assert.ok(staged.avatarPath.startsWith(`${reg.projectId}/`));
 
   // Update avatarPath
   const update2 = updateProject(db, {
     commandId: 'cmd-update-2',
     projectId: reg.projectId,
-    avatarPath: 'assets/logo.png',
-  });
+    avatarPath: staged.avatarPath,
+  }, { avatarStorageRoot });
   assert.equal(update2.ok, true);
   assert.equal(update2.project.name, '新的项目名');
-  assert.equal(update2.project.avatarPath, 'assets/logo.png');
+  assert.equal(update2.project.avatarPath, staged.avatarPath);
 
   dashboard = readDashboard(db);
-  assert.equal(dashboard[0].avatarPath, 'assets/logo.png');
+  assert.equal(dashboard[0].avatarPath, staged.avatarPath);
   detail = readProjectDetail(db, reg.projectId);
-  assert.equal(detail.project.avatarPath, 'assets/logo.png');
+  assert.equal(detail.project.avatarPath, staged.avatarPath);
 
   // Clear avatarPath
   const update3 = updateProject(db, {
     commandId: 'cmd-update-3',
     projectId: reg.projectId,
     avatarPath: '',
-  });
+  }, { avatarStorageRoot });
   assert.equal(update3.ok, true);
   assert.equal(update3.project.avatarPath, null);
   assert.equal(readDashboard(db)[0].avatarPath, null);
@@ -138,10 +150,10 @@ test('updateProject: updates display name and avatarPath, reflected in dashboard
   const replay2 = updateProject(db, {
     commandId: 'cmd-update-2',
     projectId: reg.projectId,
-    avatarPath: 'assets/logo.png',
-  });
+    avatarPath: staged.avatarPath,
+  }, { avatarStorageRoot });
   assert.equal(replay2.ok, true);
-  assert.equal(replay2.project.avatarPath, 'assets/logo.png');
+  assert.equal(replay2.project.avatarPath, staged.avatarPath);
 });
 
 test('updateProject: rejects empty or blank project name', (t) => {
@@ -165,120 +177,158 @@ test('updateProject: rejects empty or blank project name', (t) => {
   assert.equal(res3.code, 'PROJECT_NOT_FOUND');
 });
 
-test('scanProjectImages: discovers raster images and ignores SVGs and non-images', (t) => {
-  const { repoRoot } = createFixture(t);
+test('stageProjectAvatar and resolveProjectAvatar: format validation, size bounds, and reparse point rejection', (t) => {
+  const { container, avatarStorageRoot } = createFixture(t);
+  const projectId = 'project_0123456789abcdef01234567';
 
-  mkdirSync(path.join(repoRoot, 'assets', 'nested'), { recursive: true });
-  mkdirSync(path.join(repoRoot, 'node_modules', 'pkg'), { recursive: true });
-  mkdirSync(path.join(repoRoot, '.git', 'hooks'), { recursive: true });
+  // 1. Supported image formats
+  const formats = [
+    { ext: '.png', mime: 'image/png' },
+    { ext: '.jpg', mime: 'image/jpeg' },
+    { ext: '.jpeg', mime: 'image/jpeg' },
+    { ext: '.gif', mime: 'image/gif' },
+    { ext: '.webp', mime: 'image/webp' },
+  ];
 
-  // Raster images
-  writeFileSync(path.join(repoRoot, 'logo.png'), 'fake-png-data');
-  writeFileSync(path.join(repoRoot, 'assets', 'banner.jpg'), 'fake-jpg-data');
-  writeFileSync(path.join(repoRoot, 'assets', 'icon.WEBP'), 'fake-webp-data');
-  writeFileSync(path.join(repoRoot, 'assets', 'nested', 'thumb.gif'), 'fake-gif-data');
+  for (const fmt of formats) {
+    const filePath = path.join(container, `sample${fmt.ext}`);
+    writeFileSync(filePath, Buffer.from(`DATA_FOR_${fmt.ext}`));
+    const staged = stageProjectAvatar({
+      sourcePath: filePath,
+      storageRoot: avatarStorageRoot,
+      projectId,
+    });
+    assert.equal(staged.mimeType, fmt.mime);
+    assert.ok(staged.avatarPath.endsWith(fmt.ext.toLowerCase()));
 
-  // Should be ignored
-  writeFileSync(path.join(repoRoot, 'vector.svg'), '<svg></svg>');
-  writeFileSync(path.join(repoRoot, 'readme.txt'), 'text');
-  writeFileSync(path.join(repoRoot, 'node_modules', 'pkg', 'ignored.png'), 'ignored');
-  writeFileSync(path.join(repoRoot, '.git', 'hooks', 'ignored.png'), 'ignored');
+    const resolved = resolveProjectAvatar({
+      storageRoot: avatarStorageRoot,
+      projectId,
+      avatarPath: staged.avatarPath,
+    });
+    assert.equal(resolved.mimeType, fmt.mime);
+    assert.equal(resolved.avatarPath, staged.avatarPath);
+  }
 
-  const images = scanProjectImages(repoRoot);
-  const relativePaths = images.map((img) => img.relativePath.replace(/\\/g, '/')).sort();
-
-  assert.deepEqual(relativePaths, [
-    'assets/banner.jpg',
-    'assets/icon.WEBP',
-    'assets/nested/thumb.gif',
-    'logo.png',
-  ]);
-
-  // Check bounds
-  const limited = scanProjectImages(repoRoot, { maxCount: 2 });
-  assert.equal(limited.length, 2);
-
-  const depthLimited = scanProjectImages(repoRoot, { maxDepth: 0 });
-  assert.deepEqual(depthLimited.map((img) => img.relativePath.replace(/\\/g, '/')), ['logo.png']);
-});
-
-test('resolveProjectImage: validates paths, rejects SVG, traversal, missing, oversize', (t) => {
-  const { repoRoot } = createFixture(t);
-
-  mkdirSync(path.join(repoRoot, 'img'), { recursive: true });
-  writeFileSync(path.join(repoRoot, 'img', 'valid.png'), Buffer.from('PNGDATA'));
-  writeFileSync(path.join(repoRoot, 'img', 'vector.svg'), '<svg></svg>');
-
-  // Valid
-  const resolved = resolveProjectImage(repoRoot, 'img/valid.png');
-  assert.equal(resolved.mimeType, 'image/png');
-  assert.ok(resolved.size > 0);
-
-  // SVG rejected with INVALID_IMAGE_TYPE
+  // 2. Reject SVG with INVALID_IMAGE_TYPE
+  const svgPath = path.join(container, 'vector.svg');
+  writeFileSync(svgPath, '<svg></svg>');
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'img/vector.svg'),
+    () => stageProjectAvatar({ sourcePath: svgPath, storageRoot: avatarStorageRoot, projectId }),
     (err) => err.code === 'INVALID_IMAGE_TYPE'
   );
 
-  // Non-image rejected
-  writeFileSync(path.join(repoRoot, 'script.js'), 'console.log()');
+  // 3. Reject non-image with INVALID_IMAGE_TYPE
+  const scriptPath = path.join(container, 'script.js');
+  writeFileSync(scriptPath, 'console.log()');
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'script.js'),
+    () => stageProjectAvatar({ sourcePath: scriptPath, storageRoot: avatarStorageRoot, projectId }),
     (err) => err.code === 'INVALID_IMAGE_TYPE'
   );
 
-  // Traversal rejected
+  // 4. Reject empty file with INVALID_IMAGE_PATH
+  const emptyPath = path.join(container, 'empty.png');
+  writeFileSync(emptyPath, Buffer.alloc(0));
   assert.throws(
-    () => resolveProjectImage(repoRoot, '../outside.png'),
+    () => stageProjectAvatar({ sourcePath: emptyPath, storageRoot: avatarStorageRoot, projectId }),
     (err) => err.code === 'INVALID_IMAGE_PATH'
   );
 
-  // Missing file
+  // 5. Reject oversize file with IMAGE_TOO_LARGE
+  const hugePath = path.join(container, 'huge.png');
+  writeFileSync(hugePath, Buffer.alloc(MAX_AVATAR_FILE_SIZE + 1));
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'img/nonexistent.png'),
-    (err) => err.code === 'IMAGE_NOT_FOUND'
-  );
-
-  // Oversize rejected
-  writeFileSync(path.join(repoRoot, 'img', 'oversize.png'), Buffer.alloc(5 * 1024 * 1024 + 1));
-  assert.throws(
-    () => resolveProjectImage(repoRoot, 'img/oversize.png'),
+    () => stageProjectAvatar({ sourcePath: hugePath, storageRoot: avatarStorageRoot, projectId }),
     (err) => err.code === 'IMAGE_TOO_LARGE'
   );
 
-  // Empty file rejected
-  writeFileSync(path.join(repoRoot, 'img', 'empty.png'), Buffer.alloc(0));
+  // 6. Reject symlink source with REPARSE_POINT
+  const validPath = path.join(container, 'sample.png');
+  const symlinkPath = path.join(container, 'symlink.png');
+  symlinkSync(validPath, symlinkPath, 'file');
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'img/empty.png'),
+    () => stageProjectAvatar({ sourcePath: symlinkPath, storageRoot: avatarStorageRoot, projectId }),
+    (err) => err.code === 'REPARSE_POINT'
+  );
+
+  // 7. Direct resolveProjectAvatar checks:
+  // Cross-project avatarPath rejected
+  assert.throws(
+    () => resolveProjectAvatar({
+      storageRoot: avatarStorageRoot,
+      projectId,
+      avatarPath: 'project_other0123456789abcdef/1111111111111111111111111111111111111111111111111111111111111111.png',
+    }),
     (err) => err.code === 'INVALID_IMAGE_PATH'
   );
 
-  // Symlink rejected
-  symlinkSync(path.join(repoRoot, 'img', 'valid.png'), path.join(repoRoot, 'img', 'linked.png'), 'file');
+  // Traversal path rejected
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'img/linked.png'),
+    () => resolveProjectAvatar({
+      storageRoot: avatarStorageRoot,
+      projectId,
+      avatarPath: '../../outside.png',
+    }),
     (err) => err.code === 'INVALID_IMAGE_PATH'
+  );
+
+  // Missing file rejected
+  assert.throws(
+    () => resolveProjectAvatar({
+      storageRoot: avatarStorageRoot,
+      projectId,
+      avatarPath: `${projectId}/0000000000000000000000000000000000000000000000000000000000000000.png`,
+    }),
+    (err) => err.code === 'IMAGE_NOT_FOUND'
   );
 });
 
-test('HTTP API: /api/v1/projects/:id/images and /avatar endpoints and edit endpoint', async (t) => {
-  const { repoRoot, dbPath, db, cleanup } = createFixture(t, { registerHook: false });
+test('HTTP API: avatar select, cancel, preview, save, cross-project key rejection, and surviving source image deletion', async (t) => {
+  const { container, repoRoot, dbPath, avatarStorageRoot, db, cleanup } = createFixture(t, { registerHook: false });
 
-  mkdirSync(path.join(repoRoot, 'public'), { recursive: true });
-  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  writeFileSync(path.join(repoRoot, 'public', 'avatar.png'), pngHeader);
+  // Create an external image outside the repo
+  const sourceImage = path.join(container, 'user-choice.png');
+  const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
+  writeFileSync(sourceImage, pngHeader);
 
   const reg = registerProject(db, {
     commandId: 'reg-http-p1',
     name: 'HTTP测试项目',
     observation: sampleObservation(repoRoot),
   });
+
+  const repoRoot2 = path.join(container, 'repository2');
+  mkdirSync(repoRoot2, { recursive: true });
+  writeFileSync(path.join(repoRoot2, 'README.md'), '# Fixture 2\n', 'utf8');
+
+  const reg2 = registerProject(db, {
+    commandId: 'reg-http-p2',
+    name: '第二项目',
+    observation: {
+      ...sampleObservation(repoRoot2),
+      canonicalPath: repoRoot2,
+      worktreeIdentity: 'worktree-p2',
+    },
+  });
+  assert.equal(reg2.ok, true);
   db.close();
+
+  let nextPickerResult = sourceImage;
+  let pickerCallCount = 0;
+  let throwPickerError = null;
+
+  const mockImagePicker = async () => {
+    pickerCallCount += 1;
+    if (throwPickerError) throw throwPickerError;
+    return nextPickerResult;
+  };
 
   const service = await createCockpitHttpServer({
     dbPath,
     token: TOKEN,
     authorizedRoots: [repoRoot],
+    imagePicker: mockImagePicker,
+    avatarStorageRoot,
   });
   t.after(async () => {
     await service.close();
@@ -294,102 +344,153 @@ test('HTTP API: /api/v1/projects/:id/images and /avatar endpoints and edit endpo
       },
     });
 
-  // 1. Scan images
+  // 1. Verify old scanning route /images returns 404 NOT_FOUND
   const scanRes = await req(`/api/v1/projects/${reg.projectId}/images`);
-  assert.equal(scanRes.status, 200);
-  const scanBody = await scanRes.json();
-  assert.equal(scanBody.images.length, 1);
-  assert.equal(scanBody.images[0].relativePath.replace(/\\/g, '/'), 'public/avatar.png');
+  assert.equal(scanRes.status, 404);
 
   // 2. Avatar not set yet -> 404
   const noAvatarRes = await req(`/api/v1/projects/${reg.projectId}/avatar`);
   assert.equal(noAvatarRes.status, 404);
 
-  // 3. Preview candidate avatar using ?path=
-  const previewRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=public/avatar.png`);
+  // 3. User cancels selection in picker -> returns cancelled: true, DB remains unchanged
+  nextPickerResult = null;
+  const cancelSelectRes = await req(`/api/v1/projects/${reg.projectId}/avatar/select`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(cancelSelectRes.status, 200);
+  const cancelBody = await cancelSelectRes.json();
+  assert.equal(cancelBody.ok, true);
+  assert.equal(cancelBody.cancelled, true);
+
+  // Confirm DB avatar remains unset
+  const detailAfterCancel = await req(`/api/v1/projects/${reg.projectId}`);
+  assert.equal((await detailAfterCancel.json()).project.avatarPath, null);
+
+  // 4. Image picker timeout -> 504 with 3-part public error
+  throwPickerError = Object.assign(new Error('timed out'), { code: 'IMAGE_PICKER_TIMEOUT' });
+  const timeoutRes = await req(`/api/v1/projects/${reg.projectId}/avatar/select`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(timeoutRes.status, 504);
+  const timeoutBody = await timeoutRes.json();
+  assert.equal(timeoutBody.code, 'IMAGE_PICKER_TIMEOUT');
+  assert.ok(timeoutBody.message);
+  assert.ok(timeoutBody.impact);
+  assert.ok(timeoutBody.required_action);
+  throwPickerError = null;
+
+  // 5. Image picker unavailable -> 503 with 3-part public error
+  throwPickerError = Object.assign(new Error('picker failed'), { code: 'IMAGE_PICKER_UNAVAILABLE' });
+  const unavailRes = await req(`/api/v1/projects/${reg.projectId}/avatar/select`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(unavailRes.status, 503);
+  const unavailBody = await unavailRes.json();
+  assert.equal(unavailBody.code, 'IMAGE_PICKER_UNAVAILABLE');
+  assert.ok(unavailBody.message);
+  assert.ok(unavailBody.impact);
+  assert.ok(unavailBody.required_action);
+  throwPickerError = null;
+
+  // 6. Successful avatar selection -> stages into Cockpit storage directory
+  nextPickerResult = sourceImage;
+  const selectRes = await req(`/api/v1/projects/${reg.projectId}/avatar/select`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.equal(selectRes.status, 200);
+  const selectBody = await selectRes.json();
+  assert.equal(selectBody.ok, true);
+  assert.equal(selectBody.cancelled, false);
+  assert.ok(selectBody.avatarPath.startsWith(`${reg.projectId}/`));
+  assert.equal(selectBody.mimeType, 'image/png');
+
+  // Verify DB is STILL unchanged before user saves!
+  const detailBeforeSave = await req(`/api/v1/projects/${reg.projectId}`);
+  assert.equal((await detailBeforeSave.json()).project.avatarPath, null);
+
+  // 7. Preview staged candidate avatar using ?path=
+  const previewRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=${encodeURIComponent(selectBody.avatarPath)}`);
   assert.equal(previewRes.status, 200);
   assert.equal(previewRes.headers.get('content-type'), 'image/png');
   assert.equal(previewRes.headers.get('x-content-type-options'), 'nosniff');
-  const buf = Buffer.from(await previewRes.arrayBuffer());
-  assert.deepEqual(buf, pngHeader);
+  const previewBuf = Buffer.from(await previewRes.arrayBuffer());
+  assert.deepEqual(previewBuf, pngHeader);
 
-  // 4. Update project name and avatarPath via POST
-  const editRes = await req(`/api/v1/projects/${reg.projectId}`, {
+  // 8. Delete original image file on user's disk!
+  rmSync(sourceImage, { force: true });
+  assert.equal(existsSync(sourceImage), false);
+
+  // 9. Save project settings via POST -> persists avatar to database
+  const saveRes = await req(`/api/v1/projects/${reg.projectId}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      commandId: 'cmd-edit-http-1',
-      name: '更新后的名称',
-      avatarPath: 'public/avatar.png',
+      commandId: 'cmd-save-project-1',
+      name: '保存后的名称',
+      avatarPath: selectBody.avatarPath,
     }),
   });
-  assert.equal(editRes.status, 200);
-  const editBody = await editRes.json();
-  assert.equal(editBody.project.name, '更新后的名称');
-  assert.equal(editBody.project.avatarPath, 'public/avatar.png');
+  assert.equal(saveRes.status, 200);
+  const saveBody = await saveRes.json();
+  assert.equal(saveBody.project.name, '保存后的名称');
+  assert.equal(saveBody.project.avatarPath, selectBody.avatarPath);
 
-  // 5. Fetch avatar now returns the saved avatar
-  const avatarRes = await req(`/api/v1/projects/${reg.projectId}/avatar`);
-  assert.equal(avatarRes.status, 200);
-  assert.equal(avatarRes.headers.get('content-type'), 'image/png');
+  // 10. Fetch saved avatar without ?path= -> returns the avatar even though original source was deleted!
+  const savedAvatarRes = await req(`/api/v1/projects/${reg.projectId}/avatar`);
+  assert.equal(savedAvatarRes.status, 200);
+  assert.equal(savedAvatarRes.headers.get('content-type'), 'image/png');
+  const savedBuf = Buffer.from(await savedAvatarRes.arrayBuffer());
+  assert.deepEqual(savedBuf, pngHeader);
 
-  // 6. Test HEAD request for avatar
+  // 11. Test HEAD request for saved avatar
   const headRes = await req(`/api/v1/projects/${reg.projectId}/avatar`, { method: 'HEAD' });
   assert.equal(headRes.status, 200);
   assert.equal(headRes.headers.get('content-type'), 'image/png');
   assert.equal(headRes.headers.get('content-length'), String(pngHeader.length));
 
-  // 7. Error cases: empty name
-  const emptyNameRes = await req(`/api/v1/projects/${reg.projectId}`, {
+  // 12. Cross-project key rejection: reg2 cannot use reg's avatarPath
+  const crossProjectRes = await req(`/api/v1/projects/${reg2.projectId}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      commandId: 'cmd-edit-err-1',
-      name: '',
+      commandId: 'cmd-cross-project-err',
+      name: '尝试越权的项目',
+      avatarPath: selectBody.avatarPath, // belongs to reg, not reg2!
     }),
   });
-  assert.equal(emptyNameRes.status, 400);
-  const emptyNameBody = await emptyNameRes.json();
-  assert.equal(emptyNameBody.code, 'PROJECT_NAME_REQUIRED');
+  assert.equal(crossProjectRes.status, 400);
+  const crossBody = await crossProjectRes.json();
+  assert.equal(crossBody.code, 'INVALID_IMAGE_PATH');
 
-  // 8. Error cases: SVG preview
-  writeFileSync(path.join(repoRoot, 'icon.svg'), '<svg></svg>');
-  const svgRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=icon.svg`);
-  assert.equal(svgRes.status, 415);
-  const svgBody = await svgRes.json();
-  assert.equal(svgBody.code, 'INVALID_IMAGE_TYPE');
-
-  // 9. Error cases: invalid path traversal
+  // 13. Path traversal rejection
   const traversalRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=../../etc/passwd.png`);
   assert.equal(traversalRes.status, 400);
   const traversalBody = await traversalRes.json();
   assert.equal(traversalBody.code, 'INVALID_IMAGE_PATH');
-  assert.ok(traversalBody.message);
-  assert.ok(traversalBody.impact);
-  assert.ok(traversalBody.required_action);
 
-  // 10. Error cases: oversize image (413)
-  writeFileSync(path.join(repoRoot, 'public', 'huge.png'), Buffer.alloc(5 * 1024 * 1024 + 1));
-  const hugeRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=public/huge.png`);
-  assert.equal(hugeRes.status, 413);
-  const hugeBody = await hugeRes.json();
-  assert.equal(hugeBody.code, 'IMAGE_TOO_LARGE');
-  assert.ok(hugeBody.message);
-  assert.ok(hugeBody.impact);
-  assert.ok(hugeBody.required_action);
+  // 14. Clear avatar
+  const clearRes = await req(`/api/v1/projects/${reg.projectId}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      commandId: 'cmd-clear-avatar-1',
+      name: '保存后的名称',
+      avatarPath: '',
+    }),
+  });
+  assert.equal(clearRes.status, 200);
+  assert.equal((await clearRes.json()).project.avatarPath, null);
 
-  // 11. Error cases: symlink image (400)
-  symlinkSync(path.join(repoRoot, 'public', 'avatar.png'), path.join(repoRoot, 'public', 'symlink-avatar.png'), 'file');
-  const symlinkRes = await req(`/api/v1/projects/${reg.projectId}/avatar?path=public/symlink-avatar.png`);
-  assert.equal(symlinkRes.status, 400);
-  const symlinkBody = await symlinkRes.json();
-  assert.equal(symlinkBody.code, 'INVALID_IMAGE_PATH');
-  assert.ok(symlinkBody.message);
-  assert.ok(symlinkBody.impact);
-  assert.ok(symlinkBody.required_action);
+  // Avatar endpoint now returns 404
+  const clearedAvatarRes = await req(`/api/v1/projects/${reg.projectId}/avatar`);
+  assert.equal(clearedAvatarRes.status, 404);
 });
 
-test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal prevent backdrop click dismissal', () => {
+test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal prevent backdrop click dismissal and contain no scan UI', () => {
   const mainJsxPath = path.resolve('web/src/main.jsx');
   const mainJsx = readFileSync(mainJsxPath, 'utf8');
 
@@ -397,7 +498,6 @@ test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal preven
   assert.match(mainJsx, /const ConfirmFolderModal = ConfirmAddModal;|export (const|function) ConfirmFolderModal/);
 
   // Verify ConfirmAddModal, HandoffModal, and EditProjectModal do not have onClick on modal-backdrop
-  // Match modal-backdrop divs and ensure none of them have onClick
   const backdropMatches = [...mainJsx.matchAll(/<div[^>]*className=["'][^"']*modal-backdrop[^"']*["'][^>]*>/g)];
   assert.ok(backdropMatches.length >= 3, `Expected at least 3 modal-backdrop instances, found ${backdropMatches.length}`);
   for (const match of backdropMatches) {
@@ -406,25 +506,33 @@ test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal preven
 
   // Verify useFocusTrap ignores Escape when busy
   assert.match(mainJsx, /if \(busyRef\.current\) return;/);
+
+  // Verify scanning UI and copy are removed from EditProjectModal
+  assert.doesNotMatch(mainJsx, /检索项目内图片/);
+  assert.doesNotMatch(mainJsx, /candidate-images/);
+  assert.doesNotMatch(mainJsx, /从已授权项目目录检索图片/);
+
+  // Verify clear "选择图片" button is present
+  assert.match(mainJsx, /选择图片/);
+  assert.match(mainJsx, /\/avatar\/select/);
 });
 
-test('Fail-closed: replacing authorizedRoot or ancestor with junction/symlink blocks scanning, preview, and saved avatar', async (t) => {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-junction-'));
+test('Fail-closed: replacing avatarStorageRoot or ancestor with junction/symlink blocks staging and avatar access', async (t) => {
+  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-avatar-junc-'));
   const targetOutside = path.join(container, 'outside');
   mkdirSync(targetOutside, { recursive: true });
   writeFileSync(path.join(targetOutside, 'secret.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 
-  const parentDir = path.join(container, 'parent');
-  const repoRoot = path.join(parentDir, 'repo');
-  mkdirSync(repoRoot, { recursive: true });
+  const storageDir = path.join(container, 'project-avatars');
+  mkdirSync(storageDir, { recursive: true });
 
+  const repoRoot = path.join(container, 'repo');
+  mkdirSync(repoRoot, { recursive: true });
   const git = (args) => execFileSync('git', args, { cwd: repoRoot, windowsHide: true, stdio: 'pipe' });
   git(['init', '-b', 'main']);
   git(['config', 'user.name', 'UGK Fixture']);
   git(['config', 'user.email', 'fixture@localhost']);
   writeFileSync(path.join(repoRoot, 'README.md'), '# Fixture\n', 'utf8');
-  mkdirSync(path.join(repoRoot, 'img'), { recursive: true });
-  writeFileSync(path.join(repoRoot, 'img', 'valid.png'), Buffer.from('VALID_PNG'));
   git(['add', '.']);
   git(['commit', '-m', 'initial']);
 
@@ -435,12 +543,21 @@ test('Fail-closed: replacing authorizedRoot or ancestor with junction/symlink bl
     name: 'Junction Test',
     observation: sampleObservation(repoRoot),
   });
-  // Save avatar initially
+
+  // Stage avatar normally first
+  const validFile = path.join(container, 'valid.png');
+  writeFileSync(validFile, Buffer.from('VALID_PNG_CONTENT'));
+  const staged = stageProjectAvatar({
+    sourcePath: validFile,
+    storageRoot: storageDir,
+    projectId: reg.projectId,
+  });
+
   const setAvatar = updateProject(db, {
     commandId: 'cmd-set-avatar',
     projectId: reg.projectId,
-    avatarPath: 'img/valid.png',
-  });
+    avatarPath: staged.avatarPath,
+  }, { avatarStorageRoot: storageDir });
   assert.equal(setAvatar.ok, true);
   db.close();
 
@@ -448,6 +565,7 @@ test('Fail-closed: replacing authorizedRoot or ancestor with junction/symlink bl
     dbPath,
     token: TOKEN,
     authorizedRoots: [repoRoot],
+    avatarStorageRoot: storageDir,
   });
   t.after(async () => {
     await service.close();
@@ -467,135 +585,47 @@ test('Fail-closed: replacing authorizedRoot or ancestor with junction/symlink bl
       },
     });
 
-  // Verify normal access works first
-  const initialScan = await req(`/api/v1/projects/${reg.projectId}/images`);
-  assert.equal(initialScan.status, 200);
-  const initialScanBody = await initialScan.json();
-  assert.equal(initialScanBody.images.length, 1);
-  assert.equal(initialScanBody.images[0].relativePath, 'img/valid.png');
-
+  // Normal access works
   const initialAvatar = await req(`/api/v1/projects/${reg.projectId}/avatar`);
   assert.equal(initialAvatar.status, 200);
 
-  // Now replace repoRoot with a junction pointing to outside
-  rmSync(repoRoot, { recursive: true, force: true });
+  // Now replace storageDir with a junction pointing outside
+  rmSync(storageDir, { recursive: true, force: true });
   const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-  symlinkSync(targetOutside, repoRoot, linkType);
+  symlinkSync(targetOutside, storageDir, linkType);
 
-  // 1. Direct scanProjectImages throws REPARSE_POINT
+  // 1. Direct resolveProjectAvatar throws REPARSE_POINT
   assert.throws(
-    () => scanProjectImages(repoRoot),
+    () => resolveProjectAvatar({
+      storageRoot: storageDir,
+      projectId: reg.projectId,
+      avatarPath: staged.avatarPath,
+    }),
     (err) => err.code === 'REPARSE_POINT'
   );
 
-  // 2. Direct resolveProjectImage throws REPARSE_POINT
+  // 2. Direct stageProjectAvatar throws REPARSE_POINT
   assert.throws(
-    () => resolveProjectImage(repoRoot, 'secret.png'),
+    () => stageProjectAvatar({
+      sourcePath: validFile,
+      storageRoot: storageDir,
+      projectId: reg.projectId,
+    }),
     (err) => err.code === 'REPARSE_POINT'
   );
 
-  // 3. HTTP scan fails closed (400 REPARSE_POINT), never returns external directory content
-  const scanBlocked = await req(`/api/v1/projects/${reg.projectId}/images`);
-  assert.equal(scanBlocked.status, 400);
-  const scanBlockedBody = await scanBlocked.json();
-  assert.equal(scanBlockedBody.code, 'REPARSE_POINT');
-  assert.ok(!scanBlockedBody.images);
-
-  // 4. HTTP preview fails closed (400 REPARSE_POINT), never returns external directory content
-  const previewBlocked = await req(`/api/v1/projects/${reg.projectId}/avatar?path=secret.png`);
-  assert.equal(previewBlocked.status, 400);
-  const previewBlockedBody = await previewBlocked.json();
-  assert.equal(previewBlockedBody.code, 'REPARSE_POINT');
-
-  // 5. HTTP reading saved avatar fails closed (400 REPARSE_POINT)
+  // 3. HTTP reading saved avatar fails closed (400 REPARSE_POINT)
   const savedAvatarBlocked = await req(`/api/v1/projects/${reg.projectId}/avatar`);
   assert.equal(savedAvatarBlocked.status, 400);
   const savedAvatarBlockedBody = await savedAvatarBlocked.json();
   assert.equal(savedAvatarBlockedBody.code, 'REPARSE_POINT');
-
-  // 6. Test ancestor directory replaced with junction
-  // Remove junction at repoRoot
-  rmSync(repoRoot, { recursive: true, force: true });
-  // Now replace parentDir with a junction pointing to outside
-  rmSync(parentDir, { recursive: true, force: true });
-  symlinkSync(targetOutside, parentDir, linkType);
-  // repoRoot is now parentDir/repo, which passes through a junction ancestor!
-  assert.throws(
-    () => scanProjectImages(repoRoot),
-    (err) => err.code === 'REPARSE_POINT'
-  );
-  const ancestorScanBlocked = await req(`/api/v1/projects/${reg.projectId}/images`);
-  assert.equal(ancestorScanBlocked.status, 400);
-  assert.equal((await ancestorScanBlocked.json()).code, 'REPARSE_POINT');
-});
-
-test('scanProjectImages: enforces mandatory resource limits (maxEntries, maxDirectories, deadline)', async (t) => {
-  const { repoRoot, dbPath, db, cleanup } = createFixture(t, { registerHook: false });
-
-  // Create 30 directories with text files (no images)
-  for (let i = 0; i < 30; i += 1) {
-    const dir = path.join(repoRoot, `dir_${i}`);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path.join(dir, `file_${i}.txt`), 'not an image');
-  }
-
-  // 1. maxDirectories limit reached even with 0 images
-  const dirLimitResult = scanProjectImages(repoRoot, { maxDirectories: 5 });
-  assert.equal(dirLimitResult.length, 0);
-  assert.equal(dirLimitResult.truncated, true);
-  assert.equal(dirLimitResult.limitReached, 'maxDirectories');
-  assert.ok(dirLimitResult.totalDirectories <= 6);
-
-  // 2. maxEntries limit reached even with 0 images
-  const entryLimitResult = scanProjectImages(repoRoot, { maxEntries: 10 });
-  assert.equal(entryLimitResult.length, 0);
-  assert.equal(entryLimitResult.truncated, true);
-  assert.equal(entryLimitResult.limitReached, 'maxEntries');
-
-  // 3. deadline limit reached
-  const deadlineResult = scanProjectImages(repoRoot, { deadline: Date.now() - 1 });
-  assert.equal(deadlineResult.length, 0);
-  assert.equal(deadlineResult.truncated, true);
-  assert.equal(deadlineResult.limitReached, 'deadline');
-
-  // 4. API returns observable truncated and limitReached info
-  const reg = registerProject(db, {
-    commandId: 'reg-bounds-test',
-    name: 'Bounds Test',
-    observation: sampleObservation(repoRoot),
-  });
-  db.close();
-
-  const service = await createCockpitHttpServer({
-    dbPath,
-    token: TOKEN,
-    authorizedRoots: [repoRoot],
-  });
-  t.after(async () => {
-    await service.close();
-    cleanup();
-  });
-
-  const req = (pathname) =>
-    fetch(`http://${service.host}:${service.port}${pathname}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
-    });
-
-  const scanRes = await req(`/api/v1/projects/${reg.projectId}/images`);
-  assert.equal(scanRes.status, 200);
-  const scanBody = await scanRes.json();
-  assert.equal(scanBody.ok, true);
-  assert.ok(Array.isArray(scanBody.images));
-  assert.equal(typeof scanBody.truncated, 'boolean');
-  assert.ok('limitReached' in scanBody);
 });
 
 test('updateProject: strict terminal replay returns cached result before filesystem revalidation, surviving avatar deletion', async (t) => {
-  const { repoRoot, dbPath, db, cleanup } = createFixture(t, { registerHook: false });
+  const { container, repoRoot, dbPath, avatarStorageRoot, db, cleanup } = createFixture(t, { registerHook: false });
 
-  mkdirSync(path.join(repoRoot, 'assets'), { recursive: true });
-  const avatarFile = path.join(repoRoot, 'assets', 'deletable-avatar.png');
-  writeFileSync(avatarFile, Buffer.from('AVATAR_DATA'));
+  const avatarFile = path.join(container, 'deletable-avatar.png');
+  writeFileSync(avatarFile, Buffer.from('AVATAR_DATA_CONTENT'));
 
   const reg = registerProject(db, {
     commandId: 'reg-replay-p1',
@@ -603,29 +633,36 @@ test('updateProject: strict terminal replay returns cached result before filesys
     observation: sampleObservation(repoRoot),
   });
 
+  const staged = stageProjectAvatar({
+    sourcePath: avatarFile,
+    storageRoot: avatarStorageRoot,
+    projectId: reg.projectId,
+  });
+
   // 1. Initial successful update with avatar
   const updateRes = updateProject(db, {
     commandId: 'cmd-avatar-update-1',
     projectId: reg.projectId,
     name: 'Updated Name',
-    avatarPath: 'assets/deletable-avatar.png',
-  });
+    avatarPath: staged.avatarPath,
+  }, { avatarStorageRoot });
   assert.equal(updateRes.ok, true);
-  assert.equal(updateRes.avatarPath, 'assets/deletable-avatar.png');
+  assert.equal(updateRes.avatarPath, staged.avatarPath);
 
-  // 2. Delete the avatar file from disk!
-  rmSync(avatarFile, { force: true });
-  assert.equal(existsSync(avatarFile), false);
+  // 2. Delete the staged avatar file from disk!
+  const stagedFileOnDisk = path.join(avatarStorageRoot, staged.avatarPath);
+  rmSync(stagedFileOnDisk, { force: true });
+  assert.equal(existsSync(stagedFileOnDisk), false);
 
   // 3. Terminal replay with same commandId and same request MUST succeed before any disk check
   const replayRes = updateProject(db, {
     commandId: 'cmd-avatar-update-1',
     projectId: reg.projectId,
     name: 'Updated Name',
-    avatarPath: 'assets/deletable-avatar.png',
-  });
+    avatarPath: staged.avatarPath,
+  }, { avatarStorageRoot });
   assert.equal(replayRes.ok, true);
-  assert.equal(replayRes.avatarPath, 'assets/deletable-avatar.png');
+  assert.equal(replayRes.avatarPath, staged.avatarPath);
   assert.equal(replayRes.commandId, 'cmd-avatar-update-1');
 
   // 4. Conflict fails closed: same commandId with different request
@@ -634,8 +671,8 @@ test('updateProject: strict terminal replay returns cached result before filesys
       commandId: 'cmd-avatar-update-1',
       projectId: reg.projectId,
       name: 'Conflict Name',
-      avatarPath: 'assets/deletable-avatar.png',
-    }),
+      avatarPath: staged.avatarPath,
+    }, { avatarStorageRoot }),
     (err) => err.code === 'COMMAND_CONFLICT'
   );
 
@@ -644,8 +681,8 @@ test('updateProject: strict terminal replay returns cached result before filesys
     commandId: 'cmd-avatar-fail-1',
     projectId: reg.projectId,
     name: 'Valid Name',
-    avatarPath: 'assets/missing-file.png',
-  });
+    avatarPath: `${reg.projectId}/0000000000000000000000000000000000000000000000000000000000000000.png`,
+  }, { avatarStorageRoot });
   assert.equal(failRes.ok, false);
   assert.equal(failRes.code, 'IMAGE_NOT_FOUND');
 
@@ -654,21 +691,27 @@ test('updateProject: strict terminal replay returns cached result before filesys
     commandId: 'cmd-avatar-fail-1',
     projectId: reg.projectId,
     name: 'Valid Name',
-    avatarPath: 'assets/missing-file.png',
-  });
+    avatarPath: `${reg.projectId}/0000000000000000000000000000000000000000000000000000000000000000.png`,
+  }, { avatarStorageRoot });
   assert.equal(failReplay.ok, false);
   assert.equal(failReplay.code, 'IMAGE_NOT_FOUND');
 
   // 6. Test via HTTP API
   // Re-create a temporary avatar file
-  const httpAvatar = path.join(repoRoot, 'assets', 'http-avatar.png');
-  writeFileSync(httpAvatar, Buffer.from('HTTP_AVATAR'));
+  const httpAvatar = path.join(container, 'http-avatar.png');
+  writeFileSync(httpAvatar, Buffer.from('HTTP_AVATAR_CONTENT'));
+  const httpStaged = stageProjectAvatar({
+    sourcePath: httpAvatar,
+    storageRoot: avatarStorageRoot,
+    projectId: reg.projectId,
+  });
 
   db.close();
   const service = await createCockpitHttpServer({
     dbPath,
     token: TOKEN,
     authorizedRoots: [repoRoot],
+    avatarStorageRoot,
   });
   t.after(async () => {
     await service.close();
@@ -690,13 +733,14 @@ test('updateProject: strict terminal replay returns cached result before filesys
     body: JSON.stringify({
       commandId: 'cmd-http-replay-1',
       name: 'HTTP Project Name',
-      avatarPath: 'assets/http-avatar.png',
+      avatarPath: httpStaged.avatarPath,
     }),
   });
   assert.equal(httpUpdate.status, 200);
 
   // Delete the avatar file on disk
-  rmSync(httpAvatar, { force: true });
+  const httpFileOnDisk = path.join(avatarStorageRoot, httpStaged.avatarPath);
+  rmSync(httpFileOnDisk, { force: true });
 
   // Replay HTTP request with same commandId
   const httpReplay = await req(`/api/v1/projects/${reg.projectId}`, {
@@ -705,13 +749,13 @@ test('updateProject: strict terminal replay returns cached result before filesys
     body: JSON.stringify({
       commandId: 'cmd-http-replay-1',
       name: 'HTTP Project Name',
-      avatarPath: 'assets/http-avatar.png',
+      avatarPath: httpStaged.avatarPath,
     }),
   });
   assert.equal(httpReplay.status, 200);
   const httpReplayBody = await httpReplay.json();
   assert.equal(httpReplayBody.ok, true);
-  assert.equal(httpReplayBody.avatarPath, 'assets/http-avatar.png');
+  assert.equal(httpReplayBody.avatarPath, httpStaged.avatarPath);
 
   // HTTP conflict returns 409 COMMAND_CONFLICT
   const httpConflict = await req(`/api/v1/projects/${reg.projectId}`, {
@@ -720,87 +764,10 @@ test('updateProject: strict terminal replay returns cached result before filesys
     body: JSON.stringify({
       commandId: 'cmd-http-replay-1',
       name: 'Conflicting Name',
-      avatarPath: 'assets/http-avatar.png',
+      avatarPath: httpStaged.avatarPath,
     }),
   });
   assert.equal(httpConflict.status, 409);
   const httpConflictBody = await httpConflict.json();
   assert.equal(httpConflictBody.code, 'COMMAND_CONFLICT');
 });
-
-test('scanProjectImages: single large directory stops entry-by-entry on maxEntries and deadline without reading whole directory', (t) => {
-  const { repoRoot } = createFixture(t);
-  const largeDir = path.join(repoRoot, 'large_single_dir');
-  mkdirSync(largeDir, { recursive: true });
-
-  // Create 60 files in this single directory (30 images, 30 non-images)
-  for (let i = 0; i < 60; i += 1) {
-    const filename = i % 2 === 0 ? `avatar_${String(i).padStart(3, '0')}.png` : `notes_${String(i).padStart(3, '0')}.txt`;
-    writeFileSync(path.join(largeDir, filename), 'file-content');
-  }
-
-  // 1. maxEntries budget stops incrementally inside a single directory
-  const entryLimited = scanProjectImages(largeDir, { maxEntries: 10 });
-  assert.equal(entryLimited.totalEntries, 10);
-  assert.equal(entryLimited.truncated, true);
-  assert.equal(entryLimited.limitReached, 'maxEntries');
-  assert.ok(entryLimited.images.length > 0 && entryLimited.images.length <= 10);
-
-  // 2. deadline budget stops incrementally inside a single directory
-  const originalDateNow = Date.now;
-  try {
-    let nowCalls = 0;
-    Date.now = () => {
-      nowCalls += 1;
-      return nowCalls >= 5 ? 10000 : 1000;
-    };
-    const deadlineLimited = scanProjectImages(largeDir, { deadline: 5000 });
-    assert.equal(deadlineLimited.truncated, true);
-    assert.equal(deadlineLimited.limitReached, 'deadline');
-    assert.ok(deadlineLimited.totalEntries < 60, `Expected totalEntries < 60, got ${deadlineLimited.totalEntries}`);
-  } finally {
-    Date.now = originalDateNow;
-  }
-
-  // 3. Expired deadline stops before reading any entry from single directory
-  const preExpired = scanProjectImages(largeDir, { deadline: Date.now() - 1 });
-  assert.equal(preExpired.truncated, true);
-  assert.equal(preExpired.limitReached, 'deadline');
-  assert.equal(preExpired.totalEntries, 0);
-
-  // 4. Directory handle is reliably closed: deletion succeeds immediately on Windows without handle locks
-  rmSync(largeDir, { recursive: true, force: true });
-  assert.equal(existsSync(largeDir), false);
-});
-
-test('scanProjectImages: directory handles are reliably closed on normal, limitReached, and error paths', (t) => {
-  const { repoRoot } = createFixture(t);
-  const testDir = path.join(repoRoot, 'handle_test_dir');
-  mkdirSync(testDir, { recursive: true });
-
-  for (let i = 0; i < 20; i += 1) {
-    writeFileSync(path.join(testDir, `img_${i}.png`), 'content');
-  }
-
-  // Path A: normal complete read closes handle
-  const normalRes = scanProjectImages(testDir);
-  assert.equal(normalRes.truncated, false);
-  assert.equal(normalRes.limitReached, null);
-
-  // Path B: maxCount limit reached closes handle
-  const countLimited = scanProjectImages(testDir, { maxCount: 2 });
-  assert.equal(countLimited.length, 2);
-  assert.equal(countLimited.limitReached, 'maxCount');
-
-  // Path C: maxEntries limit reached closes handle
-  const entryLimited = scanProjectImages(testDir, { maxEntries: 3 });
-  assert.equal(entryLimited.totalEntries, 3);
-  assert.equal(entryLimited.limitReached, 'maxEntries');
-
-  // Path D: immediate cleanup succeeds without EBUSY/EPERM Windows file lock
-  rmSync(testDir, { recursive: true, force: true });
-  assert.equal(existsSync(testDir), false);
-});
-
-
-

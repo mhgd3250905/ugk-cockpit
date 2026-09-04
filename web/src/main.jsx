@@ -2796,26 +2796,34 @@ const ConfirmFolderModal = ConfirmAddModal;
 function EditProjectModal({ project, onClose, onSave }) {
   const [name, setName] = useState(project?.name || '');
   const [avatarPath, setAvatarPath] = useState(project?.avatarPath || '');
-  const [candidateImages, setCandidateImages] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
+  const busy = selecting || saving;
   const modalRef = useFocusTrap(Boolean(project), onClose, busy);
 
-  async function handleScan() {
-    setScanning(true);
+  async function handleSelectImage() {
+    setSelecting(true);
     setNotice(null);
     try {
-      const res = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/images`);
-      setCandidateImages(res.images || []);
+      const res = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/avatar/select`, {
+        method: 'POST',
+        body: '{}',
+      });
+      if (res?.cancelled) {
+        return;
+      }
+      if (res?.avatarPath) {
+        setAvatarPath(res.avatarPath);
+      }
     } catch (err) {
       setNotice(createErrorNotice(err, {
-        message: '检索项目图片失败。',
-        impact: '项目代码和已有记录不受影响。',
-        requiredAction: '请确认项目授权目录存在且可访问后重试。',
+        message: '选择项目头像失败。',
+        impact: '项目头像未被修改，代码和已有记录不受影响。',
+        requiredAction: '请确认选择有效的图片文件后重试。',
       }));
     } finally {
-      setScanning(false);
+      setSelecting(false);
     }
   }
 
@@ -2829,7 +2837,7 @@ function EditProjectModal({ project, onClose, onSave }) {
       });
       return;
     }
-    setBusy(true);
+    setSaving(true);
     setNotice(null);
     try {
       await onSave(project.id, {
@@ -2842,7 +2850,7 @@ function EditProjectModal({ project, onClose, onSave }) {
         impact: '项目代码和已有记录不受影响。',
         requiredAction: '请检查输入内容后重试。',
       }));
-      setBusy(false);
+      setSaving(false);
     }
   }
 
@@ -2901,15 +2909,25 @@ function EditProjectModal({ project, onClose, onSave }) {
                     className="project-avatar edit-avatar-preview"
                   />
                   <div className="avatar-preview-info">
+                    <div className="avatar-preview-actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={handleSelectImage}
+                        disabled={busy}
+                      >
+                        {selecting ? '正在选择…' : '选择图片'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => setAvatarPath('')}
+                        disabled={busy}
+                      >
+                        移除头像
+                      </button>
+                    </div>
                     <span className="avatar-preview-path" title={avatarPath}>{avatarPath}</span>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setAvatarPath('')}
-                      disabled={busy}
-                    >
-                      移除头像
-                    </button>
                   </div>
                 </div>
               ) : (
@@ -2917,59 +2935,23 @@ function EditProjectModal({ project, onClose, onSave }) {
                   <div className="project-avatar-fallback edit-avatar-preview" aria-hidden="true">
                     {name ? name.slice(0, 2) : 'UGK'}
                   </div>
-                  <span className="field-hint">未选择头像，使用名称前两字作为默认图标</span>
+                  <div className="avatar-preview-info">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleSelectImage}
+                      disabled={busy}
+                    >
+                      {selecting ? '正在选择…' : '选择图片'}
+                    </button>
+                    <span className="field-hint">未选择头像，使用名称前两字作为默认图标</span>
+                  </div>
                 </div>
               )}
             </div>
-          </div>
-
-          <div className="form-field">
-            <div className="scan-images-header">
-              <label className="field-label">从已授权项目目录检索图片</label>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={handleScan}
-                disabled={busy || scanning}
-              >
-                {scanning ? '正在检索图片…' : '检索项目内图片'}
-              </button>
-            </div>
             <p className="field-hint">
-              检索项目授权目录内的安全位图格式图片（支持 PNG、JPG、JPEG、GIF、WebP；基于安全策略不支持 SVG）。
+              支持 PNG、JPG、JPEG、GIF 或 WebP 图片（上限 5MB）。
             </p>
-
-            {candidateImages !== null && (
-              <div className="candidate-images-wrapper">
-                {candidateImages.length === 0 ? (
-                  <p className="no-images-notice">在项目目录内未找到支持的位图图片文件。</p>
-                ) : (
-                  <div className="candidate-images-grid" role="listbox" aria-label="候选头像">
-                    {candidateImages.map((item) => {
-                      const isSelected = avatarPath === item.path;
-                      return (
-                        <button
-                          type="button"
-                          key={item.path}
-                          className={`candidate-image-card ${isSelected ? 'selected' : ''}`}
-                          onClick={() => setAvatarPath(item.path)}
-                          disabled={busy}
-                          title={`${item.path} (${(item.size / 1024).toFixed(1)} KB)`}
-                        >
-                          <img
-                            src={`/api/v1/projects/${encodeURIComponent(project.id)}/avatar?path=${encodeURIComponent(item.path)}`}
-                            alt={item.name}
-                            className="candidate-image-thumb"
-                          />
-                          <span className="candidate-image-name">{item.name}</span>
-                          {isSelected && <span className="candidate-selected-badge">✓ 已选</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
 
           {notice && <NoticeBanner notice={notice} busy={busy} />}
@@ -2990,7 +2972,7 @@ function EditProjectModal({ project, onClose, onSave }) {
             onClick={handleSave}
             disabled={busy || !name.trim()}
           >
-            {busy ? '正在保存…' : '保存设置'}
+            {saving ? '正在保存…' : '保存设置'}
           </button>
         </div>
       </section>

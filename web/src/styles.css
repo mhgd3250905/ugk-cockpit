@@ -2850,80 +2850,8 @@ summary:focus-visible {
   max-width: 340px;
 }
 
-.scan-images-header {
+.avatar-preview-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
   gap: 8px;
-}
-
-.candidate-images-wrapper {
-  margin-top: 10px;
-  max-height: 220px;
-  overflow-y: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
-  padding: 10px;
-  background: var(--surface-sunken);
-}
-
-.no-images-notice {
-  font-size: 13px;
-  color: var(--ink-muted);
-  text-align: center;
-  margin: 16px 0;
-}
-
-.candidate-images-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: 10px;
-}
-
-.candidate-image-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-control);
-  background: var(--surface-raised);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  text-align: center;
-}
-
-.candidate-image-card:hover {
-  border-color: var(--brand-primary);
-  background: var(--surface-card);
-}
-
-.candidate-image-card.selected {
-  border-color: var(--brand-primary);
-  box-shadow: 0 0 0 2px var(--brand-focus);
-}
-
-.candidate-image-thumb {
-  width: 64px;
-  height: 64px;
-  object-fit: cover;
-  border-radius: 4px;
-  background: var(--surface-sunken);
-}
-
-.candidate-image-name {
-  font-size: 11px;
-  color: var(--ink-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-}
-
-.candidate-selected-badge {
-  font-size: 11px;
-  color: var(--brand-primary);
-  font-weight: 600;
 }

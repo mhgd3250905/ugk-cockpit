@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import {
   beginCommand,
@@ -8,342 +7,10 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
-import { rejectSymbolicPath, PathScopeError } from './path-guard.mjs';
+import { resolveProjectAvatar } from './project-avatars.mjs';
 
 function now() {
   return new Date().toISOString();
-}
-
-function isWithin(root, candidate) {
-  const relative = path.relative(root, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-export const ALLOWED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
-
-export const IMAGE_MIME_TYPES = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-};
-
-export const MAX_AVATAR_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-
-const SKIP_SCAN_DIRS = new Set([
-  '.git',
-  'node_modules',
-  'dist',
-  'build',
-  '.antigravity-help-me',
-  '.playwright-cli',
-]);
-
-export function scanProjectImages(authorizedRoot, options = {}) {
-  const maxDepth = options.maxDepth ?? 5;
-  const maxCount = options.maxCount ?? 100;
-  const maxDirectories = options.maxDirectories ?? 200;
-  const maxEntries = options.maxEntries ?? 5000;
-  const timeoutMs = options.timeoutMs ?? 2000;
-  const deadline = options.deadline ?? (Date.now() + timeoutMs);
-  const maxFileSize = options.maxFileSize ?? MAX_AVATAR_FILE_SIZE;
-
-  let rootReal;
-  try {
-    rejectSymbolicPath(authorizedRoot);
-    rootReal = realpathSync.native(path.resolve(authorizedRoot));
-  } catch (err) {
-    if (err.code === 'REPARSE_POINT' || err instanceof PathScopeError) {
-      const error = new Error('项目授权根目录经过了链接或 junction，已停止访问。');
-      error.code = 'REPARSE_POINT';
-      throw error;
-    }
-    const empty = [];
-    empty.truncated = false;
-    empty.limitReached = null;
-    empty.totalDirectories = 0;
-    empty.totalEntries = 0;
-    empty.images = empty;
-    return empty;
-  }
-
-  const results = [];
-  let totalDirectories = 0;
-  let totalEntries = 0;
-  let truncated = false;
-  let limitReached = null;
-
-  const queue = [{ dirPath: rootReal, depth: 0 }];
-
-  while (queue.length > 0) {
-    if (Date.now() >= deadline) {
-      truncated = true;
-      limitReached = 'deadline';
-      break;
-    }
-    if (totalDirectories >= maxDirectories) {
-      truncated = true;
-      limitReached = 'maxDirectories';
-      break;
-    }
-    if (totalEntries >= maxEntries) {
-      truncated = true;
-      limitReached = 'maxEntries';
-      break;
-    }
-    if (results.length >= maxCount) {
-      truncated = true;
-      limitReached = 'maxCount';
-      break;
-    }
-
-    const { dirPath, depth } = queue.shift();
-    totalDirectories += 1;
-
-    let dir;
-    try {
-      dir = opendirSync(dirPath);
-    } catch {
-      continue;
-    }
-
-    try {
-      while (true) {
-        if (Date.now() >= deadline) {
-          truncated = true;
-          limitReached = 'deadline';
-          break;
-        }
-        if (totalEntries >= maxEntries) {
-          truncated = true;
-          limitReached = 'maxEntries';
-          break;
-        }
-        if (results.length >= maxCount) {
-          limitReached = 'maxCount';
-          let hasMore = queue.length > 0;
-          if (!hasMore) {
-            try {
-              hasMore = dir.readSync() !== null;
-            } catch {
-              // Ignore read error
-            }
-          }
-          truncated = hasMore;
-          break;
-        }
-
-        let entry;
-        try {
-          entry = dir.readSync();
-        } catch {
-          break;
-        }
-
-        if (entry === null) {
-          break;
-        }
-
-        totalEntries += 1;
-
-        if (entry.isSymbolicLink()) {
-          continue;
-        }
-
-        const fullPath = path.join(dirPath, entry.name);
-
-        if (entry.isDirectory()) {
-          if (depth < maxDepth && !SKIP_SCAN_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-            if (totalDirectories + queue.length >= maxDirectories) {
-              truncated = true;
-              if (!limitReached) limitReached = 'maxDirectories';
-            } else {
-              try {
-                const resolved = realpathSync.native(fullPath);
-                if (isWithin(rootReal, resolved)) {
-                  queue.push({ dirPath: resolved, depth: depth + 1 });
-                }
-              } catch {
-                // Ignore unresolvable
-              }
-            }
-          }
-        } else if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (ALLOWED_IMAGE_EXTENSIONS.has(ext)) {
-            try {
-              const realFile = realpathSync.native(fullPath);
-              if (isWithin(rootReal, realFile)) {
-                const stat = statSync(realFile);
-                if (stat.isFile() && stat.size <= maxFileSize && stat.size > 0) {
-                  const relativePath = path.relative(rootReal, realFile).replace(/\\/g, '/');
-                  results.push({
-                    path: relativePath,
-                    relativePath,
-                    name: entry.name,
-                    size: stat.size,
-                    extension: ext.slice(1),
-                    mimeType: IMAGE_MIME_TYPES[ext] || 'application/octet-stream',
-                    updatedAt: stat.mtime.toISOString(),
-                  });
-                  if (results.length >= maxCount) {
-                    limitReached = 'maxCount';
-                    let hasMore = queue.length > 0;
-                    if (!hasMore) {
-                      try {
-                        hasMore = dir.readSync() !== null;
-                      } catch {
-                        // Ignore read error
-                      }
-                    }
-                    truncated = hasMore;
-                    break;
-                  }
-                }
-              }
-            } catch {
-              // Ignore unreadable
-            }
-          }
-        }
-      }
-    } finally {
-      try {
-        dir.closeSync();
-      } catch {
-        // Ignore close error
-      }
-    }
-
-    if (truncated) break;
-  }
-
-  if (queue.length > 0 && !limitReached) {
-    truncated = true;
-    limitReached = 'maxDirectories';
-  }
-
-  results.truncated = truncated;
-  results.limitReached = limitReached;
-  results.totalDirectories = totalDirectories;
-  results.totalEntries = totalEntries;
-  results.images = results;
-
-  return results;
-}
-
-export function resolveProjectImage(authorizedRoot, imagePath, options = {}) {
-  const maxFileSize = options.maxFileSize ?? MAX_AVATAR_FILE_SIZE;
-  if (!imagePath || typeof imagePath !== 'string') {
-    const error = new Error('图片路径无效。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
-  }
-  const normalized = path.normalize(imagePath);
-  if (
-    normalized.startsWith('..') ||
-    path.isAbsolute(imagePath) ||
-    path.isAbsolute(normalized) ||
-    imagePath.includes('\0')
-  ) {
-    const error = new Error('图片路径必须是项目内的相对路径。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
-  }
-
-  const ext = path.extname(imagePath).toLowerCase();
-  if (ext === '.svg') {
-    const error = new Error('基于安全边界限制，不支持使用 SVG 作为项目头像。请使用 PNG、JPG、JPEG、GIF 或 WebP 等位图格式。');
-    error.code = 'INVALID_IMAGE_TYPE';
-    throw error;
-  }
-  if (!ALLOWED_IMAGE_EXTENSIONS.has(ext)) {
-    const error = new Error('不支持的文件格式，仅支持安全的位图图片（PNG、JPG、JPEG、GIF、WebP）。');
-    error.code = 'INVALID_IMAGE_TYPE';
-    throw error;
-  }
-
-  let rootReal;
-  try {
-    rejectSymbolicPath(authorizedRoot);
-    rootReal = realpathSync.native(path.resolve(authorizedRoot));
-  } catch (err) {
-    if (err.code === 'REPARSE_POINT' || err instanceof PathScopeError) {
-      const error = new Error('项目授权根目录经过了链接或 junction，已停止访问。');
-      error.code = 'REPARSE_POINT';
-      throw error;
-    }
-    const error = new Error('项目授权根目录不可访问。');
-    error.code = 'PATH_NOT_AUTHORIZED';
-    throw error;
-  }
-
-  const candidatePath = path.resolve(rootReal, imagePath);
-
-  let cursor = rootReal;
-  const relSegments = path.relative(rootReal, candidatePath).split(path.sep).filter(Boolean);
-  for (const seg of relSegments) {
-    cursor = path.join(cursor, seg);
-    try {
-      if (lstatSync(cursor).isSymbolicLink()) {
-        const error = new Error('基于安全限制，不支持通过符号链接或快捷方式访问图片。');
-        error.code = 'INVALID_IMAGE_PATH';
-        throw error;
-      }
-    } catch (err) {
-      if (err.code === 'INVALID_IMAGE_PATH') throw err;
-    }
-  }
-
-  let fileReal;
-  try {
-    fileReal = realpathSync.native(candidatePath);
-  } catch {
-    const error = new Error('找不到指定的图片文件。');
-    error.code = 'IMAGE_NOT_FOUND';
-    throw error;
-  }
-
-  if (!isWithin(rootReal, fileReal)) {
-    const error = new Error('图片路径超出了已授权的项目目录范围。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
-  }
-
-  let stat;
-  try {
-    stat = statSync(fileReal);
-  } catch {
-    const error = new Error('无法读取指定的图片文件。');
-    error.code = 'IMAGE_NOT_FOUND';
-    throw error;
-  }
-
-  if (!stat.isFile()) {
-    const error = new Error('指定的图片路径不是普通文件。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
-  }
-
-  if (stat.size <= 0) {
-    const error = new Error('图片文件为空，无法作为头像加载。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
-  }
-
-  if (stat.size > maxFileSize) {
-    const error = new Error('图片文件过大，无法作为头像加载（上限 5MB）。');
-    error.code = 'IMAGE_TOO_LARGE';
-    throw error;
-  }
-
-  return {
-    filePath: fileReal,
-    relativePath: path.relative(rootReal, fileReal).replace(/\\/g, '/'),
-    size: stat.size,
-    mimeType: IMAGE_MIME_TYPES[ext] || 'application/octet-stream',
-  };
 }
 
 export function projectIdFor(worktreeIdentity) {
@@ -777,7 +444,7 @@ export function readDashboard(db) {
   });
 }
 
-export function updateProject(db, request) {
+export function updateProject(db, request, { avatarStorageRoot } = {}) {
   const { commandId, projectId, name, avatarPath } = request;
   if (!commandId || typeof commandId !== 'string') {
     return { ok: false, code: 'INVALID_REQUEST', message: '缺少 commandId。' };
@@ -827,10 +494,24 @@ export function updateProject(db, request) {
         message: '头像路径格式不正确。',
       });
     } else {
-      const authorizedRoot = project.authorized_root || project.canonical_path;
+      let storageRoot = avatarStorageRoot;
+      if (!storageRoot && db) {
+        try {
+          const mainFile = db.prepare('PRAGMA database_list').all().find((d) => d.name === 'main')?.file;
+          if (mainFile) {
+            storageRoot = path.join(path.dirname(mainFile), 'project-avatars');
+          }
+        } catch {
+          // ignore
+        }
+      }
       try {
-        const resolved = resolveProjectImage(authorizedRoot, avatarPath);
-        validatedAvatarPath = resolved.relativePath;
+        const resolved = resolveProjectAvatar({
+          storageRoot,
+          projectId,
+          avatarPath,
+        });
+        validatedAvatarPath = resolved.avatarPath;
       } catch (err) {
         return failCommand(db, commandId, {
           ok: false,
