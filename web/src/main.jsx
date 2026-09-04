@@ -8,6 +8,11 @@ import {
   timelineCurveSourceY,
   timelineRailEndY,
 } from './timeline-geometry.mjs';
+import {
+  extractDominantColorFromImage,
+  getProjectCardAvatarColorStyle,
+  projectAvatarUrl,
+} from './avatar-color.mjs';
 import './styles.css';
 
 const STATUS = {
@@ -268,6 +273,104 @@ const api = createApiClient({
   randomUUID: () => crypto.randomUUID(),
   origin: window.location.origin,
 });
+
+const AVATAR_COLOR_CACHE_LIMIT = 128;
+const avatarColorCache = new Map();
+const avatarColorPending = new Map();
+
+function rememberAvatarColor(avatarUrl, color) {
+  if (avatarColorCache.size >= AVATAR_COLOR_CACHE_LIMIT && !avatarColorCache.has(avatarUrl)) {
+    const oldestUrl = avatarColorCache.keys().next().value;
+    if (oldestUrl) avatarColorCache.delete(oldestUrl);
+  }
+  avatarColorCache.set(avatarUrl, color);
+}
+
+function loadAvatarDominantColor(avatarUrl) {
+  if (!avatarUrl) return Promise.resolve(null);
+  if (avatarColorCache.has(avatarUrl)) return Promise.resolve(avatarColorCache.get(avatarUrl));
+  if (avatarColorPending.has(avatarUrl)) return avatarColorPending.get(avatarUrl);
+
+  const ImageConstructor = globalThis.Image;
+  if (typeof ImageConstructor !== 'function') {
+    rememberAvatarColor(avatarUrl, null);
+    return Promise.resolve(null);
+  }
+
+  const pending = new Promise((resolve) => {
+    const image = new ImageConstructor();
+    let settled = false;
+    const finish = (color) => {
+      if (settled) return;
+      settled = true;
+      rememberAvatarColor(avatarUrl, color);
+      avatarColorPending.delete(avatarUrl);
+      resolve(color);
+    };
+
+    image.onload = () => {
+      // Keep the canvas work off the image event's critical path while still
+      // resolving quickly for a card that has just entered the viewport.
+      const sample = () => {
+        try {
+          finish(extractDominantColorFromImage(image));
+        } catch {
+          finish(null);
+        }
+      };
+      try {
+        if (typeof globalThis.requestIdleCallback === 'function') {
+          globalThis.requestIdleCallback(sample, { timeout: 200 });
+        } else {
+          globalThis.setTimeout(sample, 0);
+        }
+      } catch {
+        finish(null);
+      }
+    };
+    image.onerror = () => finish(null);
+    try {
+      image.decoding = 'async';
+      image.src = avatarUrl;
+    } catch {
+      finish(null);
+    }
+  });
+
+  avatarColorPending.set(avatarUrl, pending);
+  return pending;
+}
+
+function useProjectAvatarColor(project) {
+  const avatarUrl = projectAvatarUrl(project);
+  const [color, setColor] = useState(() => (
+    avatarUrl && avatarColorCache.has(avatarUrl) ? avatarColorCache.get(avatarUrl) : null
+  ));
+
+  useEffect(() => {
+    let active = true;
+    if (!avatarUrl) {
+      setColor(null);
+      return () => { active = false; };
+    }
+
+    if (avatarColorCache.has(avatarUrl)) {
+      setColor(avatarColorCache.get(avatarUrl));
+      return () => { active = false; };
+    }
+
+    // Clear a previous avatar's tint immediately; a slow new image must not
+    // leave the old project's color visible on this card.
+    setColor(null);
+    loadAvatarDominantColor(avatarUrl).then((nextColor) => {
+      if (active) setColor(nextColor);
+    });
+
+    return () => { active = false; };
+  }, [avatarUrl]);
+
+  return color;
+}
 
 function formatTime(value) {
   if (!value) return '尚无记录';
@@ -1436,6 +1539,9 @@ function ProjectCard({ project, onAction, onOpen }) {
   const actionLabel = getActionLabel(statusReason);
   const isDisabled = isActionDisabled(statusReason);
   const theme = getProjectTheme(project);
+  const avatarColor = useProjectAvatarColor(project);
+  const avatarColorStyle = getProjectCardAvatarColorStyle(avatarColor);
+  const avatarUrl = projectAvatarUrl(project);
   const agent = project.activeWork?.agent
     ?? project.waitingAgent?.agent
     ?? project.pendingAssignment?.agent
@@ -1447,7 +1553,10 @@ function ProjectCard({ project, onAction, onOpen }) {
   const showStage = project.stage && project.stage !== 'development';
 
   return (
-    <article className={`project-card status-${theme}`}>
+    <article
+      className={['project-card', `status-${theme}`, avatarColorStyle.className].filter(Boolean).join(' ')}
+      style={avatarColorStyle.style}
+    >
       <button
         type="button"
         className="card-open"
@@ -1460,9 +1569,9 @@ function ProjectCard({ project, onAction, onOpen }) {
         </div>
 
         <div className="card-name-row">
-          {project.avatarPath ? (
+          {avatarUrl ? (
             <img
-              src={`/api/v1/projects/${encodeURIComponent(project.id)}/avatar?t=${encodeURIComponent(project.avatarPath)}`}
+              src={avatarUrl}
               alt=""
               className="project-avatar card-avatar"
             />

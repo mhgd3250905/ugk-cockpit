@@ -664,7 +664,26 @@ summary:focus-visible {
   overflow: hidden;
   box-shadow: var(--shadow-card);
   transition: border-color 0.14s ease-out, box-shadow 0.14s ease-out,
-    transform 0.14s ease-out;
+    transform 0.14s ease-out, background-color 0.14s ease-out;
+}
+
+/* Avatar colors are mixed into theme surfaces at a restrained strength. The
+   first declaration keeps the normal card background on older browsers. */
+.project-card.has-avatar-color {
+  background: var(--surface-card);
+  background: color-mix(
+    in srgb,
+    var(--surface-card) 88%,
+    var(--project-avatar-color) var(--project-avatar-color-strength)
+  );
+}
+
+.project-card.has-avatar-color .card-foot {
+  background: color-mix(
+    in srgb,
+    var(--surface-sunken) 92%,
+    var(--project-avatar-color) 8%
+  );
 }
 
 .project-card:hover {
