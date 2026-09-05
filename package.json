@@ -16,10 +16,13 @@
     "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs"
   },
   "dependencies": {
+    "@appica/ui-react": "^1.1.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "tailwindcss": "^4.3.3",
     "vite": "^8.2.2"
   }
 }

@@ -21,9 +21,21 @@ function createMockEnvironment({
     storageMap.set('ugk-cockpit-theme', stored);
   }
 
+  const classList = new Set();
   const documentElement = {
     dataset: {},
     style: {},
+    classList: {
+      toggle(name, force) {
+        const shouldAdd = force === undefined ? !classList.has(name) : Boolean(force);
+        if (shouldAdd) classList.add(name);
+        else classList.delete(name);
+        return shouldAdd;
+      },
+      add: (name) => classList.add(name),
+      remove: (name) => classList.delete(name),
+      contains: (name) => classList.has(name),
+    },
     setAttribute(key, value) {
       if (key === 'data-theme') this.dataset.theme = value;
     },
@@ -120,6 +132,8 @@ test('theme boot defaults to dark mode when localStorage has no saved theme', ()
 
   assert.equal(env.document.documentElement.dataset.theme, 'dark');
   assert.equal(env.document.documentElement.style.colorScheme, 'dark');
+  assert.equal(env.document.documentElement.classList.contains('dark'), true);
+  assert.equal(env.document.documentElement.classList.contains('light'), false);
   assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#14120f');
 });
 
@@ -129,6 +143,8 @@ test('theme boot applies stored light theme on boot', () => {
 
   assert.equal(env.document.documentElement.dataset.theme, 'light');
   assert.equal(env.document.documentElement.style.colorScheme, 'light');
+  assert.equal(env.document.documentElement.classList.contains('light'), true);
+  assert.equal(env.document.documentElement.classList.contains('dark'), false);
   assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f5f2ec');
 });
 

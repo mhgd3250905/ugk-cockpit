@@ -1,4 +1,15 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Button } from '@appica/ui-react/button';
+import { Badge } from '@appica/ui-react/badge';
+import { Tabs, TabsList, TabsTrigger } from '@appica/ui-react/tabs';
+import { Textarea } from '@appica/ui-react/textarea';
+import {
+  Alert,
+  AlertDescription,
+  AlertIcon,
+  AlertTitle,
+} from '@appica/ui-react/alert';
+import { Spinner } from '@appica/ui-react/spinner';
 import { noteStatusLabel } from './delivery-view.mjs';
 
 const PAGE_SIZE = 30;
@@ -69,6 +80,12 @@ export function noteActionError(error, targetStatus) {
     retryable, targetStatus,
   };
 }
+
+const STATUS_TABS = [
+  { value: 'pending', label: '待处理' },
+  { value: 'handled', label: '已处理' },
+  { value: 'archived', label: '已归档' },
+];
 
 export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
   const [statusFilter, setStatusFilter] = useState('pending');
@@ -237,45 +254,38 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
         e('p', null, '来自各分支与工作副本提交的工作进展与说明待办；复制只读，处理不改变代码。')
       )
     ),
-    e('div', { className: 'inbox-filter-bar', role: 'tablist', 'aria-label': '工作说明状态筛选' },
-      e('button', {
-        type: 'button',
-        role: 'tab',
-        'aria-selected': statusFilter === 'pending',
-        'aria-controls': 'notes-panel',
-        className: `btn-filter-tab ${statusFilter === 'pending' ? 'active' : ''}`,
-        onClick: () => handleTabClick('pending'),
-      }, '待处理 ', e('span', { className: 'tab-count' }, `(${counts.pending ?? 0})`)),
-      e('button', {
-        type: 'button',
-        role: 'tab',
-        'aria-selected': statusFilter === 'handled',
-        'aria-controls': 'notes-panel',
-        className: `btn-filter-tab ${statusFilter === 'handled' ? 'active' : ''}`,
-        onClick: () => handleTabClick('handled'),
-      }, '已处理 ', e('span', { className: 'tab-count' }, `(${counts.handled ?? 0})`)),
-      e('button', {
-        type: 'button',
-        role: 'tab',
-        'aria-selected': statusFilter === 'archived',
-        'aria-controls': 'notes-panel',
-        className: `btn-filter-tab ${statusFilter === 'archived' ? 'active' : ''}`,
-        onClick: () => handleTabClick('archived'),
-      }, '已归档 ', e('span', { className: 'tab-count' }, `(${counts.archived ?? 0})`))
+    e('div', { className: 'inbox-filter-bar' },
+      e(Tabs, {
+        value: statusFilter,
+        onValueChange: (value) => handleTabClick(String(value)),
+        variant: 'pill',
+        size: 'sm',
+      },
+        e(TabsList, { 'aria-label': '工作说明状态筛选' },
+          STATUS_TABS.map((tab) => e(TabsTrigger, {
+            key: tab.value,
+            value: tab.value,
+          }, `${tab.label} `, e('span', { className: 'tab-count' }, `(${counts[tab.value] ?? 0})`)))
+        )
+      )
     ),
-    error && e('div', { className: 'inbox-error-alert', role: 'alert' },
-      e('p', null, e('strong', null, '读取工作说明失败：'), error.message || '网络连接或服务暂时不可用'),
-      e('button', {
-        type: 'button',
-        className: 'btn btn-secondary btn-sm',
+    error && e(Alert, { variant: 'error', className: 'inbox-error-alert', role: 'alert' },
+      e(AlertIcon),
+      e('div', { className: 'notice-body' },
+        e(AlertTitle, null, '读取工作说明失败'),
+        e(AlertDescription, null, error.message || '网络连接或服务暂时不可用')
+      ),
+      e(Button, {
+        variant: 'soft',
+        size: 'sm',
         onClick: () => fetchNotes(false),
       }, '重新加载')
     ),
     e('div', { id: 'notes-panel', role: 'tabpanel', className: 'inbox-card-list' },
       loading && items.length === 0
-        ? e('p', { className: 'workspace-empty' }, '正在加载工作说明…')
+        ? e('p', { className: 'inbox-empty' }, '正在加载工作说明…')
         : items.length === 0
-          ? e('p', { className: 'workspace-empty' },
+          ? e('p', { className: 'inbox-empty' },
               statusFilter === 'pending'
                 ? '当前没有待处理的工作说明。'
                 : statusFilter === 'handled'
@@ -298,15 +308,15 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
     (total > PAGE_SIZE || page > 0) && e('footer', { className: 'inbox-pagination', 'aria-label': '工作说明分页' },
       e('span', { className: 'pagination-info' }, `第 ${page + 1} 页 / 共 ${total} 条说明`),
       e('div', { className: 'pagination-actions' },
-        e('button', {
-          type: 'button',
-          className: 'btn btn-secondary btn-sm',
+        e(Button, {
+          variant: 'soft',
+          size: 'sm',
           disabled: page === 0 || loading,
           onClick: () => setPage((p) => Math.max(0, p - 1)),
         }, '上一页'),
-        e('button', {
-          type: 'button',
-          className: 'btn btn-secondary btn-sm',
+        e(Button, {
+          variant: 'soft',
+          size: 'sm',
           disabled: !hasMore || loading,
           onClick: () => setPage((p) => p + 1),
         }, '下一页')
@@ -337,12 +347,12 @@ function SubmitNoteCard({
   }
 
   return e('article', {
-    className: `submit-note-card status-${item.status}`,
+    className: `submit-note-card note-status-${item.status}`,
     'aria-label': item.title || '工作说明',
   },
     e('header', { className: 'note-card-header' },
       e('div', { className: 'note-card-title-group' },
-        e('span', { className: `badge note-badge-${item.status}` }, noteStatusLabel(item.status)),
+        e(Badge, { variant: 'soft', size: 'sm', className: 'note-status-badge' }, noteStatusLabel(item.status)),
         e('h4', null, item.title || '无标题工作说明')
       ),
       e('time', { dateTime: item.createdAt, className: 'note-card-time' }, formatNoteTime(item.createdAt))
@@ -387,9 +397,9 @@ function SubmitNoteCard({
       e('label', { htmlFor: `remark-input-${item.noteId}` },
         item.handlingNote ? '修改处理备注（可选）：' : '填写处理备注（可选）：'
       ),
-      e('textarea', {
+      e(Textarea, {
+        variant: 'soft',
         id: `remark-input-${item.noteId}`,
-        className: 'note-remark-textarea',
         rows: 2,
         disabled: busy,
         maxLength: 4000,
@@ -398,69 +408,75 @@ function SubmitNoteCard({
         onChange: (ev) => onDraftRemarkChange(ev.target.value),
       })
     ),
-    actionError && e('div', { className: 'note-action-error', role: 'alert' },
-      e('p', null, e('strong', null, '操作提示：'), actionError.message),
-      actionError.impact && e('p', { className: 'error-impact' }, actionError.impact),
-      actionError.required_action && e('p', { className: 'error-action' }, actionError.required_action),
-      actionError.retryable && e('button', {
-        type: 'button',
-        className: 'btn btn-secondary btn-sm',
+    actionError && e(Alert, { variant: 'error', className: 'note-action-error', role: 'alert' },
+      e(AlertIcon),
+      e('div', { className: 'notice-body' },
+        e(AlertTitle, null, '操作提示'),
+        e(AlertDescription, null, actionError.message),
+        actionError.impact && e(AlertDescription, null, actionError.impact),
+        actionError.required_action && e(AlertDescription, null, actionError.required_action)
+      ),
+      actionError.retryable && e(Button, {
+        variant: 'soft',
+        size: 'sm',
         onClick: () => onRetry(actionError.targetStatus),
         disabled: busy,
       }, busy ? '正在重试…' : '按原请求重试')
     ),
     e('footer', { className: 'note-card-actions' },
       e('div', { className: 'note-action-buttons' },
-        e('button', {
-          type: 'button',
-          className: 'btn btn-secondary btn-sm',
+        e(Button, {
+          variant: 'soft',
+          size: 'sm',
           onClick: onCopy,
           title: '复制说明与处理指令，只读操作不改变状态',
         }, copied ? '已复制处理说明' : '复制说明'),
         item.status === 'pending' && [
-          e('button', {
+          e(Button, {
             key: 'handle-btn',
-            type: 'button',
-            className: 'btn btn-primary btn-sm',
+            variant: 'primary',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('handled'),
-          }, busy ? '正在处理…' : '标记已处理'),
-          e('button', {
+          }, busy
+            ? [e(Spinner, { key: 'spinner', variant: 'dots', currentColor: true, 'data-icon': 'start' }), '正在处理…']
+            : '标记已处理'),
+          e(Button, {
             key: 'archive-btn',
-            type: 'button',
-            className: 'btn btn-secondary btn-sm',
+            variant: 'soft',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('archived'),
           }, busy ? '正在归档…' : '归档'),
         ],
         item.status === 'handled' && [
-          e('button', {
+          e(Button, {
             key: 'restore-btn',
-            type: 'button',
-            className: 'btn btn-secondary btn-sm',
+            variant: 'soft',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('pending'),
           }, busy ? '正在恢复…' : '恢复待处理'),
-          e('button', {
+          e(Button, {
             key: 'archive-btn',
-            type: 'button',
-            className: 'btn btn-secondary btn-sm',
+            variant: 'soft',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('archived'),
           }, busy ? '正在归档…' : '归档'),
         ],
         item.status === 'archived' && [
-          e('button', {
+          e(Button, {
             key: 'restore-btn',
-            type: 'button',
-            className: 'btn btn-secondary btn-sm',
+            variant: 'soft',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('pending'),
           }, busy ? '正在恢复…' : '恢复待处理'),
-          e('button', {
+          e(Button, {
             key: 'handle-btn',
-            type: 'button',
-            className: 'btn btn-secondary btn-sm',
+            variant: 'primary',
+            size: 'sm',
             disabled: busy || actionError?.retryable,
             onClick: () => onStatusChange('handled'),
           }, busy ? '正在处理…' : '标记已处理'),

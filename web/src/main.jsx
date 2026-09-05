@@ -1,5 +1,36 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Button, buttonVariants } from '@appica/ui-react/button';
+import { Badge } from '@appica/ui-react/badge';
+import { Card } from '@appica/ui-react/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+} from '@appica/ui-react/dialog';
+import { Field, FieldDescription, FieldLabel } from '@appica/ui-react/field';
+import { Input } from '@appica/ui-react/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@appica/ui-react/select';
+import { Textarea } from '@appica/ui-react/textarea';
+import {
+  Alert,
+  AlertDescription,
+  AlertIcon,
+  AlertTitle,
+} from '@appica/ui-react/alert';
+import { Avatar, AvatarFallback, AvatarImage } from '@appica/ui-react/avatar';
+import { Skeleton } from '@appica/ui-react/skeleton';
+import { Spinner } from '@appica/ui-react/spinner';
 import { createApiClient } from './api.js';
 import { SUBMIT_MESSAGE, deliveryStatusLabel, noteStatusLabel } from './delivery-view.mjs';
 import { SubmitNotesInbox, renderSafeTextWithLinks } from './submit-notes-view.mjs';
@@ -71,6 +102,18 @@ const STAGES = {
   maintenance: '日常维护',
   paused: '暂时放下',
 };
+
+const STAGE_OPTIONS = [
+  { value: 'development', label: '开发中' },
+  { value: 'maintenance', label: '已经上线，只做日常维护' },
+  { value: 'paused', label: '暂时放下' },
+];
+
+const AGENT_OPTIONS = [
+  { value: 'Codex', label: 'Codex' },
+  { value: 'ZCode', label: 'ZCode' },
+  { value: 'Antigravity', label: 'Antigravity' },
+];
 
 const TIMELINE_KINDS = {
   init: { code: 'INIT', label: '接入项目' },
@@ -386,6 +429,15 @@ function formatTime(value) {
   }
 }
 
+function ProjectAvatar({ project, avatarUrl, size, className }) {
+  return (
+    <Avatar size={size} shape="rounded" className={`project-avatar ${className || ''}`}>
+      {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+      <AvatarFallback>{project?.name ? project.name.slice(0, 2) : 'UGK'}</AvatarFallback>
+    </Avatar>
+  );
+}
+
 function SunIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -550,6 +602,7 @@ function createErrorNotice(error, {
   retry,
 }) {
   return {
+    tone: 'error',
     message: error?.message ?? message,
     impact: error?.impact ?? impact,
     required_action: error?.required_action ?? requiredAction,
@@ -558,81 +611,17 @@ function createErrorNotice(error, {
   };
 }
 
-function useFocusTrap(isOpen, onClose, busy = false) {
-  const modalRef = useRef(null);
-  const triggerRef = useRef(null);
-  const onCloseRef = useRef(onClose);
-  const busyRef = useRef(busy);
-
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    triggerRef.current = document.activeElement;
-
-    const timer = setTimeout(() => {
-      if (!modalRef.current) return;
-      const focusables = modalRef.current.querySelectorAll(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
-      if (focusables.length > 0) {
-        focusables[0].focus();
-      } else {
-        modalRef.current.focus();
-      }
-    }, 20);
-
-    function onKeyDown(e) {
-      if (e.key === 'Escape') {
-        if (busyRef.current) return;
-        e.preventDefault();
-        e.stopPropagation();
-        onCloseRef.current();
-        return;
-      }
-      if (e.key === 'Tab') {
-        if (!modalRef.current) return;
-        const focusables = Array.from(
-          modalRef.current.querySelectorAll(
-            'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-          )
-        ).filter((el) => el.offsetParent !== null);
-
-        if (focusables.length === 0) {
-          e.preventDefault();
-          return;
-        }
-
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
+// Guard used by all Appica dialogs: block Esc/outside-press dismissal while a
+// request is in flight so the user cannot lose a submitting form.
+function createDialogCloseGuard(busy, onClose) {
+  return (open, eventDetails) => {
+    if (open) return;
+    if (busy) {
+      eventDetails?.cancel?.();
+      return;
     }
-
-    document.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('keydown', onKeyDown, true);
-      if (triggerRef.current && typeof triggerRef.current.focus === 'function') {
-        triggerRef.current.focus();
-      }
-    };
-  }, [isOpen]);
-
-  return modalRef;
+    onClose();
+  };
 }
 
 function App() {
@@ -861,6 +850,7 @@ function App() {
       setSelection(null);
       await refresh({
         successNotice: {
+          tone: 'success',
           message: project.alreadyExists
             ? `${project.name} 已经在工作简报中。`
             : `已添加 ${project.name}。`,
@@ -966,6 +956,7 @@ function App() {
     try {
       await navigator.clipboard.writeText(dispatch.message);
       setNotice({
+        tone: 'success',
         message: '接手消息已复制。',
         required_action: `把它发送给 ${handoffAgent}；成功接入后页面会显示工作会话已经接入。`,
         actionLabel: '知道了',
@@ -973,6 +964,7 @@ function App() {
       });
     } catch {
       setNotice({
+        tone: 'error',
         message: '无法自动写入剪贴板。',
         impact: '接入指令仍完整显示，项目代码和接手任务不受影响。',
         required_action: '请直接选中文本框内的完整接入指令并按 Ctrl+C / Cmd+C 复制。',
@@ -1302,33 +1294,35 @@ function App() {
       <header className="control-header">
         <div className="header-main-row">
           <div className="brand-zone">
-            <div className="brand-title-wrap">
-              <span className="brand-mark" aria-hidden="true"><LogoIcon /></span>
-              <h1 className="brand-title">UGK Cockpit</h1>
-              <span className="badge badge-version">{__APP_VERSION__}</span>
+            <div className="brand-mark" aria-hidden="true"><LogoIcon /></div>
+            <div>
+              <div className="brand-title-row">
+                <h1 className="brand-title">UGK Cockpit</h1>
+                <Badge variant="soft" size="sm" className="badge-version">{__APP_VERSION__}</Badge>
+              </div>
+              <p className="brand-tagline">本机 AI 项目控制台</p>
             </div>
-            <p className="brand-tagline">本机 AI 项目控制台</p>
           </div>
 
           <div className="header-actions">
             <ThemeSwitch mode={themeMode} onChange={setThemeMode} />
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
+            <Button
+              variant="soft"
+              size="sm"
               onClick={() => refresh()}
               disabled={busy}
               title="重新加载简报数据"
             >
-              <span className="btn-icon" aria-hidden="true"><RefreshIcon /></span> 重新加载简报
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
+              <RefreshIcon data-icon="start" /> 重新加载简报
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
               onClick={() => chooseFolder()}
               disabled={busy}
             >
-              <span className="btn-icon" aria-hidden="true"><PlusIcon /></span> 选择项目文件夹
-            </button>
+              <PlusIcon data-icon="start" /> 选择项目文件夹
+            </Button>
           </div>
         </div>
 
@@ -1345,7 +1339,7 @@ function App() {
               {dashboard?.refreshedAt ? `同步于 ${formatTime(dashboard.refreshedAt)}` : '正在同步…'}
             </time>
             {isStale && (
-              <button type="button" className="btn-link" onClick={() => refresh()}>
+              <button type="button" className="link-btn" onClick={() => refresh()}>
                 重试连接
               </button>
             )}
@@ -1353,18 +1347,18 @@ function App() {
 
           {projects.length > 0 && (
             <div className="header-stats" aria-label="项目状态统计">
-              <span className="stat-badge">全部 <strong>{stats.total}</strong></span>
+              <Badge variant="soft" size="sm" className="stat-neutral">全部 <strong>{stats.total}</strong></Badge>
               {stats.attentionCount > 0 && (
-                <span className="stat-badge stat-attention">待确认 <strong>{stats.attentionCount}</strong></span>
+                <Badge variant="soft" size="sm" className="stat-attention">待确认 <strong>{stats.attentionCount}</strong></Badge>
               )}
               {stats.activeCount > 0 && (
-                <span className="stat-badge stat-active">会话中 <strong>{stats.activeCount}</strong></span>
+                <Badge variant="soft" size="sm" className="stat-active">会话中 <strong>{stats.activeCount}</strong></Badge>
               )}
               {stats.readyCount > 0 && (
-                <span className="stat-badge stat-ready">就绪 <strong>{stats.readyCount}</strong></span>
+                <Badge variant="soft" size="sm" className="stat-ready">就绪 <strong>{stats.readyCount}</strong></Badge>
               )}
               {stats.pausedCount > 0 && (
-                <span className="stat-badge stat-muted">维护/放下 <strong>{stats.pausedCount}</strong></span>
+                <Badge variant="soft" size="sm" className="stat-neutral">维护/放下 <strong>{stats.pausedCount}</strong></Badge>
               )}
             </div>
           )}
@@ -1467,28 +1461,31 @@ function App() {
 
 function NoticeBanner({ notice, busy }) {
   if (!notice) return null;
+  const variant = notice.tone === 'success' ? 'success' : 'error';
   return (
-    <section className="notice-banner" role="alert">
-      <div className="notice-content">
-        <strong className="notice-title">{notice.message}</strong>
+    <Alert variant={variant} className="notice-banner" role="alert">
+      <AlertIcon />
+      <div className="notice-body">
+        <AlertTitle>{notice.message}</AlertTitle>
         {notice.impact && (
-          <p className="notice-detail"><strong>影响：</strong>{notice.impact}</p>
+          <AlertDescription><strong>影响：</strong>{notice.impact}</AlertDescription>
         )}
         {notice.required_action && (
-          <p className="notice-detail"><strong>下一步：</strong>{notice.required_action}</p>
+          <AlertDescription><strong>下一步：</strong>{notice.required_action}</AlertDescription>
         )}
       </div>
       {notice.actionLabel && notice.retry && (
-        <button
-          type="button"
-          className="btn btn-secondary btn-sm notice-btn"
+        <Button
+          variant="soft"
+          size="sm"
+          className="notice-btn"
           onClick={notice.retry}
           disabled={busy}
         >
           {notice.actionLabel}
-        </button>
+        </Button>
       )}
-    </section>
+    </Alert>
   );
 }
 
@@ -1502,7 +1499,7 @@ function LoadingState({ notice }) {
   }
   return (
     <section className="feedback-state-box">
-      <span className="loading-spinner" aria-hidden="true" />
+      <Spinner className="text-primary" style={{ width: 28, height: 28 }} aria-hidden="true" />
       <p className="feedback-text">正在整理你的今日简报…</p>
     </section>
   );
@@ -1517,14 +1514,16 @@ function EmptyState({ busy, onChoose }) {
         从电脑中手动选择一个项目文件夹。我们只读取必要的代码状态，绝不会自动清理、覆盖、提交、上传或删除你的任何文件。
       </p>
       <div className="empty-actions">
-        <button
-          type="button"
-          className="btn btn-primary btn-lg"
+        <Button
+          variant="primary"
+          size="lg"
           onClick={onChoose}
           disabled={busy}
         >
-          {busy ? '正在等待你选择…' : '选择项目文件夹'}
-        </button>
+          {busy
+            ? (<><Spinner variant="dots" currentColor data-icon="start" />正在等待你选择…</>)
+            : '选择项目文件夹'}
+        </Button>
       </div>
       <small className="empty-note">
         一次只添加你亲自选择的一个项目；取消不会保存任何内容。
@@ -1569,20 +1568,14 @@ function ProjectCard({ project, onAction, onOpen }) {
         </div>
 
         <div className="card-name-row">
-          {avatarUrl ? (
-            <img
-              src={avatarUrl}
-              alt=""
-              className="project-avatar card-avatar"
-            />
-          ) : (
-            <div className="project-avatar-fallback card-avatar-fallback" aria-hidden="true">
-              {project.name ? project.name.slice(0, 2) : 'UGK'}
-            </div>
-          )}
+          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={30} />
           <h4 className="card-name">{project.name}</h4>
         </div>
-        {showStage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
+        {showStage && (
+          <Badge variant="soft" size="sm" className="stat-neutral card-stage-badge">
+            {STAGES[project.stage] || project.stage}
+          </Badge>
+        )}
         <p className="card-what">{copy.title}</p>
         <p className="card-impact">{copy.detail}</p>
       </button>
@@ -1592,16 +1585,16 @@ function ProjectCard({ project, onAction, onOpen }) {
         {isDisabled ? (
           <span className="read-only-action">{actionLabel}</span>
         ) : (
-          <button
-            type="button"
-            className="btn btn-card-action"
+          <Button
+            variant="soft"
+            size="sm"
             onClick={(event) => {
               event.stopPropagation();
               onAction(project);
             }}
           >
             {actionLabel}
-          </button>
+          </Button>
         )}
       </footer>
     </article>
@@ -1651,33 +1644,33 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             ← 返回项目列表
           </button>
           <div className="detail-kicker-row">
-            {project.stage && <span className="badge badge-stage">{STAGES[project.stage] || project.stage}</span>}
-            <span className="badge badge-status">{eyebrow}</span>
+            {project.stage && (
+              <Badge variant="soft" size="sm" className="stat-neutral">
+                {STAGES[project.stage] || project.stage}
+              </Badge>
+            )}
+            <Badge variant="soft" size="sm" className="detail-status-badge">{eyebrow}</Badge>
           </div>
           <div className="detail-identity-row">
-            {project.avatarPath ? (
-              <img
-                src={`/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?t=${encodeURIComponent(project.avatarPath)}`}
-                alt=""
-                className="project-avatar detail-avatar"
-              />
-            ) : (
-              <div className="project-avatar-fallback detail-avatar-fallback" aria-hidden="true">
-                {project.name ? project.name.slice(0, 2) : 'UGK'}
-              </div>
-            )}
+            <ProjectAvatar
+              project={project}
+              avatarUrl={project.avatarPath
+                ? `/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?t=${encodeURIComponent(project.avatarPath)}`
+                : null}
+              size={48}
+            />
             <div className="detail-title-group">
               <div className="detail-title-action-row">
                 <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
                 {onEdit && !invalidRoute && (
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm btn-edit-project"
+                  <Button
+                    variant="soft"
+                    size="sm"
                     onClick={() => onEdit({ ...project, id: effectiveProjectId })}
                     disabled={busy}
                   >
                     编辑项目
-                  </button>
+                  </Button>
                 )}
               </div>
               <p>{headingCopy}</p>
@@ -1725,9 +1718,9 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
 function DetailLoadingState() {
   return (
     <div className="detail-loading" role="status">
-      <span className="detail-loading-line detail-loading-line-wide" />
-      <span className="detail-loading-line" />
-      <span className="detail-loading-line detail-loading-line-short" />
+      <Skeleton effect="shimmer" className="h-4 w-[min(600px,90%)] rounded-full" />
+      <Skeleton effect="shimmer" className="h-3 w-[min(460px,76%)] rounded-full" />
+      <Skeleton effect="shimmer" className="mb-5 h-3 w-[min(320px,52%)] rounded-full" />
       <p>正在整理项目运行详情…</p>
     </div>
   );
@@ -1740,7 +1733,7 @@ function DetailErrorState({ notice, onRetry, retryLabel = '重新读取详情' }
       <h3>{notice.message}</h3>
       {notice.impact && <p>{notice.impact}</p>}
       {notice.required_action && <p>{notice.required_action}</p>}
-      <button type="button" className="btn btn-secondary" onClick={onRetry}>{retryLabel}</button>
+      <Button variant="soft" className="ugk-retry" onClick={onRetry}>{retryLabel}</Button>
     </div>
   );
 }
@@ -1748,12 +1741,12 @@ function DetailErrorState({ notice, onRetry, retryLabel = '重新读取详情' }
 function SubmitHelp() {
   const [copied, setCopied] = useState(false);
   return (
-    <details className="review-prompt-fallback">
+    <details className="submit-help-details">
       <summary>外部或已有分支如何发布工作说明？</summary>
       <p>在任意已授权的代码分支或审核副本会话中输入 $cockpit-submit 发布工作说明。AI 会根据当前上下文整理进展与待办，不需要假设任务已完成，不默认执行保存、上传或预检。</p>
-      <button
-        type="button"
-        className="btn btn-secondary btn-sm"
+      <Button
+        variant="soft"
+        size="sm"
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(SUBMIT_MESSAGE);
@@ -1764,7 +1757,7 @@ function SubmitHelp() {
         }}
       >
         {copied ? '指令已复制' : '复制发布说明指令'}
-      </button>
+      </Button>
       <pre>{SUBMIT_MESSAGE}</pre>
       <p>外部机器无法连接本机平台时，交付消息只表示“待接入”，不能当作平台已收到。</p>
     </details>
@@ -1793,26 +1786,26 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   return (
     <>
       <section className="project-facts" aria-label="项目当前信息">
-        <div className="fact-card fact-card-git">
+        <Card className="fact-card fact-card-git">
           <span className="fact-label">当前代码位置</span>
           <strong>{git.branch || '分支未记录'}</strong>
           <span className="fact-detail">{git.shortHead ? `提交 ${git.shortHead}` : '提交未记录'}</span>
-        </div>
-        <div className="fact-card">
+        </Card>
+        <Card className="fact-card">
           <span className="fact-label">本地文件</span>
           <strong>{git.hasChanges ? '有尚未归属的改动' : '与最近检查一致'}</strong>
           <span className="fact-detail">{git.coherence === 'coherent' ? '代码状态已确认' : '等待再次确认'}</span>
-        </div>
-        <div className="fact-card">
+        </Card>
+        <Card className="fact-card">
           <span className="fact-label">当前 AI</span>
           <strong>{project.currentAgent || '没有进行中的会话'}</strong>
           <span className="fact-detail">{project.currentGoal || '尚未设置工作目标'}</span>
-        </div>
-        <div className="fact-card">
+        </Card>
+        <Card className="fact-card">
           <span className="fact-label">最近确认</span>
           <strong>{formatTime(project.lastObservedAt)}</strong>
           <span className="fact-detail">来自 Cockpit 的只读检查</span>
-        </div>
+        </Card>
       </section>
 
       <details className="project-tech-panel">
@@ -1826,10 +1819,17 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
       </details>
 
       {actionNotice && (
-        <div className={`detail-action-notice${actionNotice.error ? ' is-error' : ''}`} role="status">
-          <strong>{actionNotice.message}</strong>
-          {actionNotice.detail && <span>{actionNotice.detail}</span>}
-        </div>
+        <Alert
+          variant={actionNotice.error ? 'error' : 'success'}
+          className="detail-action-notice"
+          role="status"
+        >
+          <AlertIcon />
+          <div className="notice-body">
+            <AlertTitle>{actionNotice.message}</AlertTitle>
+            {actionNotice.detail && <AlertDescription>{actionNotice.detail}</AlertDescription>}
+          </div>
+        </Alert>
       )}
 
       <section className="workspace-section" aria-labelledby="workspace-title">
@@ -1839,9 +1839,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
             <h3 id="workspace-title">功能开发空间</h3>
             <p>每个空间独立承载一项功能；你只需选择一个空文件夹。</p>
           </div>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onCreateSpace} disabled={busy}>
-            {busy ? '正在处理…' : '新建开发空间'}
-          </button>
+          <Button variant="soft" size="sm" onClick={onCreateSpace} disabled={busy}>
+            {busy
+              ? (<><Spinner variant="dots" currentColor data-icon="start" />正在处理…</>)
+              : '新建开发空间'}
+          </Button>
         </div>
         {developmentSpaces.length === 0 ? (
           <p className="workspace-empty">还没有开发空间。需要并行做功能时再创建即可。</p>
@@ -1854,9 +1856,9 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                   <span>{space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已接入主项目，可稍后整理' : '可以继续开发'}</span>
                 </div>
                 {space.status === 'ready' && (
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => onAssignSpace(space)} disabled={busy}>
+                  <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
                     复制接入消息
-                  </button>
+                  </Button>
                 )}
               </article>
             ))}
@@ -1892,9 +1894,9 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                   {submission.pullRequestUrl && <a href={submission.pullRequestUrl} target="_blank" rel="noopener noreferrer">查看关联 PR（状态尚未核验）</a>}
                 </div>
                 {submission.reviewPrompt && (
-                  <button type="button" className="btn btn-primary btn-sm" onClick={() => onCopyReviewPrompt(submission)}>
+                  <Button variant="primary" size="sm" onClick={() => onCopyReviewPrompt(submission)}>
                     复制审核提示词
-                  </button>
+                  </Button>
                 )}
                 {submission.reviewPrompt && (
                   <details className="review-prompt-fallback">
@@ -1944,9 +1946,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
         )}
         {timeline.hasMore && (
           <div className="timeline-load-more">
-            <button type="button" className="btn btn-secondary" onClick={onLoadOlder} disabled={loadingMore}>
-              {loadingMore ? '正在加载…' : '加载更早记录'}
-            </button>
+            <Button variant="soft" onClick={onLoadOlder} disabled={loadingMore}>
+              {loadingMore
+                ? (<><Spinner variant="dots" currentColor data-icon="start" />正在加载…</>)
+                : '加载更早记录'}
+            </Button>
           </div>
         )}
       </section>
@@ -2626,103 +2630,93 @@ const TimelineNode = React.forwardRef(function TimelineNode({
 function ConfirmAddModal({ selection, onClose, onRegister, busy, notice }) {
   const [name, setName] = useState(selection?.folderName || '');
   const [stage, setStage] = useState('development');
-  const modalRef = useFocusTrap(Boolean(selection), onClose, busy);
+  const handleOpenChange = createDialogCloseGuard(busy, onClose);
 
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-    >
-      <section
-        ref={modalRef}
-        className="modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-folder-title"
-        tabIndex="-1"
-      >
-        <div className="modal-header">
-          <div>
-            <span className="badge badge-modal-kicker">安全确认 · 添加代码位置</span>
-            <h2 id="confirm-folder-title" className="modal-title">我们只会添加这一份代码</h2>
+    <Dialog open onOpenChange={handleOpenChange} disablePointerDismissal>
+      <DialogContent className="ugk-dialog" closeButton aria-labelledby="confirm-folder-title">
+        <DialogHeader>
+          <div className="modal-kicker-row">
+            <Badge variant="soft" size="sm" className="badge-brand">安全确认 · 添加代码位置</Badge>
           </div>
-          <button
-            type="button"
-            className="modal-close-icon-btn"
-            onClick={onClose}
-            disabled={busy}
-            aria-label="关闭"
-          >
-            ✕
-          </button>
-        </div>
+          <DialogTitle id="confirm-folder-title">我们只会添加这一份代码</DialogTitle>
+          <DialogDescription>确认只登记代码位置本身；你的文件不会被读取改动或上传。</DialogDescription>
+        </DialogHeader>
 
-        <div className="modal-body">
-          <div className="selection-info-box">
-            <span className="info-label">已选择文件夹</span>
-            <strong className="info-value">{selection.folderName}</strong>
+        <DialogBody>
+          <div className="modal-form">
+            <div className="selection-info-box">
+              <span className="info-label">已选择文件夹</span>
+              <strong className="info-value">{selection.folderName}</strong>
+            </div>
+
+            <Alert variant="info">
+              <AlertIcon />
+              <div className="notice-body">
+                <AlertTitle>安全边界保证</AlertTitle>
+                <AlertDescription>{selection.promise}</AlertDescription>
+              </div>
+            </Alert>
+
+            <Field>
+              <FieldLabel>项目显示名称</FieldLabel>
+              <Input
+                variant="soft"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={busy}
+                maxLength={100}
+              />
+            </Field>
+
+            <Field>
+              <FieldLabel>当前阶段</FieldLabel>
+              <Select
+                items={STAGE_OPTIONS}
+                value={stage}
+                onValueChange={(value) => setStage(String(value))}
+                disabled={busy}
+              >
+                <SelectTrigger className="w-full" aria-label="当前阶段">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STAGE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+
+            <details className="modal-tech-details">
+              <summary>查看技术位置</summary>
+              <code>{selection.folderPath}</code>
+            </details>
+
+            {notice && <NoticeBanner notice={notice} busy={busy} />}
           </div>
+        </DialogBody>
 
-          <div className="safety-promise-card">
-            <div className="safety-badge">安全边界保证</div>
-            <p className="safety-promise-text">{selection.promise}</p>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="modal-project-name" className="field-label">项目显示名称</label>
-            <input
-              id="modal-project-name"
-              className="field-input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={busy}
-              maxLength="100"
-            />
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="modal-project-stage" className="field-label">当前阶段</label>
-            <select
-              id="modal-project-stage"
-              className="field-select"
-              value={stage}
-              onChange={(e) => setStage(e.target.value)}
-              disabled={busy}
-            >
-              <option value="development">开发中</option>
-              <option value="maintenance">已经上线，只做日常维护</option>
-              <option value="paused">暂时放下</option>
-            </select>
-          </div>
-
-          <details className="tech-details modal-tech-details">
-            <summary>查看技术位置</summary>
-            <code>{selection.folderPath}</code>
-          </details>
-
-          {notice && <NoticeBanner notice={notice} busy={busy} />}
-        </div>
-
-        <div className="modal-footer">
-          <button
-            type="button"
-            className="btn btn-secondary"
+        <DialogFooter>
+          <Button
+            variant="soft"
             onClick={onClose}
             disabled={busy}
           >
             取消
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
+          </Button>
+          <Button
+            variant="primary"
             onClick={() => onRegister(name, stage)}
             disabled={busy || !name.trim()}
           >
-            {busy ? '正在安全检查…' : '确认添加'}
-          </button>
-        </div>
-      </section>
-    </div>
+            {busy
+              ? (<><Spinner variant="dots" currentColor data-icon="start" />正在安全检查…</>)
+              : '确认添加'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2739,90 +2733,83 @@ function HandoffModal({
   onCreate,
   onCopy,
 }) {
-  const modalRef = useFocusTrap(Boolean(project), onClose, busy);
+  const handleOpenChange = createDialogCloseGuard(busy, onClose);
   const isAdoptMode = project?.pendingAssignment?.mode === 'adopt';
 
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-    >
-      <section
-        ref={modalRef}
-        className="modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="handoff-dialog-title"
-        tabIndex="-1"
-      >
-        <div className="modal-header">
-          <div>
-            <span className="badge badge-modal-kicker">
+    <Dialog open onOpenChange={handleOpenChange} disablePointerDismissal>
+      <DialogContent className="ugk-dialog" closeButton aria-labelledby="handoff-dialog-title">
+        <DialogHeader>
+          <div className="modal-kicker-row">
+            <Badge variant="soft" size="sm" className="badge-brand">
               {dispatch ? '接入指令已就绪' : (isAdoptMode ? '重新生成接入指令' : '交给 AI')}
-            </span>
-            <h2 id="handoff-dialog-title" className="modal-title">
-              {isAdoptMode ? `${project.name} · 重新生成接入指令` : project.name}
-            </h2>
+            </Badge>
           </div>
-          <button
-            type="button"
-            className="modal-close-icon-btn"
-            onClick={onClose}
-            disabled={busy}
-            aria-label="关闭"
-          >
-            ✕
-          </button>
-        </div>
+          <DialogTitle id="handoff-dialog-title">
+            {isAdoptMode ? `${project.name} · 重新生成接入指令` : project.name}
+          </DialogTitle>
+          <DialogDescription>
+            {dispatch
+              ? '复制接入消息并发送给对应的 AI Agent 即可完成接手。'
+              : '生成一次性接手指令；只有 Agent 成功接入后才会开始工作。'}
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="modal-body">
+        <DialogBody>
           {!dispatch ? (
-            <>
+            <div className="modal-form">
               {isAdoptMode && (
-                <div className="info-alert-box">
-                  <p>该项目已有待接手的初始化任务，将为你重新生成有效的接入指令。</p>
-                </div>
+                <Alert variant="info">
+                  <AlertIcon />
+                  <div className="notice-body">
+                    <AlertDescription>
+                      该项目已有待接手的初始化任务，将为你重新生成有效的接入指令。
+                    </AlertDescription>
+                  </div>
+                </Alert>
               )}
 
-              <div className="form-field">
-                <label htmlFor="modal-agent-select" className="field-label">交给哪位 AI Agent</label>
-                <select
-                  id="modal-agent-select"
-                  className="field-select"
+              <Field>
+                <FieldLabel>交给哪位 AI Agent</FieldLabel>
+                <Select
+                  items={AGENT_OPTIONS}
                   value={agent}
-                  onChange={(e) => setAgent(e.target.value)}
+                  onValueChange={(value) => setAgent(String(value))}
                   disabled={busy}
                 >
-                  <option value="Codex">Codex</option>
-                  <option value="ZCode">ZCode</option>
-                  <option value="Antigravity">Antigravity</option>
-                </select>
-              </div>
+                  <SelectTrigger className="w-full" aria-label="交给哪位 AI Agent">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AGENT_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
 
-              <div className="form-field">
-                <label htmlFor="modal-goal-textarea" className="field-label">
+              <Field>
+                <FieldLabel>
                   {isAdoptMode ? '本次任务目标（保留原目标）' : '本次任务目标（可选）'}
-                </label>
-                <textarea
-                  id="modal-goal-textarea"
-                  className="field-textarea"
+                </FieldLabel>
+                <Textarea
+                  variant="soft"
                   value={goal}
                   onChange={(e) => {
                     if (!isAdoptMode) setGoal(e.target.value);
                   }}
-                  rows="3"
-                  maxLength="1000"
+                  rows={3}
+                  maxLength={1000}
                   placeholder="可以留空；例如：完成登录页的接口联调与异常处理"
                   disabled={busy}
                   readOnly={isAdoptMode}
-                  aria-describedby={isAdoptMode ? 'reissue-goal-hint' : undefined}
                 />
                 {isAdoptMode && (
-                  <p id="reissue-goal-hint" className="field-hint">
+                  <FieldDescription>
                     重新生成只更新一次性接入码和接手 Agent；原任务目标保持不变。
-                  </p>
+                  </FieldDescription>
                 )}
-              </div>
+              </Field>
 
               {project.lastHandoffManual && (
                 <div className="handoff-ref-box">
@@ -2835,68 +2822,68 @@ function HandoffModal({
                   )}
                 </div>
               )}
-            </>
+            </div>
           ) : (
-            <>
-              <div className="success-alert-box">
-                <p>
-                  接入指令已创建。请复制下方消息发送给 <strong>{agent}</strong>。
-                  MCP 客户端连接成功后，控制台会自动刷新为“会话已接入”状态。
-                </p>
-              </div>
+            <div className="modal-form">
+              <Alert variant="success">
+                <AlertIcon />
+                <div className="notice-body">
+                  <AlertDescription>
+                    接入指令已创建。请复制下方消息发送给 <strong>{agent}</strong>。
+                    MCP 客户端连接成功后，控制台会自动刷新为“会话已接入”状态。
+                  </AlertDescription>
+                </div>
+              </Alert>
 
-              <div className="form-field">
-                <label htmlFor="modal-dispatch-msg" className="field-label">接入消息指令</label>
-                <textarea
-                  id="modal-dispatch-msg"
-                  className="field-textarea dispatch-message"
+              <Field>
+                <FieldLabel>接入消息指令</FieldLabel>
+                <Textarea
+                  variant="soft"
+                  className="dispatch-message"
                   value={dispatch.message}
                   readOnly
-                  rows="8"
+                  rows={8}
                 />
-              </div>
+              </Field>
 
               <div className="expiry-hint">
                 接手码有效期至 <strong>{formatTime(dispatch.expiresAt)}</strong>。消息中不包含本地物理路径或主 API 密钥。
               </div>
-            </>
+            </div>
           )}
 
           {notice && <NoticeBanner notice={notice} busy={busy} />}
-        </div>
+        </DialogBody>
 
-        <div className="modal-footer">
-          <button
-            type="button"
-            className="btn btn-secondary"
+        <DialogFooter>
+          <Button
+            variant="soft"
             onClick={onClose}
             disabled={busy}
           >
             {dispatch ? '完成' : '取消'}
-          </button>
+          </Button>
           {!dispatch ? (
-            <button
-              type="button"
-              className="btn btn-primary"
+            <Button
+              variant="primary"
               onClick={onCreate}
               disabled={busy}
             >
               {busy
-                ? (isAdoptMode ? '正在重新生成…' : '正在创建…')
+                ? (<><Spinner variant="dots" currentColor data-icon="start" />{isAdoptMode ? '正在重新生成…' : '正在创建…'}</>)
                 : (isAdoptMode ? '重新生成接入指令' : '生成接入指令')}
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              className="btn btn-primary"
+            <Button
+              variant="primary"
               onClick={onCopy}
             >
               复制接手消息
-            </button>
+            </Button>
           )}
-        </div>
-      </section>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -2910,7 +2897,7 @@ function EditProjectModal({ project, onClose, onSave }) {
   const [notice, setNotice] = useState(null);
   const fileInputRef = useRef(null);
   const busy = selecting || saving;
-  const modalRef = useFocusTrap(Boolean(project), onClose, busy);
+  const handleOpenChange = createDialogCloseGuard(busy, onClose);
 
   function handleSelectImageClick() {
     if (busy) return;
@@ -2926,6 +2913,7 @@ function EditProjectModal({ project, onClose, onSave }) {
     const ext = (file.name.match(/\.[^.]+$/)?.[0] || '').toLowerCase();
     if (!allowedExtensions.includes(ext)) {
       setNotice({
+        tone: 'error',
         message: '仅支持 PNG、JPG、JPEG、GIF 或 WebP 图片。',
         impact: '项目头像未被修改，代码和已有记录不受影响。',
         requiredAction: '请选择支持的图片格式后重试。',
@@ -2934,6 +2922,7 @@ function EditProjectModal({ project, onClose, onSave }) {
     }
     if (file.size <= 0) {
       setNotice({
+        tone: 'error',
         message: '所选头像文件为空。',
         impact: '项目头像未被修改，代码和已有记录不受影响。',
         requiredAction: '请选择有效的图片文件后重试。',
@@ -2942,6 +2931,7 @@ function EditProjectModal({ project, onClose, onSave }) {
     }
     if (file.size > 5 * 1024 * 1024) {
       setNotice({
+        tone: 'error',
         message: '所选头像超过 5MB。',
         impact: '项目头像未被修改，代码和已有记录不受影响。',
         requiredAction: '请选择不超过 5MB 的图片后重试。',
@@ -2979,6 +2969,7 @@ function EditProjectModal({ project, onClose, onSave }) {
     const trimmed = name.trim();
     if (!trimmed) {
       setNotice({
+        tone: 'error',
         message: '项目显示名称不能为空。',
         impact: '没有执行保存，原有设置未被修改。',
         required_action: '请输入有效的项目显示名称后再保存。',
@@ -3007,32 +2998,17 @@ function EditProjectModal({ project, onClose, onSave }) {
     : null;
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        ref={modalRef}
-        className="modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="edit-project-dialog-title"
-        tabIndex="-1"
-      >
-        <div className="modal-header">
-          <div>
-            <span className="badge badge-modal-kicker">项目设置 · 识别与头像</span>
-            <h2 id="edit-project-dialog-title" className="modal-title">编辑项目信息</h2>
+    <Dialog open onOpenChange={handleOpenChange} disablePointerDismissal>
+      <DialogContent className="ugk-dialog" closeButton aria-labelledby="edit-project-dialog-title">
+        <DialogHeader>
+          <div className="modal-kicker-row">
+            <Badge variant="soft" size="sm" className="badge-brand">项目设置 · 识别与头像</Badge>
           </div>
-          <button
-            type="button"
-            className="modal-close-icon-btn"
-            onClick={onClose}
-            disabled={busy}
-            aria-label="关闭"
-          >
-            ✕
-          </button>
-        </div>
+          <DialogTitle id="edit-project-dialog-title">编辑项目信息</DialogTitle>
+          <DialogDescription>修改显示名称与头像；项目代码位置保持不变。</DialogDescription>
+        </DialogHeader>
 
-        <div className="modal-body">
+        <DialogBody>
           <input
             ref={fileInputRef}
             type="file"
@@ -3041,98 +3017,93 @@ function EditProjectModal({ project, onClose, onSave }) {
             onChange={handleFileChange}
             disabled={busy}
           />
-          <div className="form-field">
-            <label htmlFor="modal-edit-project-name" className="field-label">项目显示名称</label>
-            <input
-              id="modal-edit-project-name"
-              className="field-input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              disabled={busy}
-              maxLength="100"
-              placeholder="请输入项目显示名称"
-            />
-          </div>
+          <div className="modal-form">
+            <Field>
+              <FieldLabel>项目显示名称</FieldLabel>
+              <Input
+                variant="soft"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                disabled={busy}
+                maxLength={100}
+                placeholder="请输入项目显示名称"
+              />
+            </Field>
 
-          <div className="form-field">
-            <label className="field-label">项目头像</label>
-            <div className="avatar-current-row">
-              {previewAvatarUrl ? (
-                <div className="avatar-preview-box">
-                  <img
-                    src={previewAvatarUrl}
-                    alt="头像预览"
-                    className="project-avatar edit-avatar-preview"
-                  />
-                  <div className="avatar-preview-info">
-                    <div className="avatar-preview-actions">
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
+            <Field>
+              <FieldLabel>项目头像</FieldLabel>
+              <div className="avatar-preview-row">
+                {previewAvatarUrl ? (
+                  <div className="avatar-preview-box">
+                    <ProjectAvatar project={project} avatarUrl={previewAvatarUrl} size={56} />
+                    <div className="avatar-preview-info">
+                      <div className="avatar-preview-actions">
+                        <Button
+                          variant="soft"
+                          size="sm"
+                          onClick={handleSelectImageClick}
+                          disabled={busy}
+                        >
+                          {selecting ? '正在上传…' : '选择图片'}
+                        </Button>
+                        <Button
+                          variant="soft"
+                          size="sm"
+                          onClick={() => setAvatarPath('')}
+                          disabled={busy}
+                        >
+                          移除头像
+                        </Button>
+                      </div>
+                      <span className="avatar-preview-path" title={avatarPath}>{avatarPath}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="avatar-preview-box">
+                    <ProjectAvatar project={{ name }} avatarUrl={null} size={56} />
+                    <div className="avatar-preview-info">
+                      <Button
+                        variant="soft"
+                        size="sm"
                         onClick={handleSelectImageClick}
                         disabled={busy}
                       >
                         {selecting ? '正在上传…' : '选择图片'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => setAvatarPath('')}
-                        disabled={busy}
-                      >
-                        移除头像
-                      </button>
+                      </Button>
+                      <FieldDescription>未选择头像，使用名称前两字作为默认图标</FieldDescription>
                     </div>
-                    <span className="avatar-preview-path" title={avatarPath}>{avatarPath}</span>
                   </div>
-                </div>
-              ) : (
-                <div className="avatar-preview-box">
-                  <div className="project-avatar-fallback edit-avatar-preview" aria-hidden="true">
-                    {name ? name.slice(0, 2) : 'UGK'}
-                  </div>
-                  <div className="avatar-preview-info">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={handleSelectImageClick}
-                      disabled={busy}
-                    >
-                      {selecting ? '正在上传…' : '选择图片'}
-                    </button>
-                    <span className="field-hint">未选择头像，使用名称前两字作为默认图标</span>
-                  </div>
-                </div>
-              )}
-            </div>
-            <p className="field-hint">
-              支持 PNG、JPG、JPEG、GIF 或 WebP 图片（上限 5MB）。
-            </p>
+                )}
+              </div>
+              <FieldDescription>
+                支持 PNG、JPG、JPEG、GIF 或 WebP 图片（上限 5MB）。
+              </FieldDescription>
+            </Field>
+
+            {notice && <NoticeBanner notice={notice} busy={busy} />}
           </div>
+        </DialogBody>
 
-          {notice && <NoticeBanner notice={notice} busy={busy} />}
-        </div>
-
-        <div className="modal-footer">
-          <button
-            type="button"
-            className="btn btn-secondary"
+        <DialogFooter>
+          <Button
+            variant="soft"
             onClick={onClose}
             disabled={busy}
           >
             取消
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
+          </Button>
+          <Button
+            variant="primary"
             onClick={handleSave}
             disabled={busy || !name.trim()}
           >
-            {saving ? '正在保存…' : '保存设置'}
-          </button>
-        </div>
-      </section>
-    </div>
+            {saving
+              ? (<><Spinner variant="dots" currentColor data-icon="start" />正在保存…</>)
+              : '保存设置'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

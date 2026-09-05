@@ -46,6 +46,9 @@
     if (typeof document !== 'undefined' && document.documentElement) {
       var root = document.documentElement;
       root.dataset.theme = theme;
+      // Appica UI / Tailwind components key off the `.dark` / `.light` class.
+      root.classList.toggle('dark', theme === 'dark');
+      root.classList.toggle('light', theme === 'light');
       root.style.colorScheme = theme;
       syncThemeColor(theme);
     }
@@ -76,6 +79,10 @@
         // The choice stays in memory when storage is unavailable.
       }
       apply();
+    };
+
+    window.__ugkGetThemeMode = function () {
+      return mode;
     };
 
   }

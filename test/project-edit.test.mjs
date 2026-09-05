@@ -612,15 +612,18 @@ test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal preven
   // Verify ConfirmFolderModal export/alias exists
   assert.match(mainJsx, /const ConfirmFolderModal = ConfirmAddModal;|export (const|function) ConfirmFolderModal/);
 
-  // Verify ConfirmAddModal, HandoffModal, and EditProjectModal do not have onClick on modal-backdrop
-  const backdropMatches = [...mainJsx.matchAll(/<div[^>]*className=["'][^"']*modal-backdrop[^"']*["'][^>]*>/g)];
-  assert.ok(backdropMatches.length >= 3, `Expected at least 3 modal-backdrop instances, found ${backdropMatches.length}`);
-  for (const match of backdropMatches) {
-    assert.doesNotMatch(match[0], /onClick/, `modal-backdrop should not have onClick handler: ${match[0]}`);
+  // All three modals are Appica dialogs rendered open and controlled by the
+  // shared close guard, with pointer (backdrop) dismissal disabled.
+  const dialogMatches = [...mainJsx.matchAll(/<Dialog open onOpenChange=\{handleOpenChange\}[^>]*>/g)];
+  assert.ok(dialogMatches.length >= 3, `Expected at least 3 controlled open dialogs, found ${dialogMatches.length}`);
+  for (const match of dialogMatches) {
+    assert.match(match[0], /disablePointerDismissal/, `dialog must disable backdrop click dismissal: ${match[0]}`);
   }
 
-  // Verify useFocusTrap ignores Escape when busy
-  assert.match(mainJsx, /if \(busyRef\.current\) return;/);
+  // Verify the shared close guard ignores Escape/dismiss requests while busy
+  assert.match(mainJsx, /function createDialogCloseGuard/);
+  assert.match(mainJsx, /if \(busy\) \{/);
+  assert.match(mainJsx, /eventDetails\?\.cancel\?\.\(\)/);
 
   // Verify scanning UI and copy are removed from EditProjectModal
   assert.doesNotMatch(mainJsx, /检索项目内图片/);
