@@ -158,6 +158,71 @@ test('MCP service handlers refresh an expired scoped session once', async () => 
   assert.notEqual(calls[1].options.headers.authorization, calls[3].options.headers.authorization);
 });
 
+test('MCP refreshes a replaced local credential and preserves relay payload and bridge binding', async () => {
+  const oldToken = 'old-local-token-'.padEnd(40, 'x');
+  const newToken = 'new-local-token-'.padEnd(40, 'y');
+  const calls = [];
+  let refreshes = 0;
+  const session = { ok: true, sessionId: 'session-1', worktreeId: 'worktree-1', revision: 17, status: 'active' };
+  const handlers = createServiceHandlers({
+    token: oldToken,
+    refreshToken: () => { refreshes += 1; return newToken; },
+    workingDirectory: 'E:\\fixture\\active-project',
+    fetchImpl: async (url, options) => {
+      calls.push({ pathname: url.pathname, options });
+      if (url.pathname.endsWith('/relay') && options.headers.authorization === `Bearer ${oldToken}`) {
+        return Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
+      }
+      return Response.json(session);
+    },
+  });
+  await handlers.ugk_work_resume({ continueCode: 'fixture-code', clientRequestId: 'resume-1' });
+  const payload = { sessionId: 'session-1', expectedRevision: 17, clientRequestId: 'relay-1', summary: '接力' };
+  await handlers.ugk_work_relay(payload);
+  assert.equal(refreshes, 1);
+  assert.equal(calls[1].options.headers.authorization, `Bearer ${oldToken}`);
+  assert.equal(calls[2].options.headers.authorization, `Bearer ${newToken}`);
+  assert.equal(calls[1].options.body, calls[2].options.body);
+  assert.deepEqual(JSON.parse(calls[2].options.body), payload);
+  await handlers.ugk_work_context({});
+  assert.equal(calls[3].options.headers.authorization, `Bearer ${newToken}`);
+  assert.equal(JSON.parse(calls[3].options.body).bridgeBinding.sessionId, 'session-1');
+  assert.equal(calls.some((call) => call.pathname === '/api/v1/mcp/session'), false);
+});
+
+test('MCP does not downgrade a rejected local credential when refresh is unavailable or unchanged', async () => {
+  const token = 'local-token-'.padEnd(40, 'x');
+  for (const replacement of [null, '', token]) {
+    let calls = 0;
+    const handlers = createServiceHandlers({
+      token,
+      refreshToken: () => replacement,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json({ code: 'AUTH_REQUIRED', message: '身份已失效' }, { status: 401 });
+      },
+    });
+    await assert.rejects(handlers.ugk_work_context({}), /AUTH_REQUIRED/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('MCP retries a rejected replacement credential only once', async () => {
+  let calls = 0;
+  let refreshes = 0;
+  const handlers = createServiceHandlers({
+    token: 'old-token-'.padEnd(40, 'x'),
+    refreshToken: () => { refreshes += 1; return 'new-token-'.padEnd(40, 'y'); },
+    fetchImpl: async () => {
+      calls += 1;
+      return Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
+    },
+  });
+  await assert.rejects(handlers.ugk_work_context({}), /AUTH_REQUIRED/);
+  assert.equal(refreshes, 1);
+  assert.equal(calls, 2);
+});
+
 test('integration service handlers preserve typed allowlist on failed HTTP response and drop secrets', async () => {
   const handlers = createServiceHandlers({
     token: 'x'.repeat(32),

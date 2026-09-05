@@ -1,116 +1,59 @@
 # UGK Cockpit 前端设计系统规范
 
-- **设计定位**：本机控制台 · Mission Control Product UI
-- **视觉风格**：深色优先的暖中性控制台，强调真实状态、清晰行动和代码安全
-- **基准标准**：WCAG 2.2 AA / Responsive Fluid Grid / Zero-Dependency Web
+- **设计定位**：本机优先的个人 AI 项目工作台
+- **视觉风格**：石墨暗色 / 雾灰亮色的成熟桌面工作台，强调工作脉络、清晰行动和代码安全
+- **基准标准**：WCAG 2.2 AA / Responsive Fluid Grid / React + Appica UI
 - **主题**：默认深色，提供亮色，并支持跟随系统；由用户手动选择并持久化
 
 ## 1. 信息架构
 
-页面保持单向、可快速扫描的工作简报结构：
+桌面端以固定导航和充分利用可用宽度的内容区组成工作台，避免居中网页式的大留白与项目卡片墙。
 
 ```text
-Mission Control Shell
-├── 顶部产品区：产品名、版本、本机服务状态、手动刷新、添加项目
+工作台 Shell
+├── 固定左侧导航（236px）：项目总览、名称搜索、项目切换、主题、本地同步状态
+├── 窄顶部工具栏：当前项目、手动刷新、添加项目
 ├── 全局通知：发生了什么、影响、下一步和可用重试
-├── 项目矩阵：待确认、工作会话、准备就绪、日常维护/暂时放下（按行动状态分组）
-├── 项目详情页：独立 hash URL、项目运行详情和正常页面滚动
-└── 操作弹窗：添加项目、创建或重新生成接入指令
+├── 项目总览：按行动状态分组的项目行，名称 / 状态 / 最近记录 / 具体进展 / 真实操作
+├── 项目详情页：独立 hash URL、紧凑标题、正常页面滚动
+│   ├── 工作线（默认）：多轨时间线、工作线聚焦、展开细节、加载更早记录
+│   ├── 工作说明（notes）：说明收件箱、使用帮助、折叠的旧版代码送审记录
+│   ├── 开发空间（spaces）：工作副本列表和真实的创建、接入操作
+│   └── 上下文侧栏：当前会话与目标、最近只读代码检查、折叠技术详情
+└── 操作弹窗：添加项目、创建或重新生成接入指令、需要确认的操作
 ```
 
-普通界面使用“项目、代码位置、AI 工作会话、接手记录”等自然语言。路径、内部 ID 和底层状态只在“技术详情”中出现。
+普通界面使用“项目、代码位置、AI 工作会话、接手记录”等自然语言。路径、内部 ID 和底层状态只在“技术详情”中出现。详情默认首先呈现时间线，工作说明和开发空间不再排列在时间线之前。总览不提供接口尚未给出的全局待办数或跨项目完整时间线。
 
 ## 2. 颜色与 Design Tokens
 
-采用暖中性画布、单一安全橙强调。**深色为默认主题**，亮色主题通过 `<html data-theme="light">` 覆盖同名令牌。
+采用石墨暗色画布、雾灰亮色画布和克制的温和橙强调。**深色为默认主题**。当前视觉令牌以 `web/src/workbench.css` 为准，Shell 结构样式位于 `web/src/workbench-shell.css`；Appica UI 的背景、文字、边框、主要动作令牌映射到同一组 `--wb-*` 语义令牌。
 
-组件一律**只引用语义令牌**，不出现硬编码色值——这是双主题能保持一致的前提。
+| 语义令牌 | 石墨暗色 | 雾灰亮色 |
+| --- | --- | --- |
+| `--wb-canvas` | `oklch(0.208 0.009 265)` | `oklch(0.971 0.005 265)` |
+| `--wb-sidebar` | `oklch(0.183 0.008 265)` | `oklch(0.946 0.008 265)` |
+| `--wb-surface` | `oklch(0.232 0.009 265)` | `oklch(0.989 0.002 265)` |
+| `--wb-ink` | `oklch(0.925 0.008 265)` | `oklch(0.29 0.018 265)` |
+| `--wb-muted` | `oklch(0.742 0.014 265)` | `oklch(0.47 0.016 265)` |
+| `--wb-accent` | `oklch(0.79 0.106 55)` | `oklch(0.53 0.132 45)` |
 
-```css
-:root {
-  /* 深色（默认） */
-  --surface-app: #14120f;
-  --surface-card: #1c1917;
-  --surface-raised: #252220;
-  --surface-sunken: #0f0e0c;
-  --border-subtle: #322d29;
-  --border-card: #3f3833;
-  --border-control: #72685f;
-  --ink-primary: #f2efe9;
-  --ink-secondary: #d8d3cb;
-  --ink-muted: #a8a29e;
-  --ink-faint: #948d85;
-  --accent: #f97316;
-  --accent-hover: #fb923c;
-  --accent-text: #fb923c;
-  --accent-ink: #1c1105;
-  --accent-soft: #2b1a0e;
-  --accent-soft-border: #7c4a1d;
-  --timeline-main-line: #f97316;
-  --timeline-space-line: #62a6ad;
-  --timeline-space-alt-line: #b18b9d;
-  --timeline-space-third-line: #a3a36c;
-  --timeline-unknown-line: #8d8880;
-  --timeline-connector: #554d45;
-  --state-attention-bg: #2b1a0e;  --state-attention-border: #7c4a1d;  --state-attention-text: #fb923c;
-  --state-active-bg: #10241d;      --state-active-border: #2f6b52;      --state-active-text: #34d399;
-  --state-ready-bg: #2a2410;       --state-ready-border: #6b5a1e;       --state-ready-text: #facc15;
-  --state-paused-bg: #22201e;      --state-paused-border: #45403c;      --state-paused-text: #b8b2ab;
-}
-
-:root[data-theme="light"] {
-  --surface-app: #f5f2ec;
-  --surface-card: #fffdf9;
-  --surface-raised: #ffffff;
-  --surface-sunken: #f1ece4;
-  --border-subtle: #e3dbce;
-  --border-card: #d8cec0;
-  --border-control: #8a8177;
-  --ink-primary: #17202e;
-  --ink-secondary: #374151;
-  --ink-muted: #5b6472;
-  --ink-faint: #6b7482;
-  --accent: #c2410c;
-  --accent-hover: #9a3412;
-  --accent-text: #9a3412;
-  --accent-ink: #ffffff;
-  --accent-soft: #fff7ed;
-  --accent-soft-border: #fdba74;
-  --timeline-main-line: #c2410c;
-  --timeline-space-line: #167982;
-  --timeline-space-alt-line: #8f4f70;
-  --timeline-space-third-line: #697029;
-  --timeline-unknown-line: #77706a;
-  --timeline-connector: #c6bbad;
-  --state-attention-bg: #fff7ed;  --state-attention-border: #fdba74;  --state-attention-text: #9a3412;
-  --state-active-bg: #ecfdf5;     --state-active-border: #6ee7b7;     --state-active-text: #065f46;
-  --state-ready-bg: #fefce8;      --state-ready-border: #fde047;      --state-ready-text: #854d0e;
-  --state-paused-bg: #f1ece4;     --state-paused-border: #d8cec0;     --state-paused-text: #55606e;
-}
-```
-
-对比度（对卡片底色实算，均满足 AA）：
-
-- 深色正文 15.24:1、次要 11.74:1、弱化 6.93:1、最弱 5.34:1。
-- 深色强调按钮：`#1c1105` 文字 on `#f97316` 为 **6.62:1**；同底白字只有 2.80:1，**深色主题必须使用深字**。
-- 亮色强调按钮：白字 on `#c2410c` 为 5.18:1。
-- 四类状态徽标文字对其背景均 ≥ 5.44:1。
-
-- **状态色不铺满卡片**：卡片一律 `--surface-card`，状态色只用于左侧色条（3px，待确认类加粗到 4px）与状态徽标。靠这个约束避免"便签墙"观感。
-- 深色下阴影几乎不可见，层次由**背景差 + 1px 边框**承担，不靠投影。
-- 正文、状态和动作必须同时用文字表达，颜色只作辅助编码。
-- 不使用蓝紫渐变、玻璃拟态、纸张纹理或装饰性噪点；图标为内联 SVG，不使用字符字形。
+- 橙色用于当前选择、主要动作与主工作线；开发空间使用低饱和区别色，颜色身份不随事件状态变化。
+- 项目行使用中性表面与分隔线，状态以文字标签呈现；不铺满状态底色，也不加彩色左边条。
+- 层次主要由背景差、1px 边框与低透明度阴影表达，不做厚重悬浮。
+- 强调按钮引用 `--primary-foreground`：暗色使用深字，亮色使用浅字。文字与控件仍须按第 8 节标准检查，旧暖色令牌的对比度结果不适用于当前主题。
+- 不使用蓝紫渐变、玻璃拟态、纸张纹理或装饰性噪点；图标为内联细线 SVG，不使用字符字形。
 
 ## 2.1 主题切换
 
-- 首绘前由 `web/public/assets/theme-boot.js` 读取 `localStorage['ugk-cockpit-theme']`（`light|dark|system`，缺省 `dark`），写入 `documentElement.dataset.theme`、`style.colorScheme` 以及单个 `theme-color` meta 元素（使 Windows 原生滚动条、表单与浏览器外框色彩同步跟随）。
+- 首绘前由 `web/public/assets/theme-boot.js` 读取 `localStorage['ugk-cockpit-theme']`（`light|dark|system`，缺省 `dark`），写入 `documentElement.dataset.theme`、`.dark` / `.light` 类、`style.colorScheme` 以及单个 `theme-color` meta 元素（使 Windows 原生滚动条、表单与浏览器外框色彩同步跟随）。
 - 该脚本位于 `assets/` 下并以经典同步脚本引入，因此**满足 CSP `script-src 'self'`，无需 nonce，也无需改动服务端静态资源白名单**。
 - `prefers-color-scheme` 监听**在"跟随系统"模式下实时生效**，并在系统变化时同步更新 `dataset.theme`、`style.colorScheme` 与 `theme-color` meta 标签；手动选择亮色或暗色时不会被系统变化覆盖。
-- 界面右上角提供「亮色 / 暗色 / 跟随系统」分段控件，用 `aria-pressed` 标注当前项。
+- 固定导航底部提供「亮色 / 暗色 / 跟随系统」分段控件，用 `aria-pressed` 标注当前项。
 
 ## 2.2 排版基线（中文）
 
-- 字重只允许 **400 / 600 / 700**：Windows 上的 Microsoft YaHei 只有 400 与 700，`650/740/760` 会被量化导致层级丢失。
+- 正文以 **400**、标题以 **600** 为主，紧凑控件可用 **500**；中文层级同时依赖字号、间距和颜色，不依赖系统字体难以区分的相邻字重。
 - **中文禁用负字距**：正文 `letter-spacing: 0`，标题最多 `-0.01em`。
 - 字号下限 **11px**；中文 `line-height` ≥ 1.5。
 - 等宽字体族末尾补 `"Microsoft YaHei UI"`，否则中英混排会基线跳动。
@@ -125,10 +68,10 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
   "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
 ```
 
-- 产品标题：20–24px，700–800 字重。
-- 页面与分组标题：17–24px，700–800 字重。
-- 卡片标题：18–24px，700–800 字重。
-- 正文与状态说明：13–15px，行高 1.45–1.6。
+- 导航品牌：16px；总览标题 28px，项目标题 26px，600 字重；窄屏适当缩小。
+- 项目行名称：15–16px；时间线摘要标题 13–14px，600 字重。
+- 分组标题与上下文标题：12–13px。
+- 正文与状态说明：12–14px，行高 1.6–1.85。
 - 元信息与徽标：11–12px，但仍须满足文字对比度。
 - 接入指令、路径和哈希使用系统等宽字体。
 
@@ -136,7 +79,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 
 ## 4. 形状、边框与阴影
 
-- 主要卡片和模态框使用 **8–12px** 圆角。
+- 时间线卡片使用 **11px** 圆角，项目列表容器 **14px**，模态框 **16px**。
 - 按钮、输入框与紧凑信息块可使用 **4–8px** 圆角，以保持清晰密度。
 - 实体组件使用 1px 中性边框。
 - 卡片只使用轻微、低透明度的柔和阴影，避免厚重悬浮效果；深色主题下层次改由背景差与边框承担（深色阴影不可见）。
@@ -168,10 +111,10 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 
 ### 按钮
 
-- Primary：深橙底、白字（深色主题下反转为深墨字）、1px 同色边框；hover 使用更深橙。
-- Secondary：暖白底、深墨蓝字、中性边框。
+- Primary：温和橙底，文字使用主题对应的 `--primary-foreground`；hover 使用 `--primary-strong`。
+- Secondary：当前主题的中性表面、正文色与中性边框。
 - Disabled 只用于确有控件语义但暂不可用的动作；纯状态说明使用非交互标签。
-- `:focus-visible` 使用 3px 深橙轮廓和 3px offset。
+- `:focus-visible` 使用至少 2px 温和橙轮廓和 3px offset。
 
 ### 通知
 
@@ -195,24 +138,30 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
 
 | 区间 | 布局 |
 | --- | --- |
-| `>= 1180px` | 最大宽度约 1200px；项目卡两列 |
-| `769–1179px` | 保持弹性两列，缩减间距 |
-| `<= 768px` | 顶部操作纵向、项目卡单列、主动作满宽；项目详情继续使用页面滚动，操作弹窗接近满宽 |
+| `> 1199px` | 固定 236px 左导航；正文填充余下宽度；项目分组内按行排列；详情右栏约 266px，超宽屏约 292px |
+| `1041–1199px` | 固定导航不变，缩减正文间距，详情右栏约 222px |
+| `921–1040px` | 固定导航保留；上下文移到正文下方，以两列组织 |
+| `<= 920px` | 导航改为顶部可展开区域，选择项目后收起；不覆盖正文 |
+| `<= 700px` | 项目行内容纵向排列；上下文单列；时间线仍保留图带与正常页面滚动 |
 
-移动端活跃进展摘要最多显示两行，避免长文本挤压主动作；完整信息仍可在后续详情中读取。
+总览与详情内容区共用 2000px 宽度上限并靠导航侧排列，不套用旧的 1200px 居中上限。摘要取最近记录首行并最多显示两行，完整内容在详情读取；长项目名、路径和正文须换行或局部省略，避免整页横向溢出。
 
 工作线时间线在左侧保留稳定多轨图带，主项目使用暖橙，开发空间使用低饱和区别色，状态色只表达事件状态。卡片共用同一左边界，节点到卡片使用淡连接段；卡片顶部依次突出工作副本、事件类型和时间，Agent、工作线名称与代码保存点作为次要证据。按 `worktreeId`/开发空间身份归轨，不按相邻事件、Agent 或分支名推断关系；来源未知时使用独立中性轨。点击任意轨道节点或卡片空白处突出整条工作线，其他卡片仍保持原位并保留可读正文；「显示全部」恢复默认。分支创建来源只在有平台来源记录时绘制，主项目接入只接受真实 `integrated` 回执；送审、审核通过和普通交接均不绘制合流。
 
 ## 8. 动效与无障碍
+
+- 动效只反馈操作：项目切换使用约 220ms、4px 的轻微进入；页签切换约 220ms、5px；展开详情约 180ms、3px。
+- hover、选中与工作线聚焦通过颜色、边框和轻微阴影反馈，约 180–240ms；不逐节点播放时间线入场动画，不用持续闪烁表示 Agent 在线。
+- 时间线测量与坐标仍由几何层负责；视觉过渡不改写来源关系或节点身份。
+- `prefers-reduced-motion` 下禁用 CSS 动画、过渡、按压位移及平滑滚动；Shell 项目切换的 Web Animations API 在调用前检查此偏好。
 
 ```css
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    animation: none !important;
+    transition: none !important;
     scroll-behavior: auto !important;
   }
 }

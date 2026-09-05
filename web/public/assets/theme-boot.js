@@ -2,8 +2,8 @@
   var STORAGE_KEY = 'ugk-cockpit-theme';
   var MODES = ['light', 'dark', 'system'];
   var THEME_COLORS = {
-    dark: '#14120f',
-    light: '#f5f2ec',
+    dark: '#191b20',
+    light: '#f4f5f7',
   };
   var mode = 'dark';
 

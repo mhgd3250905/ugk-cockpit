@@ -4,15 +4,18 @@ import { createServiceHandlers } from './service-client.mjs';
 import { createMcpStdioServer } from './stdio-protocol.mjs';
 
 const dataRoot = process.env.LOCALAPPDATA;
-let token = null;
-if (dataRoot) {
+function readLocalToken() {
+  if (!dataRoot) return null;
   try {
-    token = readFileSync(path.join(dataRoot, 'UGK Cockpit', 'api-token'), 'utf8').trim();
+    return readFileSync(path.join(dataRoot, 'UGK Cockpit', 'api-token'), 'utf8').trim();
   } catch (error) {
     if (!['ENOENT', 'EACCES', 'EPERM'].includes(error?.code)) throw error;
+    return null;
   }
 }
 
 createMcpStdioServer({
-  handlers: createServiceHandlers({ token, workingDirectory: process.cwd() }),
+  handlers: createServiceHandlers({
+    token: readLocalToken(), refreshToken: readLocalToken, workingDirectory: process.cwd(),
+  }),
 });

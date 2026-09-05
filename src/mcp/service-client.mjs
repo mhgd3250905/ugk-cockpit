@@ -129,6 +129,7 @@ const DEFAULT_SERVICE_URL = 'http://127.0.0.1:41737';
 
 export function createServiceHandlers({
   token,
+  refreshToken,
   baseUrl = DEFAULT_SERVICE_URL,
   fetchImpl = fetch,
   workingDirectory = process.cwd(),
@@ -193,8 +194,14 @@ export function createServiceHandlers({
           publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
         });
       }
-      if (response.status !== 401 || token || attempt === 1) break;
-      scopedToken = null;
+      if (response.status !== 401 || attempt === 1) break;
+      if (token) {
+        const replacement = await refreshToken?.();
+        if (typeof replacement !== 'string' || replacement.length < 32 || replacement === bearer) break;
+        token = replacement;
+      } else {
+        scopedToken = null;
+      }
     }
     if (isStructured) {
       let body;

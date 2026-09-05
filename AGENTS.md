@@ -23,6 +23,7 @@ UGK Cockpit 首先是给项目所有者每天使用的产品，不是只给平�
 - 同一 worktree 最多一个 active write lease；takeover 必须由用户确认。
 - Git 和文件系统探测使用 argv、显式 cwd、超时和输出上限，不拼接 shell 命令。
 - 修改后运行 `npm test`；Phase 0 门禁运行 `npm run test:phase0`。
+- 启动或重启服务后必须核对已有项目列表及详情，不能仅凭 HTTP 200 报告成功。不得在服务运行时覆盖数据目录；空列表与磁盘记录不一致时，按 `docs/LOCAL_SERVICE_RECOVERY.md` 排查，禁止用重新 init、清库或重新添加项目代替恢复。
 
 ## 版本与提交
 

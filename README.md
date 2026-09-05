@@ -52,6 +52,8 @@ npm run serve
 
 然后打开 `http://127.0.0.1:41737`。数据保存在 `%LOCALAPPDATA%\UGK Cockpit`，项目代码不会被 Cockpit 自动清理、提交、上传或删除。
 
+启动验收还需确认已有项目列表及详情正常，不能仅检查 HTTP 200。不得在服务运行时覆盖数据目录；遇到项目突然消失，先按[本机服务数据一致性与故障恢复](docs/LOCAL_SERVICE_RECOVERY.md)排查，不要重新 init 或重新添加项目。
+
 ## 本机 MCP
 
 MCP server 通过 loopback service 使用同一数据库事实源，不直接接触业务项目文件。可先手工验证：

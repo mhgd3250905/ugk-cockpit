@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button, buttonVariants } from '@appica/ui-react/button';
 import { Badge } from '@appica/ui-react/badge';
-import { Card } from '@appica/ui-react/card';
 import {
   Dialog,
   DialogContent,
@@ -44,7 +43,9 @@ import {
   getProjectCardAvatarColorStyle,
   projectAvatarUrl,
 } from './avatar-color.mjs';
+import { WorkbenchShell } from './workbench-shell.jsx';
 import './styles.css';
+import './workbench.css';
 
 const STATUS = {
   preexisting_changes: {
@@ -460,32 +461,6 @@ function SystemIcon() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="2" y="4" width="20" height="13" rx="2" />
       <path d="M8 21h8M12 17v4" />
-    </svg>
-  );
-}
-
-function RefreshIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 11a8 8 0 1 0-2.3 5.7" />
-      <path d="M20 4v7h-7" />
-    </svg>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
-
-function LogoIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 17V7l8 10V7" />
-      <path d="M18 17h3" />
     </svg>
   );
 }
@@ -1290,82 +1265,20 @@ function App() {
   }, [projects]);
 
   return (
-    <div className="mission-control-shell">
-      <header className="control-header">
-        <div className="header-main-row">
-          <div className="brand-zone">
-            <div className="brand-mark" aria-hidden="true"><LogoIcon /></div>
-            <div>
-              <div className="brand-title-row">
-                <h1 className="brand-title">UGK Cockpit</h1>
-                <Badge variant="soft" size="sm" className="badge-version">{__APP_VERSION__}</Badge>
-              </div>
-              <p className="brand-tagline">本机 AI 项目控制台</p>
-            </div>
-          </div>
-
-          <div className="header-actions">
-            <ThemeSwitch mode={themeMode} onChange={setThemeMode} />
-            <Button
-              variant="soft"
-              size="sm"
-              onClick={() => refresh()}
-              disabled={busy}
-              title="重新加载简报数据"
-            >
-              <RefreshIcon data-icon="start" /> 重新加载简报
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => chooseFolder()}
-              disabled={busy}
-            >
-              <PlusIcon data-icon="start" /> 选择项目文件夹
-            </Button>
-          </div>
-        </div>
-
-        <div className="header-status-row">
-          <div className="connection-status">
-            <span className={`status-indicator-dot ${isStale ? 'dot-stale' : 'dot-active'}`} />
-            <span className="status-label">
-              {isStale
-                ? (dashboard ? '连接暂缓（已保留最后已知简报）' : '连接暂缓（尚未取得简报）')
-                : '本机服务运行中'}
-            </span>
-            <span className="status-sep">·</span>
-            <time className="status-time">
-              {dashboard?.refreshedAt ? `同步于 ${formatTime(dashboard.refreshedAt)}` : '正在同步…'}
-            </time>
-            {isStale && (
-              <button type="button" className="link-btn" onClick={() => refresh()}>
-                重试连接
-              </button>
-            )}
-          </div>
-
-          {projects.length > 0 && (
-            <div className="header-stats" aria-label="项目状态统计">
-              <Badge variant="soft" size="sm" className="stat-neutral">全部 <strong>{stats.total}</strong></Badge>
-              {stats.attentionCount > 0 && (
-                <Badge variant="soft" size="sm" className="stat-attention">待确认 <strong>{stats.attentionCount}</strong></Badge>
-              )}
-              {stats.activeCount > 0 && (
-                <Badge variant="soft" size="sm" className="stat-active">会话中 <strong>{stats.activeCount}</strong></Badge>
-              )}
-              {stats.readyCount > 0 && (
-                <Badge variant="soft" size="sm" className="stat-ready">就绪 <strong>{stats.readyCount}</strong></Badge>
-              )}
-              {stats.pausedCount > 0 && (
-                <Badge variant="soft" size="sm" className="stat-neutral">维护/放下 <strong>{stats.pausedCount}</strong></Badge>
-              )}
-            </div>
-          )}
-        </div>
-      </header>
-
+    <WorkbenchShell
+      projects={projects}
+      activeProjectId={route.kind === 'detail' ? activeDetailProjectId : null}
+      onOpenProject={openProjectDetail}
+      onOverview={closeProjectDetail}
+      onAddProject={() => chooseFolder()}
+      busy={busy}
+      themeControl={<ThemeSwitch mode={themeMode} onChange={setThemeMode} />}
+      isStale={isStale}
+      refreshedAt={dashboard?.refreshedAt}
+      onRefresh={() => refresh()}
+    >
       <main className="control-content">
+        {notice && !selection && !handoffProject && <NoticeBanner notice={notice} busy={busy} />}
         {route.kind === 'detail' ? (
           <ProjectDetailPage
             state={route.invalid || projectDetail?.seed?.id !== activeDetailProjectId ? null : projectDetail}
@@ -1383,9 +1296,10 @@ function App() {
           />
         ) : (
           <>
-            {notice && !selection && !handoffProject && (
-              <NoticeBanner notice={notice} busy={busy} />
-            )}
+            <header className="overview-heading">
+              <div><p className="page-eyebrow">我的项目</p><h1>项目工作台</h1></div>
+              {dashboard && <p className="overview-summary">{stats.total} 个项目 · {stats.attentionCount} 个待确认 · {stats.activeCount} 个会话接入或未交接</p>}
+            </header>
 
             {!dashboard ? (
               <LoadingState notice={notice} />
@@ -1393,7 +1307,7 @@ function App() {
               <EmptyState busy={busy} onChoose={() => chooseFolder()} />
             ) : (
               groups.length > 0 && (
-                <section className="projects-section" aria-label="项目矩阵">
+                <section className="projects-section" aria-label="项目列表">
                   <div className="groups-container">
                     {groups.map((group) => (
                       <div key={group.key} className="status-group">
@@ -1455,7 +1369,7 @@ function App() {
         />
       )}
 
-    </div>
+    </WorkbenchShell>
   );
 }
 
@@ -1549,6 +1463,14 @@ function ProjectCard({ project, onAction, onOpen }) {
   const confirmedAt = project.activeWork?.lastProgress?.createdAt
     ?? project.activeWork?.lastActivityAt
     ?? project.lastObservedAt;
+  const progressSummary = project.activeWork?.lastProgress?.note
+    || project.activeRelay?.summary
+    || project.activeWork?.task
+    || project.waitingAgent?.task
+    || project.pendingAssignment?.task
+    || project.activeRun?.goal
+    || project.lastHandoff?.summary
+    || project.lastHandoffManual?.summary;
   const showStage = project.stage && project.stage !== 'development';
 
   return (
@@ -1568,7 +1490,7 @@ function ProjectCard({ project, onAction, onOpen }) {
         </div>
 
         <div className="card-name-row">
-          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={30} />
+          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={40} />
           <h4 className="card-name">{project.name}</h4>
         </div>
         {showStage && (
@@ -1576,8 +1498,8 @@ function ProjectCard({ project, onAction, onOpen }) {
             {STAGES[project.stage] || project.stage}
           </Badge>
         )}
-        <p className="card-what">{copy.title}</p>
-        <p className="card-impact">{copy.detail}</p>
+        <p className="card-what">{(progressSummary || copy.title).split(/\r?\n/)[0]}</p>
+        {theme === 'attention' && <p className="card-impact">{copy.detail}</p>}
       </button>
 
       <footer className="card-foot">
@@ -1643,14 +1565,6 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
           <button type="button" className="detail-back-link" onClick={onBack}>
             ← 返回项目列表
           </button>
-          <div className="detail-kicker-row">
-            {project.stage && (
-              <Badge variant="soft" size="sm" className="stat-neutral">
-                {STAGES[project.stage] || project.stage}
-              </Badge>
-            )}
-            <Badge variant="soft" size="sm" className="detail-status-badge">{eyebrow}</Badge>
-          </div>
           <div className="detail-identity-row">
             <ProjectAvatar
               project={project}
@@ -1673,6 +1587,14 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
                   </Button>
                 )}
               </div>
+              <div className="detail-kicker-row">
+                {project.stage && (
+                  <Badge variant="soft" size="sm" className="stat-neutral">
+                    {STAGES[project.stage] || project.stage}
+                  </Badge>
+                )}
+                <Badge variant="soft" size="sm" className="detail-status-badge">{eyebrow}</Badge>
+              </div>
               <p>{headingCopy}</p>
             </div>
           </div>
@@ -1688,6 +1610,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
           <DetailErrorState notice={state.error} onRetry={onRetry} />
         ) : state.data ? (
           <ProjectDetailContent
+            key={effectiveProjectId}
             data={state.data}
             loadingMore={state.loadingMore}
             loadError={state.error}
@@ -1769,6 +1692,8 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   const git = project.git ?? {};
   const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
   const revision = project.activeWork?.revision ?? project.activeRun?.revision ?? null;
+  const [activeTab, setActiveTab] = useState('timeline');
+  const tabRefs = useRef([]);
   const [focusedLaneKey, setFocusedLaneKey] = useState(null);
   const timelineItems = Array.isArray(timeline?.items) ? timeline.items : [];
   const timelineLanes = useMemo(() => getTimelineLanes(timeline, timelineItems), [timeline, timelineItems]);
@@ -1783,41 +1708,25 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
     }
   }, [focusedLaneKey, timelineLanes]);
 
+  const tabs = [
+    { id: 'timeline', label: '工作线' },
+    { id: 'notes', label: '工作说明' },
+    { id: 'spaces', label: '开发空间' },
+  ];
+  function handleTabKeyDown(event, index) {
+    let next;
+    if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    setActiveTab(tabs[next].id);
+    tabRefs.current[next]?.focus();
+  }
+
   return (
     <>
-      <section className="project-facts" aria-label="项目当前信息">
-        <Card className="fact-card fact-card-git">
-          <span className="fact-label">当前代码位置</span>
-          <strong>{git.branch || '分支未记录'}</strong>
-          <span className="fact-detail">{git.shortHead ? `提交 ${git.shortHead}` : '提交未记录'}</span>
-        </Card>
-        <Card className="fact-card">
-          <span className="fact-label">本地文件</span>
-          <strong>{git.hasChanges ? '有尚未归属的改动' : '与最近检查一致'}</strong>
-          <span className="fact-detail">{git.coherence === 'coherent' ? '代码状态已确认' : '等待再次确认'}</span>
-        </Card>
-        <Card className="fact-card">
-          <span className="fact-label">当前 AI</span>
-          <strong>{project.currentAgent || '没有进行中的会话'}</strong>
-          <span className="fact-detail">{project.currentGoal || '尚未设置工作目标'}</span>
-        </Card>
-        <Card className="fact-card">
-          <span className="fact-label">最近确认</span>
-          <strong>{formatTime(project.lastObservedAt)}</strong>
-          <span className="fact-detail">来自 Cockpit 的只读检查</span>
-        </Card>
-      </section>
-
-      <details className="project-tech-panel">
-        <summary>技术详情</summary>
-        <dl>
-          <div><dt>代码位置</dt><dd>{project.path}</dd></div>
-          <div><dt>项目 ID</dt><dd>{project.id}</dd></div>
-          {sessionId && <div><dt>会话 ID</dt><dd>{sessionId}</dd></div>}
-          {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
-        </dl>
-      </details>
-
       {actionNotice && (
         <Alert
           variant={actionNotice.error ? 'error' : 'success'}
@@ -1832,128 +1741,176 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
         </Alert>
       )}
 
-      <section className="workspace-section" aria-labelledby="workspace-title">
-        <div className="workspace-heading">
-          <div>
-            <span className="timeline-overline">DEVELOPMENT SPACES</span>
-            <h3 id="workspace-title">功能开发空间</h3>
-            <p>每个空间独立承载一项功能；你只需选择一个空文件夹。</p>
-          </div>
-          <Button variant="soft" size="sm" onClick={onCreateSpace} disabled={busy}>
-            {busy
-              ? (<><Spinner variant="dots" currentColor data-icon="start" />正在处理…</>)
-              : '新建开发空间'}
-          </Button>
-        </div>
-        {developmentSpaces.length === 0 ? (
-          <p className="workspace-empty">还没有开发空间。需要并行做功能时再创建即可。</p>
-        ) : (
-          <div className="workspace-list">
-            {developmentSpaces.map((space) => (
-              <article className="workspace-card" key={space.spaceId}>
+      <div className="project-tabs" role="tablist" aria-label="项目内容">
+        {tabs.map((tab, index) => (
+          <button key={tab.id} type="button" role="tab"
+            id={`project-tab-${tab.id}`} aria-controls={`project-panel-${tab.id}`}
+            aria-selected={activeTab === tab.id} tabIndex={activeTab === tab.id ? 0 : -1}
+            ref={(element) => { tabRefs.current[index] = element; }}
+            onClick={() => setActiveTab(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}
+          >{tab.label}</button>
+        ))}
+      </div>
+      <div className="workspace-layout">
+        <div className="workspace-main">
+          <div className="workspace-panel" id="project-panel-timeline" role="tabpanel" aria-labelledby="project-tab-timeline" tabIndex={0} hidden={activeTab !== 'timeline'}>
+            <section className="timeline-section" aria-labelledby="timeline-title">
+              <div className="timeline-heading">
                 <div>
-                  <strong>{space.name}</strong>
-                  <span>{space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已接入主项目，可稍后整理' : '可以继续开发'}</span>
+                  <span className="timeline-overline">WORK HISTORY</span>
+                  <h3 id="timeline-title">运行节点</h3>
+                  <p>最新确认的节点在上方；工作副本沿各自工作线延续。</p>
                 </div>
-                {space.status === 'ready' && (
-                  <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
-                    复制接入消息
+                <span className="timeline-count">{timeline.total} 个节点</span>
+              </div>
+
+              <TimelineLaneControls
+                lanes={timelineLanes}
+                focusedLaneKey={focusedLaneKey}
+                onFocusLane={setFocusedLaneKey}
+              />
+
+              {timelineEntries.length === 0 ? (
+                <div className="timeline-empty">
+                  <span aria-hidden="true" />
+                  <h4>还没有运行节点</h4>
+                  <p>项目接入 AI 后，重要进展会从这里开始记录。</p>
+                </div>
+              ) : (
+                <TimelineHistory
+                  entries={timelineEntries}
+                  lanes={timelineLanes}
+                  focusedLaneKey={focusedLaneKey}
+                  onFocusLane={setFocusedLaneKey}
+                />
+              )}
+
+              {loadError && timeline.items.length > 0 && (
+                <p className="timeline-load-error" role="alert">{loadError.message} 已显示的节点不受影响。</p>
+              )}
+              {timeline.hasMore && (
+                <div className="timeline-load-more">
+                  <Button variant="soft" onClick={onLoadOlder} disabled={loadingMore}>
+                    {loadingMore
+                      ? (<><Spinner variant="dots" currentColor data-icon="start" />正在加载…</>)
+                      : '加载更早记录'}
                   </Button>
-                )}
-              </article>
-            ))}
+                </div>
+              )}
+            </section>
           </div>
-        )}
-      </section>
+          <div className="workspace-panel" id="project-panel-notes" role="tabpanel" aria-labelledby="project-tab-notes" tabIndex={0} hidden={activeTab !== 'notes'}>
+            {/* 独立“工作说明”收件箱 */}
+            <SubmitNotesInbox
+              key={project.id}
+              projectId={project.id}
+              api={api}
+              onNoteStatusChange={onNoteStatusChange}
+            />
 
-      {/* 独立“工作说明”收件箱 */}
-      <SubmitNotesInbox
-        key={project.id}
-        projectId={project.id}
-        api={api}
-        onNoteStatusChange={onNoteStatusChange}
-      />
+            <SubmitHelp />
 
-      <SubmitHelp />
+            {/* 旧版代码送审记录（明确标识并默认折叠，保留原有API与历史） */}
+            <details className="legacy-review-details">
+              <summary>旧版代码送审记录（共 {submissions.length} 条）</summary>
+              {submissions.length === 0 ? (
+                <p className="workspace-empty" style={{ marginTop: '10px' }}>当前没有旧版代码送审记录。</p>
+              ) : (
+                <div className="workspace-list" style={{ marginTop: '10px' }}>
+                  {submissions.map((submission) => (
+                    <article className="workspace-card review-card" key={submission.submissionId}>
+                      <div>
+                        <strong>{submission.title || submission.spaceName}</strong>
+                        <span>{deliveryStatusLabel(submission)}</span>
+                        {submission.sourceBranch && <span>工作线：{submission.sourceBranch} · 第 {submission.deliveryVersion ?? 1} 次交付</span>}
+                        {submission.fastForward === false && submission.status === 'pending' && <span>未发现文件冲突；接入前仍需处理主项目版本衔接。</span>}
+                        {submission.conflicts?.length > 0 && <details><summary>查看冲突文件（{submission.conflicts.length}）</summary><ul>{submission.conflicts.map((file) => <li key={file}>{file}</li>)}</ul></details>}
+                        {submission.pullRequestUrl && <a href={submission.pullRequestUrl} target="_blank" rel="noopener noreferrer">查看关联 PR（状态尚未核验）</a>}
+                      </div>
+                      {submission.reviewPrompt && (
+                        <Button variant="primary" size="sm" onClick={() => onCopyReviewPrompt(submission)}>
+                          复制审核提示词
+                        </Button>
+                      )}
+                      {submission.reviewPrompt && (
+                        <details className="review-prompt-fallback">
+                          <summary>手动复制</summary>
+                          <pre>{submission.reviewPrompt}</pre>
+                        </details>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </details>
 
-      {/* 旧版代码送审记录（明确标识并默认折叠，保留原有API与历史） */}
-      <details className="legacy-review-details">
-        <summary>旧版代码送审记录（共 {submissions.length} 条）</summary>
-        {submissions.length === 0 ? (
-          <p className="workspace-empty" style={{ marginTop: '10px' }}>当前没有旧版代码送审记录。</p>
-        ) : (
-          <div className="workspace-list" style={{ marginTop: '10px' }}>
-            {submissions.map((submission) => (
-              <article className="workspace-card review-card" key={submission.submissionId}>
+          </div>
+          <div className="workspace-panel" id="project-panel-spaces" role="tabpanel" aria-labelledby="project-tab-spaces" tabIndex={0} hidden={activeTab !== 'spaces'}>
+            <section className="workspace-section" aria-labelledby="workspace-title">
+              <div className="workspace-heading">
                 <div>
-                  <strong>{submission.title || submission.spaceName}</strong>
-                  <span>{deliveryStatusLabel(submission)}</span>
-                  {submission.sourceBranch && <span>工作线：{submission.sourceBranch} · 第 {submission.deliveryVersion ?? 1} 次交付</span>}
-                  {submission.fastForward === false && submission.status === 'pending' && <span>未发现文件冲突；接入前仍需处理主项目版本衔接。</span>}
-                  {submission.conflicts?.length > 0 && <details><summary>查看冲突文件（{submission.conflicts.length}）</summary><ul>{submission.conflicts.map((file) => <li key={file}>{file}</li>)}</ul></details>}
-                  {submission.pullRequestUrl && <a href={submission.pullRequestUrl} target="_blank" rel="noopener noreferrer">查看关联 PR（状态尚未核验）</a>}
+                  <span className="timeline-overline">DEVELOPMENT SPACES</span>
+                  <h3 id="workspace-title">功能开发空间</h3>
+                  <p>每个空间独立承载一项功能；你只需选择一个空文件夹。</p>
                 </div>
-                {submission.reviewPrompt && (
-                  <Button variant="primary" size="sm" onClick={() => onCopyReviewPrompt(submission)}>
-                    复制审核提示词
-                  </Button>
-                )}
-                {submission.reviewPrompt && (
-                  <details className="review-prompt-fallback">
-                    <summary>手动复制</summary>
-                    <pre>{submission.reviewPrompt}</pre>
-                  </details>
-                )}
-              </article>
-            ))}
-          </div>
-        )}
-      </details>
+                <Button variant="soft" size="sm" onClick={onCreateSpace} disabled={busy}>
+                  {busy
+                    ? (<><Spinner variant="dots" currentColor data-icon="start" />正在处理…</>)
+                    : '新建开发空间'}
+                </Button>
+              </div>
+              {developmentSpaces.length === 0 ? (
+                <p className="workspace-empty">还没有开发空间。需要并行做功能时再创建即可。</p>
+              ) : (
+                <div className="workspace-list">
+                  {developmentSpaces.map((space) => (
+                    <article className="workspace-card" key={space.spaceId}>
+                      <div>
+                        <strong>{space.name}</strong>
+                        <span>{space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已接入主项目，可稍后整理' : '可以继续开发'}</span>
+                      </div>
+                      {space.status === 'ready' && (
+                        <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
+                          复制接入消息
+                        </Button>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
 
-      <section className="timeline-section" aria-labelledby="timeline-title">
-        <div className="timeline-heading">
-          <div>
-            <span className="timeline-overline">WORK HISTORY</span>
-            <h3 id="timeline-title">运行节点</h3>
-            <p>最新确认的节点在上方；工作副本沿各自工作线延续。</p>
           </div>
-          <span className="timeline-count">{timeline.total} 个节点</span>
         </div>
-
-        <TimelineLaneControls
-          lanes={timelineLanes}
-          focusedLaneKey={focusedLaneKey}
-          onFocusLane={setFocusedLaneKey}
-        />
-
-        {timelineEntries.length === 0 ? (
-          <div className="timeline-empty">
-            <span aria-hidden="true" />
-            <h4>还没有运行节点</h4>
-            <p>项目接入 AI 后，重要进展会从这里开始记录。</p>
-          </div>
-        ) : (
-          <TimelineHistory
-            entries={timelineEntries}
-            lanes={timelineLanes}
-            focusedLaneKey={focusedLaneKey}
-            onFocusLane={setFocusedLaneKey}
-          />
-        )}
-
-        {loadError && timeline.items.length > 0 && (
-          <p className="timeline-load-error" role="alert">{loadError.message} 已显示的节点不受影响。</p>
-        )}
-        {timeline.hasMore && (
-          <div className="timeline-load-more">
-            <Button variant="soft" onClick={onLoadOlder} disabled={loadingMore}>
-              {loadingMore
-                ? (<><Spinner variant="dots" currentColor data-icon="start" />正在加载…</>)
-                : '加载更早记录'}
-            </Button>
-          </div>
-        )}
-      </section>
+        <aside className="workspace-context" aria-label="项目当前信息">
+          <section className="context-section">
+            <h3>当前工作</h3>
+            <dl>
+              <div><dt>AI 工作会话</dt><dd>{project.currentAgent || '没有进行中的会话'}</dd></div>
+              <div><dt>工作目标</dt><dd>{project.currentGoal || '尚未设置工作目标'}</dd></div>
+            </dl>
+          </section>
+          <section className="context-section">
+            <h3>代码状态</h3>
+            <dl>
+              <div><dt>当前工作线</dt><dd>{git.branch || '分支未记录'}</dd></div>
+              <div><dt>最近提交</dt><dd>{git.shortHead || '提交未记录'}</dd></div>
+              <div><dt>本地文件</dt><dd>{git.hasChanges ? '有尚未归属的改动' : git.coherence === 'coherent' ? '与最近检查一致' : '等待确认'}</dd></div>
+              <div><dt>最近检查</dt><dd>{formatTime(project.lastObservedAt)}</dd></div>
+            </dl>
+            <p className="context-caption">以上为最近一次只读检查的结果。</p>
+          </section>
+          <details className="project-tech-panel">
+            <summary>技术详情</summary>
+            <dl>
+              <div><dt>代码位置</dt><dd>{project.path}</dd></div>
+              <div><dt>项目 ID</dt><dd>{project.id}</dd></div>
+              {sessionId && <div><dt>会话 ID</dt><dd>{sessionId}</dd></div>}
+              {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
+            </dl>
+          </details>
+        </aside>
+      </div>
     </>
   );
 }
