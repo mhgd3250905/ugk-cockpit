@@ -1,4 +1,5 @@
 import readline from 'node:readline';
+import { conversationIdentity } from './conversation-identity.mjs';
 import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { sanitizeIntegrationErrorPayload } from './service-client.mjs';
@@ -1205,7 +1206,7 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
       }
 
       try {
-        const handlerResult = await handler(toolArgs);
+        const handlerResult = await handler(toolArgs, { conversationIdentity: conversationIdentity(params?._meta) });
         if (STRUCTURED_TOOL_NAMES.has(toolName)) {
           const isFailed = (handlerResult?.ok === false
             || (Boolean(handlerResult?.code) && handlerResult?.ok !== true))

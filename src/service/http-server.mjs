@@ -4,6 +4,8 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openCockpitDatabase, withImmediateTransaction } from '../core/database.mjs';
+import { bindConversation, readConversationBinding } from '../core/conversation-bindings.mjs';
+import { conversationIdentity, conversationKey } from '../mcp/conversation-identity.mjs';
 import {
   acceptAssignment,
   beginAssignmentWork,
@@ -83,6 +85,12 @@ class AtomicHandoffAbort extends Error {
 }
 
 const PUBLIC_ERRORS = {
+  CONVERSATION_BINDING_CONFLICT: {
+    status: 409,
+    message: '当前聊天没有此工作会话的有效绑定，或已由另一聊天接手。',
+    impact: '代码和已有运行记录没有被修改。',
+    requiredAction: '请查询当前工作会话；新聊天通过 Relay 接手，原聊天按提示恢复关联。',
+  },
   SERVICE_UNAVAILABLE: {
     status: 503,
     message: '本地控制台静态资源暂不可用。',
@@ -1499,6 +1507,11 @@ function readSessionStateRow(db, row, now = Date.now()) {
   };
 }
 
+function readExactSessionState(db, sessionId) {
+  const row = db.prepare('SELECT *, id AS assignment_id, revision AS assignment_revision FROM assignments WHERE session_id = ?').get(sessionId);
+  return row ? readSessionStateRow(db, row) : null;
+}
+
 function publicSessionState(state) {
   if (!state) return null;
   return {
@@ -1531,7 +1544,7 @@ function publicBridgeBinding(state) {
 }
 
 function bridgeBindingMatches(state, binding) {
-  if (!state || !binding
+  if (!state || !binding || binding.revoked
     || binding.sessionId !== state.sessionId
     || binding.worktreeId !== state.worktreeId) return false;
   const current = state.generation;
@@ -1977,7 +1990,7 @@ export async function createCockpitHttpServer({
     return matches;
   }
 
-  async function readMcpWorkContext(body) {
+  async function readMcpWorkContext(body, key = null) {
     const safety = {
       impact: '本次查询没有修改代码、平台会话、写入归属、租约、心跳或 revision。',
       required_action: '请根据 status、bindingStatus 和 canContinue 处理；不要猜测编号或自动接管。',
@@ -2015,6 +2028,12 @@ export async function createCockpitHttpServer({
       candidate,
       state: readWorktreeSessionState(db, candidate.worktreeId),
     }));
+    // Once identified, restore the bound session, not whichever session at the
+    // same code location happens to be newest (e.g. active + standby).
+    if (key && states.length === 1) {
+      const binding = readConversationBinding(db, key, states[0].candidate.worktreeId);
+      if (binding) states[0].state = { status: 'session', session: readExactSessionState(db, binding.sessionId) };
+    }
     if (states.length !== 1) {
       return {
         ok: true,
@@ -2064,12 +2083,19 @@ export async function createCockpitHttpServer({
       };
     }
 
+    if (key) {
+      body = { ...body, bridgeBinding: readConversationBinding(db, key, current.worktreeId, current.sessionId) };
+    }
+    const owner = db.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ? AND revoked = 0')
+      .get(current.sessionId);
+    const ownedElsewhere = owner && owner.conversation_key !== key;
     const base = {
       ...publicSessionState(current),
       candidates: [publicSessionState(current)],
       requiresUserConfirmation: false,
       canContinue: false,
       bindingStatus: body.bridgeBinding ? 'stale' : 'unbound',
+      ...(key ? { bindingPersistence: 'durable' } : { bindingPersistence: 'connection_only' }),
     };
 
     if (current.status !== 'active') {
@@ -2085,7 +2111,7 @@ export async function createCockpitHttpServer({
 
     const hasBinding = Boolean(body.bridgeBinding);
     const matchesBinding = bridgeBindingMatches(current, body.bridgeBinding);
-    if (hasBinding && matchesBinding) {
+    if (hasBinding && matchesBinding && !ownedElsewhere) {
       return {
         ok: true,
         ...safety,
@@ -2097,7 +2123,7 @@ export async function createCockpitHttpServer({
       };
     }
 
-    if (hasBinding) {
+    if (hasBinding || ownedElsewhere) {
       return {
         ok: true,
         ...safety,
@@ -2115,6 +2141,7 @@ export async function createCockpitHttpServer({
         error.context = base;
         throw error;
       }
+      if (key) withImmediateTransaction(db, () => bindConversation(db, key, publicBridgeBinding(current)));
       return {
         ok: true,
         ...safety,
@@ -2137,10 +2164,45 @@ export async function createCockpitHttpServer({
     };
   }
 
+  function assertConversationWrite(key, sessionId, allowedStatuses = ['active']) {
+    if (!sessionId) return;
+    const context = readSessionContext(db, sessionId);
+    if (!context?.ok) return; // Existing route reports the precise missing-session error.
+    const owner = db.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ? AND revoked = 0')
+      .get(sessionId);
+    if (!key && !owner) return; // Existing clients keep working until this session is explicitly migrated.
+    const binding = readConversationBinding(db, key, context.worktreeId, sessionId);
+    const current = readExactSessionState(db, sessionId);
+    if (!binding || !bridgeBindingMatches(current, binding)
+      || !allowedStatuses.includes(current?.status) || owner?.conversation_key !== key) {
+      throw Object.assign(new Error('Conversation binding is missing or stale.'), { code: 'CONVERSATION_BINDING_CONFLICT' });
+    }
+  }
+
+  function rememberConversation(key, result) {
+    if (!key || !result?.ok) return result;
+    const current = readExactSessionState(db, result.sessionId);
+    if (!current || current.sessionId !== result.sessionId || current.generation) {
+      throw Object.assign(new Error('An old initialization cannot replace a relay binding.'), { code: 'CONVERSATION_BINDING_CONFLICT' });
+    }
+    withImmediateTransaction(db, () => bindConversation(db, key, publicBridgeBinding(current)));
+    return result;
+  }
+
   const server = createServer(async (request, response) => {
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
+      let key = null;
+      if (request.headers['x-ugk-conversation']) {
+        try {
+          const identity = JSON.parse(Buffer.from(request.headers['x-ugk-conversation'], 'base64url').toString('utf8'));
+          key = conversationKey(conversationIdentity({ 'io.ugk.cockpit/conversation': identity }));
+        } catch {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+      }
       if (request.method === 'GET' && url.pathname === '/health') {
         sendJson(response, 200, {
           status: 'ok',
@@ -2941,7 +3003,7 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         validateMcpContextBody(body);
         try {
-          sendJson(response, 200, await readMcpWorkContext(body));
+          sendJson(response, 200, await readMcpWorkContext(body, key));
         } catch (error) {
           if (error?.code === 'SESSION_CONTEXT_CONFIRMATION_STALE') {
             sendError(response, error.code, {
@@ -2982,7 +3044,7 @@ export async function createCockpitHttpServer({
         }
         const latestHandoff = readLatestHandoff(db, accepted.projectId);
         if (accepted.scope?.mode === 'standby') {
-          sendJson(response, 200, {
+          sendJson(response, 200, rememberConversation(key, {
             ok: true,
             assignmentId: accepted.assignmentId,
             sessionId: accepted.sessionId,
@@ -2996,7 +3058,7 @@ export async function createCockpitHttpServer({
             message: latestHandoff
               ? '已读取最后一次交接；当前没有写入权限，请向用户复述现状并等待安排。'
               : '这个项目还没有交接手册；当前没有写入权限，请告知用户并等待安排。',
-          });
+          }));
           return;
         }
         const started = startWriteRun(db, {
@@ -3017,7 +3079,7 @@ export async function createCockpitHttpServer({
           return;
         }
         const current = readSessionContext(db, accepted.sessionId);
-        sendJson(response, 200, {
+        sendJson(response, 200, rememberConversation(key, {
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
@@ -3029,13 +3091,14 @@ export async function createCockpitHttpServer({
           leaseGeneration: started.leaseGeneration,
           acceptedAt: accepted.acceptedAt,
           latestHandoff,
-        });
+        }));
         return;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/begin') {
         const body = await readJson(request);
         validateMcpBeginBody(body);
+        assertConversationWrite(key, body.sessionId, ['active', 'accepted']);
         const context = readSessionContext(db, body.sessionId);
         if (!context.ok) {
           sendError(response, context.code);
@@ -3149,7 +3212,7 @@ export async function createCockpitHttpServer({
           sendError(response, initialized.code, { extra: { session_id: accepted.sessionId } });
           return;
         }
-        sendJson(response, 200, {
+        sendJson(response, 200, rememberConversation(key, {
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
@@ -3163,13 +3226,14 @@ export async function createCockpitHttpServer({
           preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
           latestHandoff,
           message: '当前项目已接入 Cockpit；已有改动已作为接入基线保留。',
-        });
+        }));
         return;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/relay') {
         const body = await readJson(request);
         validateMcpRelayBody(body);
+        assertConversationWrite(key, body.sessionId, ['active', 'awaiting_resume']);
         let gitEvidence = {};
         const context = readSessionContext(db, body.sessionId);
         if (context?.ok) {
@@ -3190,6 +3254,7 @@ export async function createCockpitHttpServer({
             };
           }
         }
+        assertConversationWrite(key, body.sessionId, ['active', 'awaiting_resume']);
         const result = createRelay(db, {
           ...body,
           ...gitEvidence,
@@ -3215,6 +3280,7 @@ export async function createCockpitHttpServer({
         const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
         const result = resumeRelay(db, {
           ...body,
+          conversationKey: key,
           projectId: working.project.id,
           worktreeId: working.worktreeId,
           canonicalPath: working.observation.canonicalPath,
@@ -3235,6 +3301,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/progress') {
         const body = await readJson(request);
         validateMcpProgressBody(body);
+        assertConversationWrite(key, body.sessionId);
         let gitEvidence = {};
         const context = readSessionContext(db, body.sessionId);
         if (context?.ok) {
@@ -3255,6 +3322,7 @@ export async function createCockpitHttpServer({
             };
           }
         }
+        assertConversationWrite(key, body.sessionId);
         const result = recordProgress(db, { ...body, ...gitEvidence });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
@@ -3267,6 +3335,7 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         const invalid = validateDeliveryRequest(body, 'preflight', { bridge: true });
         if (invalid) { sendError(response, 'INVALID_REQUEST'); return; }
+        assertConversationWrite(key, body.sessionId);
         let source = null;
         try {
           const registeredSources = db.prepare('SELECT id FROM delivery_sources').all();
@@ -3306,7 +3375,7 @@ export async function createCockpitHttpServer({
             commandId: id('delivery_preflight', `${source.id}:${body.clientRequestId}`), sourceId: source.id,
             ...(body.sessionId ? { sessionId: body.sessionId, expectedRevision: body.expectedRevision } : {}),
             ...(body.files !== undefined ? { files: body.files } : {}),
-          });
+          }, { assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
           sendJson(response, 200, deliveryResponse(result));
         } catch (error) {
           sendJson(response, 200, deliveryResponse({
@@ -3327,9 +3396,11 @@ export async function createCockpitHttpServer({
           sendJson(response, 200, deliveryResponse({ ok: false, code: body.preflightId ? 'INVALID_REQUEST' : 'DELIVERY_PREFLIGHT_REQUIRED', localSaved: false, pushed: false }));
           return;
         }
+        const preparedSession = db.prepare('SELECT session_id FROM delivery_preflights WHERE id = ?').get(body.preflightId);
+        assertConversationWrite(key, preparedSession?.session_id);
         const result = await submitDelivery(db, { ...body,
           commandId: id('delivery_submit', `${body.preflightId}:${body.clientRequestId}`),
-        }, { faultInjector });
+        }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         sendJson(response, 200, deliveryResponse(result));
         return;
       }
@@ -3338,7 +3409,7 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         try {
           validateSubmitNoteBody(body);
-          const result = await createSubmitNote(db, body, { faultInjector });
+          const result = await createSubmitNote(db, body, { faultInjector, conversationKey: key });
           sendJson(response, 200, result);
         } catch (error) {
           sendError(response, error.code ?? 'REQUEST_FAILED', {
@@ -3389,6 +3460,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/begin') {
         const body = await readJson(request);
         validateMcpIntegrationBody(body, 'begin');
+        assertConversationWrite(key, body.sessionId);
         const result = await beginIntegrationReview(db, {
           ...body,
           commandId: id('integration_begin', `${body.sessionId}:${body.clientRequestId}`),
@@ -3401,6 +3473,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/review') {
         const body = await readJson(request);
         validateMcpIntegrationBody(body, 'review');
+        assertConversationWrite(key, body.sessionId);
         const result = await recordSessionIntegrationReview(db, {
           ...body,
           commandId: id('integration_review', `${body.sessionId}:${body.clientRequestId}`),
@@ -3413,6 +3486,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/merge') {
         const body = await readJson(request);
         validateMcpIntegrationBody(body, 'merge');
+        assertConversationWrite(key, body.sessionId);
         const result = await mergeApprovedSubmission(db, {
           ...body,
           commandId: id('integration_merge', `${body.sessionId}:${body.clientRequestId}`),
@@ -3432,6 +3506,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/finish') {
         const body = await readJson(request);
         validateMcpFinishBody(body);
+        assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         const context = readSessionContext(db, body.sessionId);
         if (!context.ok || !context.run) {
           sendError(response, context.code ?? 'SESSION_NOT_FOUND');
@@ -3445,6 +3520,7 @@ export async function createCockpitHttpServer({
           baselineHead: baseline?.head ?? null,
         });
         const acknowledgements = body.acknowledgements ?? [];
+        assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         const result = finishRun(db, {
           commandId: id('mcp_finish', `${body.sessionId}:${body.clientRequestId}`),
           runId: body.sessionId,
@@ -3487,6 +3563,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/handoff') {
         const body = await readJson(request);
         validateMcpHandoffBody(body);
+        assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         const context = readSessionContext(db, body.sessionId);
         if (!context.ok || !context.run) {
           sendError(response, context.code ?? 'SESSION_NOT_FOUND');
@@ -3499,6 +3576,7 @@ export async function createCockpitHttpServer({
           ...context,
           baselineHead: baseline?.head ?? null,
         });
+        assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         let result;
         try {
           result = withImmediateTransaction(db, () => {
@@ -3651,6 +3729,7 @@ export async function createCockpitHttpServer({
         });
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, authorizedRoots);
+        assertConversationWrite(key, body.sessionId);
         const result = finishRun(db, {
           commandId: body.commandId,
           commandPayload,

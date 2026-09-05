@@ -821,7 +821,7 @@ test('version 20 database upgrades to version 21 adding avatar_path to projects 
   const dbPath = fixture(t, 'migration-v20');
   const legacy = openCockpitDatabase(dbPath);
   legacy.exec('ALTER TABLE projects DROP COLUMN avatar_path;');
-  legacy.prepare('DELETE FROM schema_migrations WHERE version = 21;').run();
+  legacy.prepare('DELETE FROM schema_migrations WHERE version >= 21;').run();
   legacy.exec('PRAGMA user_version = 20;');
   legacy.close();
 

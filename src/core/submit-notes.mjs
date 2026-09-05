@@ -6,6 +6,7 @@ import { withImmediateTransaction } from './database.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from './path-guard.mjs';
 import { fileIdentity, gitText } from '../git/probe.mjs';
 import { normalizeReferences } from './submit-notes-contract.mjs';
+import { readConversationBinding } from './conversation-bindings.mjs';
 
 export { normalizeReferences };
 
@@ -289,7 +290,7 @@ export function formatCopyInstruction(note) {
 }
 
 export async function createSubmitNote(db, request, options = {}) {
-  const { clientRequestId, body, title = '', references = [], mcpWorkingDirectory, bridgeBinding = null } = request;
+  const { clientRequestId, body, title = '', references = [], mcpWorkingDirectory } = request;
 
   if (typeof clientRequestId !== 'string' || !clientRequestId.trim()) {
     const error = new Error('clientRequestId is required');
@@ -346,7 +347,16 @@ export async function createSubmitNote(db, request, options = {}) {
   }
 
   let attribution = 'unattributed';
-  if (bridgeBinding?.sessionId && typeof bridgeBinding.sessionId === 'string' && bridgeBinding.worktreeId === candidate.worktree_id) {
+  // Resolve after asynchronous probes so a concurrent Relay cannot leave stale attribution.
+  // Host identity takes precedence over all client-supplied legacy binding fields.
+  let bridgeBinding = options.conversationKey
+    ? readConversationBinding(db, options.conversationKey, candidate.worktree_id)
+    : request.bridgeBinding;
+  if (!options.conversationKey && bridgeBinding?.sessionId
+    && db.prepare('SELECT 1 FROM conversation_bindings WHERE session_id = ? AND revoked = 0').get(bridgeBinding.sessionId)) {
+    bridgeBinding = null;
+  }
+  if (!bridgeBinding?.revoked && bridgeBinding?.sessionId && typeof bridgeBinding.sessionId === 'string' && bridgeBinding.worktreeId === candidate.worktree_id) {
     const assignment = db.prepare(`
       SELECT agent_id, session_id, status FROM assignments
       WHERE session_id = ? AND worktree_id = ? AND project_id = ?

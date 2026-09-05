@@ -18,6 +18,7 @@ import {
 import { acceptAssignment, createAssignment } from '../src/core/assignments.mjs';
 import { readSubmission } from '../src/core/integrations.mjs';
 import { registerDeliveryLocation } from '../src/core/delivery-sources.mjs';
+import { bindConversation } from '../src/core/conversation-bindings.mjs';
 
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -172,6 +173,19 @@ test('authorized directory without prior init can submit note, attribution is un
     agentId: 'Codex-Secret-Agent',
     sessionId: 'session-active-1',
   });
+
+  const binding = { sessionId: 'session-active-1', worktreeId };
+  bindConversation(db, 'original-chat', binding);
+  const note = (clientRequestId, conversationKey, suppliedBinding) => createSubmitNote(db, {
+    clientRequestId, body: 'Durable conversation attribution.', mcpWorkingDirectory: mainDir,
+    ...(suppliedBinding ? { bridgeBinding: suppliedBinding } : {}),
+  }, { conversationKey });
+  assert.deepEqual((await note('durable', 'original-chat')).source.attribution, resultAttributed.source.attribution);
+  assert.equal((await note('forged', 'other-chat', binding)).source.attribution, 'unattributed');
+  assert.equal((await note('downgraded', null, binding)).source.attribution, 'unattributed');
+  bindConversation(db, 'next-chat', binding, { transfer: true });
+  assert.equal((await note('revoked', 'original-chat', binding)).source.attribution, 'unattributed');
+  assert.deepEqual((await note('next-owner', 'next-chat')).source.attribution, resultAttributed.source.attribution);
 });
 
 test('unknown, ambiguous, and replaced repository directories are rejected', async (t) => {

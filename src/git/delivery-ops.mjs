@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, copyFileSync, openSync, closeSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync, copyFileSync, renameSync } from 'node:fs';
 import { readFile, stat, lstat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-guard.mjs';
 import { createDeliveryCache, assertDeliveryCache, discardDeliveryCache } from '../core/delivery-cache.mjs';
 import { remoteAuthArguments } from './remote-auth.mjs';
+import { acquireDeliveryIndexLock, assertDeliveryIndexLock, releaseDeliveryIndexLock } from './delivery-index-lock.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -752,7 +753,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
   let indexLock;
   let savedCommit = recoveredCommit;
   try {
-    indexLock = openSync(`${indexPath}.lock`, 'wx');
+    indexLock = acquireDeliveryIndexLock(indexPath, commandId);
     current = await readDeliveryLocation(sourcePath, { files: inspection.files });
     if (current.branch !== inspection.branch || current.head !== (recoveredCommit ?? inspection.head)) {
       throw Object.assign(new Error('Source moved before saving'), { code: 'HEAD_MOVED' });
@@ -800,11 +801,13 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
         const commit = (await runGit(sourcePath, ['commit-tree', inspection.candidateTree, '-p', inspection.head,
           '-m', summary.trim(), '-m', `UGK-Cockpit-Command: ${commandId}`], { env: identity })).stdout;
         beforeWrite();
+        assertDeliveryIndexLock(indexLock);
         await runGit(sourcePath, ['update-ref', `refs/heads/${inspection.branch}`, commit, inspection.head]);
         savedCommit = commit;
         await afterRefUpdate();
       }
     }
+    assertDeliveryIndexLock(indexLock);
     renameSync(temporaryIndex, indexPath);
     return { sourceCommit: savedCommit, localSaved: true };
   } catch (error) {
@@ -812,7 +815,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
     if (error.code === 'EEXIST') error.code = 'DELIVERY_INDEX_LOCKED';
     throw error;
   } finally {
-    if (indexLock !== undefined) { closeSync(indexLock); rmSync(`${indexPath}.lock`, { force: true }); }
+    if (indexLock !== undefined) releaseDeliveryIndexLock(indexLock);
     rmSync(temporary, { recursive: true, force: true });
   }
 }

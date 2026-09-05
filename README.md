@@ -4,7 +4,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.35` — 当前本地试用版本已包含工作台界面重构与 MCP 认证恢复机制（2026-09-05）。固定项目导航、真实进展列表、时间线优先页签和上下文侧栏已落地，保留工作线核心语义；**用户仍在试用界面，后续按实际反馈优化**。MCP 直接向所连接的本机服务获取专用凭据，避免客户端与服务看到不同认证文件而持续失败；原 ZCode 聊天已确认恢复。实现保存于 `97ceec1`、`6785b7a`，最终 `npm test` 333/333 通过。详见 [工作台重构记录](docs/WORKBENCH_REDESIGN.md)、[MCP 认证恢复记录](docs/MCP_AUTH_RECOVERY.md)和[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。本轮未创建发布标签或推送远端。
+`0.1.0-alpha.36` — 本地开发版本新增持久聊天绑定与中断恢复：支持身份元数据的原聊天在 MCP/服务重建后恢复绑定，接力后旧聊天继续失效；已有项目和运行历史保留。同步修复合并中断恢复和可核验归属的 Git 索引锁恢复，详见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)及[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。工作台界面仍处于用户试用期，按实际反馈继续优化；此前界面与认证修复记录见[工作台重构](docs/WORKBENCH_REDESIGN.md)和[MCP 认证恢复](docs/MCP_AUTH_RECOVERY.md)。未创建发布标签或推送远端。
 
 保留轻量 Submit 工作说明：向所属项目发布说明，可以引用 PR、本地提交或其他分支的审核结果，不再默认保存上传或创建代码审核对象。说明发布不冻结分支，不结束会话，已有 progress 与 relay 照常推进。2026-09-03 的实现、切换及历史验收见 [Submit 工作说明](docs/SUBMIT_NOTES.md)。
 
@@ -60,7 +60,7 @@ npm run serve
 
 MCP server 通过 loopback service 使用同一数据库事实源，不直接接触业务项目文件。可先手工验证：
 
-stdio 入口通过服务已有的本机 MCP 认证通道获取凭据，不读取客户端 AppData 的服务私有凭据；认证失效后有限续期，原样保留业务请求和会话绑定。桥接进程重载后的候选会话仍需用户确认，不等同于重新 init。
+stdio 入口通过服务已有的本机 MCP 认证通道获取凭据，不读取客户端 AppData 的服务私有凭据；认证失效后有限续期，原样保留业务请求和会话绑定。支持稳定聊天元数据的宿主在桥接进程重载后自动恢复持久绑定；旧会话首次关联和未适配的宿主仍按明确确认流程处理，详见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)。
 
 ```powershell
 npm run mcp

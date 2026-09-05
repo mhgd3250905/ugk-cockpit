@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 21;
+export const SUPPORTED_SCHEMA_VERSION = 23;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -726,6 +726,50 @@ END;
       if (!columns.has('avatar_path')) {
         db.exec("ALTER TABLE projects ADD COLUMN avatar_path TEXT NOT NULL DEFAULT '';");
       }
+    },
+  },
+  {
+    version: 22,
+    name: 'durable-conversation-bindings',
+    sql: `
+CREATE TABLE IF NOT EXISTS conversation_bindings (
+  conversation_key TEXT NOT NULL,
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  session_id TEXT NOT NULL REFERENCES assignments(session_id),
+  relay_id TEXT REFERENCES relays(id),
+  relay_sequence INTEGER,
+  accepted_revision INTEGER,
+  revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+  bound_at TEXT NOT NULL,
+  PRIMARY KEY (conversation_key, worktree_id)
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;
+`,
+  },
+  {
+    version: 23,
+    name: 'retain-conversation-session-bindings',
+    sql: `
+ALTER TABLE conversation_bindings RENAME TO conversation_bindings_v22;
+DROP INDEX conversation_binding_owner;
+CREATE TABLE conversation_bindings (
+  conversation_key TEXT NOT NULL,
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  session_id TEXT NOT NULL REFERENCES assignments(session_id),
+  relay_id TEXT REFERENCES relays(id),
+  relay_sequence INTEGER,
+  accepted_revision INTEGER,
+  revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+  bound_at TEXT NOT NULL,
+  PRIMARY KEY (conversation_key, worktree_id, session_id)
+) STRICT;
+`,
+    apply(db) {
+      if (db.prepare('SELECT count(*) AS n FROM conversation_bindings_v22').get().n) {
+        db.exec('INSERT INTO conversation_bindings SELECT * FROM conversation_bindings_v22;');
+      }
+      db.exec(`DROP TABLE conversation_bindings_v22;
+        CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;`);
     },
   },
 ];

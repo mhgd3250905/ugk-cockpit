@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 const GENERIC_ERROR_FALLBACK = {
   message: '本地操作没有完成。',
   impact: 'Cockpit 没有确认保存成功，代码不会被自动清理或覆盖。',
@@ -133,16 +135,17 @@ export function createServiceHandlers({
   baseUrl = DEFAULT_SERVICE_URL,
   fetchImpl = fetch,
   workingDirectory = process.cwd(),
+  conversationIdentity = null,
 }) {
   if (token != null && (typeof token !== 'string' || token.length < 32)) {
     throw new Error('UGK Cockpit local API token is unavailable.');
   }
 
   let scopedToken = null;
-  // This is deliberately process-local.  It is a conversation/bridge
-  // binding, not a durable credential or a second Cockpit session record.
-  // Only successful init/accept/resume responses (and an explicit context
-  // confirmation) may replace it.
+  const requests = new AsyncLocalStorage();
+  const identity = () => requests.getStore()?.conversationIdentity ?? conversationIdentity;
+  // Compatibility for hosts without request identity, before explicit migration.
+  // Identified hosts NEVER read/write this cache: their bindings live in SQLite.
   let bridgeBinding = null;
 
   async function bootstrapScopedToken() {
@@ -183,6 +186,7 @@ export function createServiceHandlers({
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',
+            ...(identity() ? { 'x-ugk-conversation': Buffer.from(JSON.stringify(identity())).toString('base64url') } : {}),
           },
           body: JSON.stringify(arguments_),
         });
@@ -233,6 +237,7 @@ export function createServiceHandlers({
   }
 
   function rememberBinding(result) {
+    if (identity()) return; // The service persists host-identified bindings.
     if (result?.ok !== true || typeof result.sessionId !== 'string'
       || !result.sessionId.trim() || typeof result.worktreeId !== 'string'
       || !result.worktreeId.trim()) {
@@ -261,14 +266,14 @@ export function createServiceHandlers({
     return result;
   }
 
-  return {
+  const handlers = {
     ugk_work_context: async (arguments_ = {}) => {
       const request = {};
       if (arguments_ && typeof arguments_ === 'object' && !Array.isArray(arguments_)) {
         if (arguments_.confirmSessionId !== undefined) request.confirmSessionId = arguments_.confirmSessionId;
         if (arguments_.expectedRevision !== undefined) request.expectedRevision = arguments_.expectedRevision;
       }
-      if (bridgeBinding) request.bridgeBinding = { ...bridgeBinding };
+      if (!identity() && bridgeBinding) request.bridgeBinding = { ...bridgeBinding };
       request.mcpWorkingDirectory = workingDirectory;
       const result = await call('/api/v1/mcp/work/context', request);
       if (result?.bindingEstablished === true) rememberBinding(result);
@@ -285,7 +290,7 @@ export function createServiceHandlers({
     ugk_work_submit_note: (arguments_) => call('/api/v1/mcp/work/submit-note', {
       ...arguments_,
       mcpWorkingDirectory: workingDirectory,
-      ...(bridgeBinding ? { bridgeBinding: { ...bridgeBinding } } : {}),
+      ...(!identity() && bridgeBinding ? { bridgeBinding: { ...bridgeBinding } } : {}),
     }),
     ugk_submit_note_get: (arguments_) => call('/api/v1/mcp/submit-notes/get', {
       ...arguments_,
@@ -311,4 +316,7 @@ export function createServiceHandlers({
       mcpWorkingDirectory: workingDirectory,
     }),
   };
+  return Object.fromEntries(Object.entries(handlers).map(([name, handler]) => [name,
+    (args, context) => requests.run(context ?? {}, () => handler(args)),
+  ]));
 }

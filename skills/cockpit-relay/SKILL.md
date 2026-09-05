@@ -19,7 +19,7 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 - 只有工具返回 `canContinue: true`、`status: "active"`、有效 `sessionId` 和 `revision` 时，才可继续准备 relay。
 - 返回 `awaiting_resume`、已结束、`stale`、`ambiguous` 或其他不可继续状态时，停止写入并如实说明；不要用同目录候选自动接续。
 - 返回 `requiresUserConfirmation: true` 且 `bindingStatus: "unbound"` 时，只向用户确认是否“继续此工作会话”。用户确认后，使用上一次 context 返回的 `sessionId` 与 `revision` 成对调用 `ugk_work_context` 的 `confirmSessionId` 和 `expectedRevision`；确认期间 revision 变化则重新查询并再次确认。
-- 只有确认调用返回 `bindingEstablished: true`、`canContinue: true`、`status: "active"` 后，才可准备 relay。context 只更新 bridge 的进程内绑定，不改变平台会话、租约、心跳或 revision。
+- 只有确认调用返回 `bindingEstablished: true`、`canContinue: true`、`status: "active"` 后，才可准备 relay。context 确认建立当前聊天绑定：支持宿主身份时由服务持久保存，未适配客户端可能仅保留连接内绑定；不改变平台工作会话、租约、心跳或 revision。
 
 新聊天已经收到 `continueCode` 时直接按模式二调用 `ugk_work_resume`，不要先用 context 的 `awaiting_resume` 结果阻挡恢复。
 

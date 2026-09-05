@@ -62,13 +62,13 @@ function commitCommand(db, commandId, response, options = {}) {
   return response;
 }
 
-function readMainBinding(db, sessionId, expectedRevision) {
+function readMainBinding(db, sessionId, expectedRevision, { recovering = false } = {}) {
   const context = readSessionContext(db, sessionId);
   if (!context.ok) return context;
   if (context.status !== 'active' || context.run?.lifecycle !== 'active') {
     return { ok: false, code: 'SESSION_NOT_ACTIVE', sessionId };
   }
-  if (context.revision !== expectedRevision) {
+  if (!recovering && context.revision !== expectedRevision) {
     return {
       ok: false,
       code: 'REVISION_CONFLICT',
@@ -88,6 +88,14 @@ function readMainBinding(db, sessionId, expectedRevision) {
   `).get(context.projectId);
   if (!project || context.worktreeId !== project.worktree_id) {
     return { ok: false, code: 'MAIN_SESSION_REQUIRED', sessionId };
+  }
+  if (recovering) {
+    const lease = db.prepare('SELECT * FROM write_leases WHERE worktree_id = ?').get(context.worktreeId);
+    const transferred = db.prepare(`SELECT id FROM relays WHERE session_id = ?
+      AND ((state = 'active' AND expires_at > ?) OR accepted_revision > ?) LIMIT 1`).get(sessionId, Date.now(), expectedRevision);
+    if (!lease || lease.run_id !== sessionId || lease.generation !== context.run.leaseGeneration || transferred) {
+      return { ok: false, code: 'INTEGRATION_BINDING_MISMATCH', sessionId };
+    }
   }
   return { ok: true, context, project };
 }
@@ -431,9 +439,22 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
   const begun = beginCommand(db, { commandId, kind: 'integration.merge', request: frozenRequest });
   if (['committed', 'failed'].includes(begun.command.state)) return parseCommandResponse(begun.command);
 
-  const binding = readMainBinding(db, sessionId, expectedRevision);
-  if (!binding.ok) return failCommand(db, commandId, binding, options);
   let attempt = readIntegrationAttempt(db, commandId);
+  // The original request remains the idempotency key after a partial Git write.
+  // Ordinary progress may advance its revision, but a transferred write owner may not resume it.
+  const binding = readMainBinding(db, sessionId, expectedRevision, { recovering: Boolean(attempt) });
+  if (!binding.ok) return attempt ? binding : failCommand(db, commandId, binding, options);
+  const assertWriteOwner = () => {
+    const current = readMainBinding(db, sessionId, expectedRevision, { recovering: true });
+    const claim = readIntegrationClaim(db, claimId);
+    if (!current.ok || current.context.worktreeId !== binding.context.worktreeId
+      || !claim || claim.submissionId !== submissionId || claim.claimant !== `session:${sessionId}`
+      || claim.status !== 'active') {
+      throw Object.assign(new Error('Integration write ownership changed.'), {
+        code: current.ok ? 'INTEGRATION_BINDING_MISMATCH' : current.code,
+      });
+    }
+  };
   if (!attempt) {
     const submission = readSubmission(db, submissionId);
     const claim = readIntegrationClaim(db, claimId);
@@ -518,6 +539,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
           };
         }
         if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
+        assertWriteOwner();
         try { await importReviewedDelivery(latestSubmission, binding.project); }
         catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
       }
@@ -535,6 +557,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       let integratedCommit;
       let externalIntegration = false;
       if (main.after.head === attempt.targetHead) {
+        assertWriteOwner();
         await (options.fastForwardMain ?? fastForwardMain)(binding.project.canonical_path, attempt.sourceCommit);
         await options.faultInjector?.('after_fast_forward_before_persist', attempt);
         const after = await probeMain(binding.project, options);
@@ -568,6 +591,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
         updateAttempt(db, commandId, { state: 'attention', last_error_code: 'MAIN_CHANGED_AFTER_INTEGRATION' }, options);
         return { ok: false, code: 'MAIN_CHANGED_AFTER_INTEGRATION', humanActionRequired: true };
       }
+      assertWriteOwner();
       try {
         await (options.pushIntegratedMain ?? pushIntegratedMain)(binding.project.canonical_path, {
           remote: attempt.remoteName,

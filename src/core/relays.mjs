@@ -10,6 +10,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { bindConversation } from './conversation-bindings.mjs';
 import { readSessionContext } from './assignments.mjs';
 
 /**
@@ -664,11 +665,15 @@ export function resumeRelay(db, request = {}, options = {}) {
   const located = relayRowByCodeHash(db, codeHash);
   if (!located) return { ok: false, code: 'RELAY_CODE_INVALID' };
   if (!codeMatches(located.code_hash, continueCode)) return { ok: false, code: 'RELAY_CODE_INVALID' };
+  if (!request.conversationKey && db.prepare('SELECT 1 FROM conversation_bindings WHERE session_id = ? AND revoked = 0').get(located.session_id)) {
+    return { ok: false, code: 'CONVERSATION_BINDING_CONFLICT' };
+  }
 
   const commandId = request.commandId
     ?? commandIdFor('relay.resume', located.id, clientRequestId);
   const intent = {
     relayId: located.id,
+    ...(request.conversationKey ? { conversationKey: request.conversationKey } : {}),
     clientRequestId,
     continueCodeHash: codeHash,
     ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
@@ -785,6 +790,10 @@ export function resumeRelay(db, request = {}, options = {}) {
       nextRevision,
     );
     const committed = commitCommand(db, commandId, response, at, row.session_id);
+    bindConversation(db, request.conversationKey, {
+      sessionId: row.session_id, worktreeId: row.worktree_id,
+      relayId: row.id, relaySequence: row.sequence, acceptedRevision: nextRevision,
+    }, { transfer: true });
     options.faultInjector?.('resume.after_command_commit_before_transaction_commit');
     return committed;
   });

@@ -66,6 +66,7 @@ async function prepareDeliveryOnce(db, request, options = {}) {
       targetPath: project.canonical_path, targetBranch: 'main', files: files ?? [] });
     checkRemotes(source, inspection);
     const readOnly = !inspection.files.length && !location.changes.length && inspection.published;
+    options.assertSessionWrite?.(sessionId);
     checkLease(db, source, sessionId, expectedRevision, { readOnly });
     const duplicate = db.prepare(`SELECT * FROM submissions WHERE project_id = ? AND source_branch = ?
       AND source_commit = ? AND target_head = ? AND status NOT IN ('stale','withdrawn','cancelled')
@@ -170,6 +171,7 @@ async function submitDeliveryOnce(db, request, options = {}) {
   const holder = `delivery:${commandId}:${randomBytes(8).toString('hex')}`;
   let localSaveEvidence = null;
   const assertLocks = () => {
+    options.assertSessionWrite?.(prepared.session_id);
     for (const lock of locks) {
       const row = db.prepare('SELECT * FROM repository_locks WHERE repository_identity = ?').get(lock.repositoryIdentity);
       if (!row || row.lock_id !== lock.lockId || row.holder !== holder || row.expires_at <= Date.now()) throw deliveryError('REPOSITORY_LOCKED');

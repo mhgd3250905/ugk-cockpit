@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -177,6 +178,72 @@ test('linked worktree and cross-volume save recover index after commit without c
   assert.equal(recovered.sourceCommit,saved);
   assert.equal(gitSync(sourcePath,['diff','--cached','--name-only']),'unrelated.txt');
   assert.equal(gitSync(sourcePath,['status','--porcelain','--','feature.txt']),'');
+});
+
+for (const recoveryMode of ['same command', 'new preflight command']) test(`a killed delivery process resumes its owned index lock with ${recoveryMode} while preserving unrelated staging`, { timeout: 60000 }, async (t) => {
+  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  writeFileSync(path.join(sourcePath, 'feature.txt'), 'feature\n');
+  writeFileSync(path.join(sourcePath, 'unrelated.txt'), 'keep staged\n');
+  gitSync(sourcePath, ['add', 'unrelated.txt']);
+  const inspection = await inspectDelivery({ sourcePath, targetPath, files: ['feature.txt'] });
+  t.after(() => discardDeliveryCache(inspection));
+  const request = { sourcePath, inspection, commandId: 'real-process-kill', summary: '保存选中文件' };
+  const script = `
+    import { readFileSync } from 'node:fs';
+    const { saveDelivery } = await import(process.argv[1]);
+    const request = JSON.parse(readFileSync(0, 'utf8'));
+    await saveDelivery({ ...request, afterRefUpdate: async () => {
+      process.send({ ready: true });
+      await new Promise(resolve => process.on('message', resolve));
+    }});
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script,
+    new URL('../src/git/delivery-ops.mjs', import.meta.url).href], {
+    windowsHide: true, stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
+  });
+  const exited = once(child, 'exit');
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  const ready = once(child, 'message');
+  child.stdin.end(JSON.stringify(request));
+  const [message] = await Promise.race([ready, exited.then(() => { throw new Error(stderr || 'Worker exited before crash point'); })]);
+  assert.deepEqual(message, { ready: true });
+  const indexPath = path.resolve(sourcePath, gitSync(sourcePath, ['rev-parse', '--git-path', 'index']));
+  const lockPath = `${indexPath}.lock`;
+  const lockBytes = readFileSync(lockPath, 'utf8');
+  const committedHead = gitSync(sourcePath, ['rev-parse', 'HEAD']);
+  await assert.rejects(saveDelivery(request), { code: 'DELIVERY_INDEX_LOCKED' });
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(readFileSync(lockPath, 'utf8'), lockBytes, 'process termination must leave the real lock');
+
+  // PID reuse or an unknown Git lock never authorizes automatic removal.
+  writeFileSync(lockPath, JSON.stringify({ ...JSON.parse(lockBytes), pid: process.pid }));
+  await assert.rejects(saveDelivery(request), { code: 'DELIVERY_INDEX_LOCKED' });
+  writeFileSync(lockPath, 'unowned Git lock');
+  await assert.rejects(saveDelivery(request), { code: 'DELIVERY_INDEX_LOCKED' });
+  assert.equal(readFileSync(lockPath, 'utf8'), 'unowned Git lock');
+  writeFileSync(lockPath, lockBytes);
+  const original = `${lockPath}.test-original`;
+  renameSync(lockPath, original);
+  writeFileSync(lockPath, lockBytes);
+  await assert.rejects(saveDelivery(request), { code: 'DELIVERY_INDEX_LOCKED' });
+  assert.equal(readFileSync(lockPath, 'utf8'), lockBytes, 'copied ownership text does not prove file identity');
+  rmSync(lockPath);
+  renameSync(original, lockPath);
+
+  let retry = request;
+  if (recoveryMode === 'new preflight command') {
+    const refreshed = await inspectDelivery({ sourcePath, targetPath, files: ['feature.txt'] });
+    t.after(() => discardDeliveryCache(refreshed));
+    retry = { ...request, inspection: refreshed, commandId: 'new-command-after-expired-preflight' };
+  }
+  const recovered = await saveDelivery(retry);
+  assert.equal(recovered.sourceCommit, committedHead);
+  assert.equal(existsSync(lockPath), false);
+  assert.equal(gitSync(sourcePath, ['diff', '--cached', '--name-only']), 'unrelated.txt');
+  assert.equal(gitSync(sourcePath, ['status', '--porcelain', '--', 'feature.txt']), '');
 });
 
 test('readDeliveryLocation returns head, branch, changes and content fingerprint', async (t) => {

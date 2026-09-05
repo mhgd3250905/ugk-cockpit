@@ -18,6 +18,8 @@ import { createDevelopmentSpace, readDevelopmentSpace } from '../src/core/spaces
 import { submitDevelopmentSpace } from '../src/core/submission-service.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushIntegratedMain } from '../src/git/integration-ops.mjs';
+import { appendProgressEvent } from '../src/core/assignments.mjs';
+import { createRelay, resumeRelay } from '../src/core/relays.mjs';
 
 const git = (cwd, args) => execFileSync('git', args, {
   cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,7 +87,7 @@ async function fixture(t) {
       INSERT INTO assignments (
         id, project_id, worktree_id, agent_id, task_id, scope_json,
         status, revision, session_id, created_at, updated_at
-      ) VALUES (?, ?, ?, 'Codex', ?, '{"mode":"write"}', 'active', 2, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'Codex', ?, '{"mode":"write"}', 'active', 1, ?, ?, ?)
     `).run(assignmentId, project.projectId, worktreeId, goal, sessionId, createdAt, createdAt);
     const started = startWriteRun(db, {
       commandId: `start-${sessionId}`,
@@ -99,6 +101,11 @@ async function fixture(t) {
       baseline: snapshot(observation),
     });
     assert.equal(started.ok, true);
+    const progress = appendProgressEvent(db, {
+      sessionId, clientRequestId: `activate-${sessionId}`, expectedRevision: 1,
+      status: 'active', summary: goal,
+    });
+    assert.equal(progress.ok, true, JSON.stringify(progress));
   }
 
   writeFileSync(path.join(spacePath, 'feature.txt'), 'ready\n');
@@ -315,7 +322,7 @@ test('main push failure preserves local integration and the same command resumes
   assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'completed');
 });
 
-test('crash after fast-forward is recovered without another merge or duplicate receipt', async (t) => {
+test('crash after fast-forward recovers after real progress advances the revision without duplicate receipt', async (t) => {
   const f = await fixture(t);
   const { begun, reviewed } = await approve(f);
   const request = {
@@ -337,7 +344,50 @@ test('crash after fast-forward is recovered without another merge or duplicate r
   );
   assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'prepared');
   assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), f.sourceCommit);
+  const progress = appendProgressEvent(f.db, {
+    sessionId: 'session-main', clientRequestId: 'progress-after-interruption', expectedRevision: 2,
+    status: 'active', summary: '合并中断，准备恢复已保存的操作',
+  });
+  assert.equal(progress.ok, true, JSON.stringify(progress));
+  assert.equal(progress.revision, 3);
   const recovered = await mergeApprovedSubmission(f.db, request);
   assert.equal(recovered.ok, true, JSON.stringify(recovered));
   assert.equal(f.db.prepare('SELECT count(*) AS count FROM integration_receipts').get().count, 1);
+});
+
+for (const ownershipChange of ['lease', 'relay']) test(`an interrupted merge cannot resume after ${ownershipChange} ownership changes`, async (t) => {
+  const f = await fixture(t);
+  const { begun, reviewed } = await approve(f);
+  const request = {
+    commandId: 'merge-owner-changed', sessionId: 'session-main', submissionId: f.submissionId,
+    claimId: begun.claimId, expectedRevision: 2,
+    expectedSubmissionRevision: reviewed.submissionRevision,
+    expectedClaimRevision: reviewed.claimRevision, summary: '验证恢复归属',
+  };
+  await assert.rejects(mergeApprovedSubmission(f.db, request, {
+    faultInjector(point) {
+      if (point === 'after_fast_forward_before_persist') {
+        throw Object.assign(new Error('interrupted'), { simulateCrash: true });
+      }
+    },
+  }), /interrupted/);
+  if (ownershipChange === 'lease') {
+    f.db.prepare('UPDATE write_leases SET generation = generation + 1 WHERE run_id = ?').run('session-main');
+  } else {
+    const relay = createRelay(f.db, {
+      sessionId: 'session-main', clientRequestId: 'transfer-interrupted-merge', expectedRevision: 2,
+      nextSessionFocus: '检查未完成的合并', summary: '保留部分合并状态', currentState: '等待接手',
+      completedItems: [], pendingItems: ['处理合并'], decisions: [], artifactRefs: [], risks: [], suggestedSkills: [],
+    });
+    assert.equal(relay.ok, true, JSON.stringify(relay));
+    const resumed = resumeRelay(f.db, { continueCode: relay.continueCode, clientRequestId: 'new-conversation' });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed));
+  }
+  const recovered = await mergeApprovedSubmission(f.db, request, {
+    pushIntegratedMain() { assert.fail('Lost owner must not push'); },
+  });
+  assert.equal(recovered.code, 'INTEGRATION_BINDING_MISMATCH');
+  assert.equal(f.db.prepare('SELECT state FROM commands WHERE id = ?').get(request.commandId).state, 'received');
+  assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'prepared');
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM integration_receipts').get().count, 0);
 });
