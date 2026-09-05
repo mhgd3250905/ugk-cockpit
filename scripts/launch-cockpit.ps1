@@ -408,7 +408,11 @@ $mainEntry = (Resolve-Path -LiteralPath $mainEntry).Path
 $stdOutLog = Join-Path $LogDirectory 'service.log'
 $stdErrLog = Join-Path $LogDirectory 'service.err.log'
 $timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Add-Content -LiteralPath $stdOutLog -Value "`r`n=== [${timestamp}] UGK Cockpit launcher starting (repo: ${RepoDirectory}) ==="
+# Start-Process opens service.log with truncation, so the startup header goes
+# to a separate launcher.log. This keeps the header readable and preserves the
+# previous run's service.log for crash diagnosis.
+$launcherLog = Join-Path $LogDirectory 'launcher.log'
+Add-Content -LiteralPath $launcherLog -Value "`r`n=== [${timestamp}] UGK Cockpit launcher starting (repo: ${RepoDirectory}) ==="
 
 Write-Status 'START' 'Starting UGK Cockpit background service...'
 

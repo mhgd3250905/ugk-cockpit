@@ -12,8 +12,8 @@
     "install:skills:codex": "node scripts/install-cockpit-skills.mjs",
     "dev:web": "vite",
     "build:web": "vite build",
-    "test": "node --test --test-concurrency=1",
-    "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs"
+    "test": "node --test --test-concurrency=1 --test-force-exit",
+    "test:phase0": "node --test --test-concurrency=1 --test-force-exit test/phase0/*.test.mjs"
   },
   "dependencies": {
     "@appica/ui-react": "^1.1.0",
