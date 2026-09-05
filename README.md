@@ -70,7 +70,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node <仓库绝对路�
 
 ## 配套 Skills
 
-仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，新的只读 MCP 工具 `ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管，只有用户明确确认后才在当前 bridge 进程内建立临时绑定。查询不会改变平台会话、写入归属、租约、心跳或 revision；旧 bridge 被新接力代际超越时会安全标为 stale。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，新的只读 MCP 工具 `ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管，只有用户明确确认后才建立当前聊天绑定；支持稳定宿主身份时由平台持久保存，未适配客户端可能仅保留连接内绑定。查询不会改变平台会话、写入归属、租约、心跳或 revision；旧 bridge 被新接力代际超越时会安全标为 stale。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 安装到当前用户的 Codex：
 

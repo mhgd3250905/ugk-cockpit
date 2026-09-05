@@ -37,6 +37,6 @@
 
 新增 schema 22 前使用一致性备份，停止经启动器核验的旧服务后迁移。26 张既有业务表前后内容摘要完全一致，6 项目/17 运行/25 任务/124 进展/21 接力保留，完整性和外键检查通过。备份位于 `%LOCALAPPDATA%\UGK Cockpit\backups\cockpit-before-durable-bindings-2026-09-05T04-32-17-497Z.db`。
 
-服务升级不等于宿主已经加载新版 MCP 代码。原 Codex bridge 停止后，本轮工具仍返回 `Transport closed`，需宿主重连；不能用独立脚本调用成功代替原聊天验收。支持稳定宿主元数据的新版 bridge 使用数据库绑定，首次历史关联与不支持宿主的边界见 [会话身份与中断恢复](CONVERSATION_DURABILITY.md)。
+服务升级不等于宿主已经加载新版 MCP 代码。原 Codex bridge 停止后曾返回 `Transport closed`；随后原聊天重连成功，经用户明确确认建立 `durable` 绑定，再次空参数 context 查询保持 `bound`、active、revision 49。不能用独立脚本调用成功代替原聊天验收。支持稳定宿主元数据的新版 bridge 使用数据库绑定，首次历史关联与不支持宿主的边界见 [会话身份与中断恢复](CONVERSATION_DURABILITY.md)。
 
 12:47 最终迁移至 schema 23，先生成 `cockpit-schema-22-before-23-2026-09-05T04-47-06-404Z.db` 一致性备份；迁移前后 27 张既有表摘要完全一致，期间新增的进展也保留（125 条）。当前服务 PID 50588，项目列表与详情可读，完整性及外键检查通过。
