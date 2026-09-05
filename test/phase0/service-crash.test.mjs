@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,8 +10,14 @@ import { openCockpitDatabase } from '../../src/core/database.mjs';
 const workerPath = fileURLToPath(new URL('../../scripts/service-worker.mjs', import.meta.url));
 const token = 'phase-zero-service-crash-token-123456789';
 
+function fixtureTempRoot() {
+  // POSIX 的系统临时目录（/tmp、/var）本身是符号链接；路径授权默认拒绝
+  // 穿越链接，因此夹具必须建立在真实路径下。
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 function createFixture(t) {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-service-crash-'));
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-service-crash-'));
   t.after(() => rmSync(container, { recursive: true, force: true }));
   const repository = path.join(container, 'repository');
   mkdirSync(repository);
@@ -29,7 +35,7 @@ function createFixture(t) {
   return { container, repository, dbPath: path.join(container, 'cockpit.db') };
 }
 
-function launchService(fixture, faultPoint = null) {
+function launchService(t, fixture, faultPoint = null) {
   const encoded = Buffer.from(JSON.stringify({
     dbPath: fixture.dbPath,
     token,
@@ -39,6 +45,11 @@ function launchService(fixture, faultPoint = null) {
   const child = spawn(process.execPath, [workerPath, encoded], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  // 测试失败时也必须回收子进程：泄漏的 worker 持有管道会让本测试文件
+  // 永不退出，进而挂死整个测试套件。
+  t.after(() => {
+    try { child.kill(); } catch {}
   });
   const ready = new Promise((resolve, reject) => {
     let stderr = '';
@@ -90,12 +101,12 @@ test('service kill/restart replays start and finish without phantom completion',
     goal: 'service crash recovery',
   };
 
-  let service = launchService(fixture, 'start.after_lease_insert');
+  let service = launchService(t, fixture, 'start.after_lease_insert');
   let ready = await service.ready;
   await assert.rejects(api(ready.port, '/api/v1/runs/start', startBody));
   assert.equal(await waitForExit(service.child), 91);
 
-  service = launchService(fixture);
+  service = launchService(t, fixture);
   ready = await service.ready;
   const startResponse = await api(ready.port, '/api/v1/runs/start', startBody);
   assert.ok([200, 201].includes(startResponse.status));
@@ -109,7 +120,7 @@ test('service kill/restart replays start and finish without phantom completion',
     outcome: 'completed',
     summary: 'finish after restart',
   };
-  service = launchService(fixture, 'finish.after_receipt_insert');
+  service = launchService(t, fixture, 'finish.after_receipt_insert');
   ready = await service.ready;
   await assert.rejects(api(
     ready.port,
@@ -118,7 +129,7 @@ test('service kill/restart replays start and finish without phantom completion',
   ));
   assert.equal(await waitForExit(service.child), 91);
 
-  service = launchService(fixture);
+  service = launchService(t, fixture);
   ready = await service.ready;
   const finishResponse = await api(
     ready.port,

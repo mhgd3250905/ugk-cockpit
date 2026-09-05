@@ -157,3 +157,22 @@ test('API client translates a lost local connection into a Chinese recovery mess
     return true;
   });
 });
+
+test('API client maps a non-JSON response onto the connection error contract', async () => {
+  const api = createClient({
+    fetchImpl: async () => ({
+      status: 502,
+      ok: false,
+      json: async () => { throw new SyntaxError('Unexpected token < in JSON'); },
+    }),
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+
+  await assert.rejects(api('/api/v1/dashboard'), (error) => {
+    assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+    assert.equal(typeof error.impact, 'string');
+    assert.equal(typeof error.required_action, 'string');
+    return true;
+  });
+});

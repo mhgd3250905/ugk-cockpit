@@ -1569,7 +1569,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             <ProjectAvatar
               project={project}
               avatarUrl={project.avatarPath
-                ? `/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?t=${encodeURIComponent(project.avatarPath)}`
+                ? `/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?path=${encodeURIComponent(project.avatarPath)}`
                 : null}
               size={48}
             />

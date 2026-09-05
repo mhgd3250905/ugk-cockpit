@@ -521,23 +521,27 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     if (attempt.state === 'prepared') {
       const main = await probeMain(binding.project, options);
       if (main.after.hasChanges) return retryableMergeError(db, attempt, 'MAIN_HAS_CHANGES', 'Main has local changes.', options);
+      // A prepared attempt may be retried long after its first pass.  The
+      // submission and claim must be re-derived on every re-entry so a verdict
+      // or version that changed in the meantime can never be merged by the
+      // frozen plan; the git checks below never re-approve anything.
       const latestSubmission = readSubmission(db, submissionId);
+      const latestClaim = readIntegrationClaim(db, claimId);
+      if (latestSubmission.status !== 'approved' || latestSubmission.revision !== expectedSubmissionRevision
+        || latestClaim?.status !== 'active' || latestClaim?.revision !== expectedClaimRevision) {
+        return {
+          ok: false,
+          code: 'INTEGRATION_REVISION_CONFLICT',
+          submissionId,
+          claimId,
+          currentSubmissionRevision: latestSubmission.revision,
+          expectedSubmissionRevision,
+          currentClaimRevision: latestClaim?.revision ?? null,
+          expectedClaimRevision,
+          status: latestSubmission.status,
+        };
+      }
       if (latestSubmission.delivery?.sourceId) {
-        const latestClaim = readIntegrationClaim(db, claimId);
-        if (latestSubmission.status !== 'approved' || latestSubmission.revision !== expectedSubmissionRevision
-          || latestClaim?.status !== 'active' || latestClaim?.revision !== expectedClaimRevision) {
-          return {
-            ok: false,
-            code: 'INTEGRATION_REVISION_CONFLICT',
-            submissionId,
-            claimId,
-            currentSubmissionRevision: latestSubmission.revision,
-            expectedSubmissionRevision,
-            currentClaimRevision: latestClaim?.revision ?? null,
-            expectedClaimRevision,
-            status: latestSubmission.status,
-          };
-        }
         if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
         assertWriteOwner();
         try { await importReviewedDelivery(latestSubmission, binding.project); }

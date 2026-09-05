@@ -4,6 +4,7 @@ import {
   fsyncSync,
   openSync,
   readFileSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -71,7 +72,20 @@ export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
         conflict.code = 'INSTANCE_ALREADY_RUNNING';
         throw conflict;
       }
-      unlinkSync(lockPath);
+      // 用原子 rename 把陈旧锁移走后再重建：两个并发获取者只有一个能
+      // rename 成功，另一方在下一次尝试中重新观察现状，避免出现
+      // “双方都删过对方新锁”的双实例竞态（release 使用同一所有权比对）。
+      const stalePath = `${lockPath}.${ownerToken}.stale`;
+      try {
+        renameSync(lockPath, stalePath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+        continue;
+      }
+      try {
+        unlinkSync(stalePath);
+      } catch {}
+      continue;
     }
   }
   throw new Error('Unable to acquire instance lock.');

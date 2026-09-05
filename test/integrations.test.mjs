@@ -746,3 +746,46 @@ test('submissions support expanded status set', (t) => {
 
   db.close();
 });
+
+test('command-backed receipt replay keeps one receipt despite a changed timestamp', (t) => {
+  const db = fixture(t);
+  const sub = createSubmission(db, {
+    projectId: 'proj-integ',
+    spaceId: 'space-feat-1',
+    sourceWorktreeId: 'wt-space-1',
+    targetWorktreeId: 'wt-main',
+    sourceBranch: 'feature/feat-1',
+    sourceCommit: 'commit-src-replay',
+    targetBranch: 'main',
+    targetHead: 'commit-tgt-replay',
+  }, { clock: () => Date.parse('2026-09-02T02:00:00.000Z') });
+  assert.equal(sub.ok, true, JSON.stringify(sub));
+
+  const claim = claimSubmission(db, {
+    commandId: 'claim-replay-cmd',
+    submissionId: sub.submissionId,
+    claimant: 'agent-replay',
+  }, { clock: () => Date.parse('2026-09-02T02:01:00.000Z') });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+
+  // mergeApprovedSubmission 以派生 commandId 调用且不传 receiptId：
+  // 回执 id 必须从稳定的 command id 派生，重放时即便时钟前移也保持
+  // journal digest 一致，否则崩溃恢复会永远卡在 COMMAND_CONFLICT。
+  const request = {
+    commandId: 'integration_receipt:merge-cmd-replay',
+    submissionId: sub.submissionId,
+    claimId: claim.claimId,
+    outcome: 'integrated',
+    summary: '重放回执',
+    integratedCommit: 'commit-merged-replay',
+    payload: { pushed: true },
+  };
+  const first = recordIntegrationReceipt(db, request, { clock: () => Date.parse('2026-09-02T02:05:00.000Z') });
+  assert.equal(first.ok, true, JSON.stringify(first));
+
+  const second = recordIntegrationReceipt(db, request, { clock: () => Date.parse('2026-09-02T02:07:00.000Z') });
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.equal(second.receiptId, first.receiptId);
+  assert.equal(listIntegrationReceipts(db, { submissionId: sub.submissionId }).length, 1);
+  db.close();
+});

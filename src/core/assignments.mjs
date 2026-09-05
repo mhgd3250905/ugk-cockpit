@@ -873,6 +873,11 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
       });
     }
     if (grant.state === 'accepted') {
+      // 一次性 code 是唯一凭证：即使已经接受，重放也必须出示同一 code，
+      // 与 resumeRelay 先按 code 哈希定位的实现保持一致。
+      if (!codeMatches(grant.code_hash, code)) {
+        return failCommand(db, commandId, { ok: false, code: 'DISPATCH_CODE_INVALID', grantId });
+      }
       if (grant.accepted_client_request_id === clientRequestId
         && grant.accepted_session_id === sessionId) {
         return {
@@ -1496,10 +1501,17 @@ export function revokeAssignment(db, request = {}, options = {}) {
     grantId = context.grantId;
   }
   if (!grantId && request.assignmentId) {
+    // 优先撤销仍然有效的最新 grant；否则退回最新一条，
+    // 让 revokeDispatchGrant 对已过期/已撤销的 grant 给出准确结果。
     grantId = db.prepare(`
-      SELECT id FROM dispatch_grants WHERE assignment_id = ?
+      SELECT id FROM dispatch_grants
+      WHERE assignment_id = ? AND state IN ('active', 'accepted')
       ORDER BY created_at DESC, id DESC LIMIT 1
-    `).get(request.assignmentId)?.id;
+    `).get(request.assignmentId)?.id
+      ?? db.prepare(`
+        SELECT id FROM dispatch_grants WHERE assignment_id = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      `).get(request.assignmentId)?.id;
   }
   if (!grantId) return { ok: false, code: 'DISPATCH_GRANT_NOT_FOUND' };
   return revokeDispatchGrant(db, { ...request, grantId }, options);
