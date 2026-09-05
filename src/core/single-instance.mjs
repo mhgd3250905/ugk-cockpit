@@ -88,5 +88,9 @@ export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
       continue;
     }
   }
-  throw new Error('Unable to acquire instance lock.');
+  // 只有并发获取者在两轮尝试中反复抢先时才会走到这里；
+  // 给出带错误码的冲突结果而不是无码失败，调用方按“已有实例”处理。
+  const conflict = new Error('UGK Cockpit 正在启动。');
+  conflict.code = 'INSTANCE_ALREADY_RUNNING';
+  throw conflict;
 }
