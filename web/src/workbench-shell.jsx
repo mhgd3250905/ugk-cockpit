@@ -10,6 +10,7 @@ function ShellIcon({ name, ...props }) {
     plus: <path d="M12 5v14M5 12h14" />,
     refresh: <><path d="M19.5 9a8 8 0 0 0-13-3L3.5 9m0-5v5h5M4.5 15a8 8 0 0 0 13 3l3-3m0 5v-5h-5" /></>,
     chevron: <path d="m9 5 7 7-7 7" />,
+    back: <path d="m11 5-7 7 7 7M4 12h16" />,
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   };
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name]}</svg>;
@@ -78,11 +79,7 @@ export function WorkbenchShell({
         <div className="wb-brand-row">
           <button className="wb-brand" type="button" onClick={selectOverview} aria-label="UGK Cockpit 项目总览">
             <span className="wb-brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.6">
-                <ellipse cx="16" cy="16" rx="11" ry="6" transform="rotate(-38 16 16)" />
-                <circle cx="16" cy="16" r="3" fill="currentColor" stroke="none" />
-                <circle cx="24.5" cy="9" r="2.5" fill="currentColor" stroke="none" />
-              </svg>
+              <img src="/assets/cockpit-mark.svg" width="38" height="38" alt="" />
             </span>
             <span className="wb-brand-copy"><strong>UGK <span>Cockpit</span></strong><small>你的项目，持续向前</small></span>
           </button>
@@ -117,7 +114,10 @@ export function WorkbenchShell({
 
       <div className="wb-workspace">
         <header className="wb-topbar">
-          <div className="wb-breadcrumb"><span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={activeProject?.name}>{activeProject?.name || '项目工作台'}</span></div>
+          <nav className="wb-breadcrumb" aria-label="页面位置">
+            {activeProjectId && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
+            <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={activeProject?.name}>{activeProject?.name || '项目工作台'}</span>
+          </nav>
           <div className="wb-topbar-actions">
             <button className="wb-icon-button wb-refresh" type="button" onClick={onRefresh} disabled={busy} title="刷新项目数据" aria-label="刷新项目数据"><ShellIcon name="refresh" /></button>
             <Button type="button" variant="soft" className="wb-add-project" onClick={onAddProject} disabled={busy}><ShellIcon name="plus" /><span>添加项目</span></Button>

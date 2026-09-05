@@ -527,10 +527,30 @@ details[open] > summary::before {
 
 /* Appica 提示体内的排版 */
 .notice-body {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
   min-width: 0;
   flex: 1 1 auto;
+  grid-area: body;
+}
+
+/* Alert 子组件带有命名 grid-area；包裹正文时由本页显式安排外层位置。 */
+[data-slot='alert']:has(> .notice-body) {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'body actions';
+  column-gap: 16px;
+  padding: 16px 20px;
+  text-align: left;
+}
+[data-slot='alert']:has(> .notice-body) > [data-slot='alert-icon']:empty { display: none; }
+.notice-body > [data-slot] { grid-area: auto; margin: 0; line-height: 1.65; overflow-wrap: anywhere; }
+.notice-body > [data-slot='alert-title'] { align-self: auto; font-size: 14px; }
+.notice-body > [data-slot='alert-description'] { font-size: 13px; }
+.notice-btn { grid-area: actions; align-self: center; }
+@media (max-width: 600px) {
+  [data-slot='alert']:has(> .notice-body) { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'body' 'actions'; row-gap: 12px; }
+  .notice-btn { justify-self: start; }
 }
 
 /* Appica 弹窗宽度 */
@@ -860,6 +880,7 @@ details[open] > summary::before {
 
 .detail-action-notice {
   margin: 14px 0;
+  max-width: 760px;
 }
 
 /* ==========================================================================
@@ -959,29 +980,6 @@ details[open] > summary::before {
   width: 3px;
   background: var(--state-text, var(--primary));
   opacity: 0.8;
-}
-
-.detail-back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--foreground-subtle);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.detail-back-link:hover {
-  color: var(--foreground-strong);
-}
-
-.detail-back-link:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 3px;
-  border-radius: 4px;
 }
 
 .detail-kicker-row {
@@ -1963,6 +1961,13 @@ details[open] > summary::before {
   justify-content: center;
   text-align: center;
 }
+
+.detail-loading { gap: 22px; padding: 36px 24px; }
+.detail-skeleton { display: flex; flex-direction: column; gap: 14px; width: min(520px, 100%); }
+.detail-skeleton > [data-slot='skeleton'] { height: 12px; flex: none; border-radius: 6px; }
+.detail-skeleton > .detail-skeleton-title { width: 42%; height: 18px; margin-bottom: 4px; }
+.detail-skeleton-line { width: 100%; }
+.detail-skeleton-short { width: 72%; }
 
 .timeline-empty > span {
   width: 14px;
