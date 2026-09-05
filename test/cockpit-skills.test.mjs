@@ -254,11 +254,16 @@ test('cockpit-relay defines two explicit modes and precise success reporting cri
   }
   assert.doesNotMatch(instructions, /"reason"|"nextTask"/);
 
-  // Relay resume payload contract (only continueCode and clientRequestId)
+  // Initial resume remains minimal; expired recovery requires explicit confirmation.
   const resumeSection = instructions.split(/## 模式二：恢复接力/)[1] || '';
   assert.match(resumeSection, /"continueCode"/);
   assert.match(resumeSection, /"clientRequestId"/);
   assert.doesNotMatch(resumeSection, /"currentTask"|"currentState"|"expectedRevision"/);
+  assert.match(resumeSection, /confirmation_required/);
+  assert.match(resumeSection, /只有用户明确同意后/);
+  assert.match(resumeSection, /confirmationRequestId.*expectedRevision/);
+  assert.match(resumeSection, /RELAY_TRANSPORT_UNCERTAIN/);
+  assert.match(resumeSection, /再次工作前先补办恢复/);
 
   // Non-terminal lifecycle and boundary rules
   assert.match(instructions, /停止继续修改/);

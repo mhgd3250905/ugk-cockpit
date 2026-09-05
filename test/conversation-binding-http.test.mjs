@@ -137,6 +137,32 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     await assert.rejects(handlers('different').ugk_work_resume(resumeArgs));
     assert.equal((await next.ugk_work_resume(resumeArgs)).relayAccepted, true);
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings WHERE revoked = 0 AND session_id = ?').get(initialized.sessionId).n, 1);
+
+    const expiring = await handlers('next').ugk_work_relay({ ...relayArgs,
+      clientRequestId: 'expire-offer', expectedRevision: resumed.revision });
+    db.prepare('UPDATE relays SET expires_at = 1 WHERE id = ?').run(expiring.relayId);
+    const missing = await handlers('third').ugk_work_context({});
+    assert.equal(missing.bindingStatus, 'unbound');
+    assert.equal(missing.bindingReason, 'not_resumed');
+    assert.equal(missing.generationScope, 'session_history_not_current_chat');
+    assert.equal((await handlers('next').ugk_work_context({})).canContinue, true);
+    const offerA = await handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-a' });
+    const offerB = await handlers('fourth').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-b' });
+    assert.equal(offerA.status, 'confirmation_required');
+    assert.equal(offerB.status, 'confirmation_required');
+    const restartPort = service.port;
+    await service.close();
+    service = await createCockpitHttpServer({ dbPath, token, port: restartPort });
+    const results = await Promise.allSettled([
+      handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'confirm-a',
+        confirmationRequestId: offerA.confirmationRequestId, expectedRevision: offerA.expectedRevision }),
+      handlers('fourth').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'confirm-b',
+        confirmationRequestId: offerB.confirmationRequestId, expectedRevision: offerB.expectedRevision }),
+    ]);
+    assert.equal(results.filter(r => r.status === 'fulfilled' && r.value.relayAccepted).length, 1);
+    assert.equal(results.filter(r => r.status === 'rejected').length, 1);
+    assert.equal((await handlers('next').ugk_work_context({})).bindingReason, 'replaced');
+    assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings WHERE revoked = 0 AND session_id = ?').get(initialized.sessionId).n, 1);
   } finally {
     db?.close();
     await service.close();

@@ -163,7 +163,7 @@ test('MCP refreshes a replaced local credential and preserves relay payload and 
   const newToken = 'new-local-token-'.padEnd(40, 'y');
   const calls = [];
   let refreshes = 0;
-  const session = { ok: true, sessionId: 'session-1', worktreeId: 'worktree-1', revision: 17, status: 'active' };
+  const session = { ok: true, relayAccepted: true, sessionId: 'session-1', worktreeId: 'worktree-1', revision: 17, status: 'active' };
   const handlers = createServiceHandlers({
     token: oldToken,
     refreshToken: () => { refreshes += 1; return newToken; },

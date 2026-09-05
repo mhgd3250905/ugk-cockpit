@@ -587,7 +587,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_resume',
-    description: 'Only call when the user explicitly instructs resuming with a provided continueCode; consume a one-time conversation relay code and continue the same active Cockpit session',
+    description: 'Only when the user explicitly requests resuming with a continueCode. An expired code can return confirmation_required: ask the user before retrying with confirmationRequestId and expectedRevision from that response and a new clientRequestId. Never infer confirmation.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -598,6 +598,14 @@ export const TOOLS = [
         clientRequestId: {
           type: 'string',
           description: 'Idempotency key / client request identifier'
+        },
+        confirmationRequestId: {
+          type: 'string',
+          description: 'Only after user confirmation: the confirmationRequestId returned by the preceding resume offer'
+        },
+        expectedRevision: {
+          type: 'integer', minimum: 1,
+          description: 'Copy the revision from the same confirmation offer; never obtain it from another session'
         }
       },
       required: ['continueCode', 'clientRequestId'],
@@ -963,7 +971,7 @@ function validateResumeArgs(args) {
   }
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
-    if (!['continueCode', 'clientRequestId'].includes(key)) {
+    if (!['continueCode', 'clientRequestId', 'confirmationRequestId', 'expectedRevision'].includes(key)) {
       return `Unexpected property: ${key}`;
     }
   }
@@ -972,6 +980,12 @@ function validateResumeArgs(args) {
   }
   if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
     return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if ((args.confirmationRequestId !== undefined) !== (args.expectedRevision !== undefined)
+    || (args.confirmationRequestId !== undefined && (typeof args.confirmationRequestId !== 'string'
+      || !args.confirmationRequestId.trim() || args.confirmationRequestId === args.clientRequestId
+      || !Number.isInteger(args.expectedRevision) || args.expectedRevision < 1))) {
+    return 'Confirmation requires a prior confirmationRequestId, expectedRevision and a new clientRequestId';
   }
   return null;
 }
@@ -1243,6 +1257,11 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
           result: formattedResult
         };
       } catch (err) {
+        if (err?.relayPayload) {
+          return { jsonrpc: '2.0', id, result: {
+            isError: true, content: [{ type: 'text', text: JSON.stringify(err.relayPayload) }],
+          } };
+        }
         if (stderr?.write) {
           try {
             stderr.write(`[ugk-mcp] Handler error for ${toolName}: ${err?.message || err}\n`);

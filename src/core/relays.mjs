@@ -661,6 +661,13 @@ export function resumeRelay(db, request = {}, options = {}) {
   if (!isNonEmptyString(continueCode) || !isNonEmptyString(clientRequestId)) {
     return invalid('continueCode and clientRequestId are required.');
   }
+  const confirming = request.confirmationRequestId !== undefined;
+  if (confirming !== (request.expectedRevision !== undefined)
+    || (confirming && (!isNonEmptyString(request.confirmationRequestId)
+      || request.confirmationRequestId === clientRequestId
+      || !Number.isInteger(request.expectedRevision) || request.expectedRevision < 1))) {
+    return invalid('Confirmation requires a prior request id, a new clientRequestId and expectedRevision.');
+  }
   const codeHash = digest(continueCode);
   const located = relayRowByCodeHash(db, codeHash);
   if (!located) return { ok: false, code: 'RELAY_CODE_INVALID' };
@@ -676,6 +683,7 @@ export function resumeRelay(db, request = {}, options = {}) {
     ...(request.conversationKey ? { conversationKey: request.conversationKey } : {}),
     clientRequestId,
     continueCodeHash: codeHash,
+    ...(confirming ? { confirmationRequestId: request.confirmationRequestId, expectedRevision: request.expectedRevision } : {}),
     ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
     ...(request.worktreeId !== undefined ? { worktreeId: request.worktreeId } : {}),
   };
@@ -696,27 +704,6 @@ export function resumeRelay(db, request = {}, options = {}) {
     const row = relayRow(db, located.id);
     if (!row || !codeMatches(row.code_hash, continueCode)) {
       return failCommand(db, commandId, { ok: false, code: 'RELAY_CODE_INVALID' }, at);
-    }
-
-    if (row.state === 'expired') {
-      return failCommand(db, commandId, {
-        ok: false,
-        code: 'RELAY_EXPIRED',
-        relayId: row.id,
-        sessionId: row.session_id,
-      }, at);
-    }
-    if (row.expires_at <= nowMillis(options)) {
-      db.prepare(`
-        UPDATE relays SET state = 'expired'
-        WHERE id = ? AND state = 'active'
-      `).run(row.id);
-      return failCommand(db, commandId, {
-        ok: false,
-        code: 'RELAY_EXPIRED',
-        relayId: row.id,
-        sessionId: row.session_id,
-      }, at);
     }
 
     const live = liveSession(db, row.session_id);
@@ -748,11 +735,46 @@ export function resumeRelay(db, request = {}, options = {}) {
         sessionId: row.session_id,
       }, at);
     }
+    // A newer offer or acceptance supersedes this capability even if its code
+    // has since expired. Never resurrect an earlier relay generation.
+    const latest = db.prepare('SELECT id FROM relays WHERE session_id = ? ORDER BY sequence DESC LIMIT 1')
+      .get(row.session_id);
+    if (latest?.id !== row.id) {
+      return failCommand(db, commandId, { ok: false, code: 'RELAY_SUPERSEDED', sessionId: row.session_id }, at);
+    }
     if (
       live.revision !== row.revision
       || (live.run && live.run.revision !== row.revision)
     ) {
       return failCommand(db, commandId, revisionConflict(live, row.session_id), at);
+    }
+
+    if (row.state === 'expired' || row.expires_at <= nowMillis(options)) {
+      if (!request.conversationKey) {
+        db.prepare("UPDATE relays SET state = 'expired' WHERE id = ? AND state = 'active'").run(row.id);
+        return failCommand(db, commandId, { ok: false, code: 'RELAY_EXPIRED', relayId: row.id, sessionId: row.session_id }, at);
+      }
+      if (!confirming) {
+        // The command journal is the durable confirmation offer. It binds the
+        // original capability, host conversation and observed revision without
+        // changing the lease, ownership or business revision.
+        return commitCommand(db, commandId, {
+          ok: true, relayAccepted: false, status: 'confirmation_required',
+          requiresUserConfirmation: true, confirmationRequestId: clientRequestId,
+          expectedRevision: live.revision, sessionId: row.session_id, relayId: row.id,
+          message: '接力码已过期，尚无人接走这份工作。是否在当前聊天继续接手？',
+        }, at, row.session_id);
+      }
+      const offer = readCommand(db, commandIdFor('relay.resume', row.id, request.confirmationRequestId));
+      const offered = offer?.state === 'committed' ? parseCommandResponse(offer) : null;
+      const offerIntent = offer ? JSON.parse(offer.request_json) : null;
+      if (!offered?.requiresUserConfirmation || offerIntent?.conversationKey !== request.conversationKey
+        || offerIntent?.continueCodeHash !== codeHash || offered.expectedRevision !== request.expectedRevision
+        || request.expectedRevision !== live.revision) {
+        return failCommand(db, commandId, { ok: false, code: 'RELAY_CONFIRMATION_STALE', sessionId: row.session_id }, at);
+      }
+    } else if (confirming) {
+      return failCommand(db, commandId, { ok: false, code: 'RELAY_CONFIRMATION_STALE', sessionId: row.session_id }, at);
     }
 
     const nextRevision = row.revision + 1;
@@ -777,7 +799,7 @@ export function resumeRelay(db, request = {}, options = {}) {
       UPDATE relays
       SET state = 'accepted', accepted_at = ?,
           accepted_client_request_id = ?, accepted_revision = ?
-      WHERE id = ? AND state = 'active' AND revision = ?
+      WHERE id = ? AND state IN ('active', 'expired') AND revision = ?
     `).run(at, clientRequestId, nextRevision, row.id, row.revision);
     if (marked.changes !== 1) throw new Error('Relay accept CAS failed.');
     options.faultInjector?.('resume.after_relay_cas');

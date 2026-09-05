@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,6 +51,99 @@ const relayFields = {
   risks: [],
   suggestedSkills: ['cockpit-relay'],
 };
+
+function resumeInProcess(dbPath, request, clock, killBeforeCommit = false) {
+  const code = `
+    import { openCockpitDatabase } from ${JSON.stringify(new URL('../src/core/database.mjs', import.meta.url).href)};
+    import { resumeRelay } from ${JSON.stringify(new URL('../src/core/relays.mjs', import.meta.url).href)};
+    const db = openCockpitDatabase(process.argv[1]);
+    const result = resumeRelay(db, JSON.parse(process.argv[2]), {
+      clock: Number(process.argv[3]),
+      faultInjector(point) {
+        if (process.argv[4] === 'kill' && point === 'resume.after_command_commit_before_transaction_commit') process.kill(process.pid, 'SIGKILL');
+      },
+    });
+    db.close(); console.log(JSON.stringify(result));
+  `;
+  return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code,
+    dbPath, JSON.stringify(request), String(clock), killBeforeCommit ? 'kill' : 'normal'],
+  { encoding: 'utf8', windowsHide: true, timeout: 10000 }));
+}
+
+test('expired relay confirmation survives process death and commits ownership exactly once', (t) => {
+  const db = fixture(t);
+  activeSession(db);
+  const now = Date.now();
+  createRelay(db, { ...relayFields, sessionId: 'session-relay', clientRequestId: 'offer',
+    expectedRevision: 2, continueCode: 'expired-confirm-code', ttlMs: 1 }, { clock: now });
+  const dbPath = db.prepare('PRAGMA database_list').get().file;
+  const original = { continueCode: 'expired-confirm-code', clientRequestId: 'inspect', conversationKey: 'new-chat' };
+  const offer = resumeInProcess(dbPath, original, now + 10);
+  assert.equal(offer.status, 'confirmation_required');
+  assert.equal(offer.relayAccepted, false);
+  assert.equal(db.prepare('SELECT revision FROM runs').get().revision, 3);
+  assert.deepEqual(resumeInProcess(dbPath, original, now + 20), offer);
+  const confirmation = { ...original, clientRequestId: 'confirm', confirmationRequestId: offer.confirmationRequestId,
+    expectedRevision: offer.expectedRevision };
+  assert.equal(resumeRelay(db, { ...confirmation, clientRequestId: 'wrong-chat', conversationKey: 'other-chat' },
+    { clock: now + 20 }).code, 'RELAY_CONFIRMATION_STALE');
+  assert.throws(() => resumeInProcess(dbPath, confirmation, now + 30, true));
+  assert.equal(db.prepare('SELECT revision FROM runs').get().revision, 3);
+  assert.equal(db.prepare('SELECT count(*) n FROM conversation_bindings').get().n, 0);
+  const accepted = resumeInProcess(dbPath, confirmation, now + 40);
+  assert.equal(accepted.relayAccepted, true);
+  assert.equal(accepted.revision, 4);
+  assert.deepEqual(resumeInProcess(dbPath, confirmation, now + 50), accepted);
+  assert.equal(db.prepare('SELECT count(*) n FROM conversation_bindings WHERE revoked=0').get().n, 1);
+  db.close();
+});
+
+test('expired confirmation cannot bypass an absent offer, a new relay, or intervening progress', (t) => {
+  const db = fixture(t);
+  activeSession(db);
+  const now = Date.now();
+  createRelay(db, { ...relayFields, sessionId: 'session-relay', clientRequestId: 'offer',
+    expectedRevision: 2, continueCode: 'old-code', ttlMs: 1 }, { clock: now });
+  const request = { continueCode: 'old-code', conversationKey: 'new-chat', clientRequestId: 'inspect' };
+  assert.equal(resumeRelay(db, { ...request, confirmationRequestId: 'absent', expectedRevision: 3 },
+    { clock: now + 10 }).code, 'RELAY_CONFIRMATION_STALE');
+  const offer = resumeRelay(db, { ...request, clientRequestId: 'inspect-real' }, { clock: now + 20 });
+  const confirmation = { ...request, clientRequestId: 'confirm', confirmationRequestId: offer.confirmationRequestId,
+    expectedRevision: offer.expectedRevision };
+  recordProgress(db, { sessionId: 'session-relay', clientRequestId: 'advance', expectedRevision: 3,
+    status: 'working', summary: 'owner continued' });
+  assert.equal(resumeRelay(db, confirmation, { clock: now + 30 }).code, 'RELAY_REVISION_CONFLICT');
+  createRelay(db, { ...relayFields, sessionId: 'session-relay', clientRequestId: 'replacement',
+    expectedRevision: 4, continueCode: 'latest-code', ttlMs: 1 }, { clock: now + 40 });
+  assert.equal(resumeRelay(db, { ...confirmation, clientRequestId: 'confirm-again' },
+    { clock: now + 50 }).code, 'RELAY_SUPERSEDED');
+  assert.equal(db.prepare('SELECT count(*) n FROM conversation_bindings').get().n, 0);
+  db.close();
+});
+
+test('relay transport retries response loss with identical intent and reports uncertain exhaustion', async () => {
+  const seen = [];
+  const handlers = createServiceHandlers({ token: 'x'.repeat(32), workingDirectory: 'E:\\fixture\\relay',
+    fetchImpl: async (_url, options) => {
+      seen.push(options.body);
+      if (seen.length === 1) return { ok: true, json: async () => { throw new Error('response lost after commit'); } };
+      return new Response(JSON.stringify({ ok: true, relayAccepted: true, status: 'active', revision: 4 }));
+    },
+  });
+  const args = { continueCode: 'secret', clientRequestId: 'unchanged' };
+  assert.equal((await handlers.ugk_work_resume(args)).relayAccepted, true);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0], seen[1]);
+  const offline = createServiceHandlers({ token: 'x'.repeat(32), workingDirectory: 'E:\\fixture\\relay',
+    fetchImpl: async () => { throw new Error('offline'); } });
+  const result = await dispatchMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'ugk_work_resume', arguments: args } }, { handlers: offline });
+  const error = JSON.parse(result.result.content[0].text);
+  assert.equal(error.code, 'RELAY_TRANSPORT_UNCERTAIN');
+  assert.equal(error.clientRequestId, args.clientRequestId);
+  assert.equal(error.retryable, true);
+  assert.equal(JSON.stringify(error).includes('secret'), false);
+});
 
 function activeSession(db) {
   const assignment = createAssignment(db, {
@@ -387,6 +481,7 @@ test('stdio exposes strict relay/resume schemas and service-client forwards the 
     fetchImpl: async (url, options) => {
       calls.push({ url: url.toString(), options });
       return new Response(JSON.stringify({
+        ok: true,
         relayAccepted: true,
         status: 'active',
         sessionId: 'session-stdio-relay',

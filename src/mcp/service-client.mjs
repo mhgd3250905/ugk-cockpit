@@ -153,11 +153,13 @@ export function createServiceHandlers({
     try {
       response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
         method: 'POST',
+        signal: AbortSignal.timeout(5000),
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
       });
     } catch (cause) {
       throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+        transportFailure: true,
         publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
       });
     }
@@ -172,6 +174,7 @@ export function createServiceHandlers({
   }
 
   async function call(pathname, arguments_) {
+    const isRelay = pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay';
     const isStructured = typeof pathname === 'string' && (
       pathname.startsWith('/api/v1/mcp/integration/')
       || pathname.startsWith('/api/v1/mcp/submit-notes/')
@@ -183,6 +186,7 @@ export function createServiceHandlers({
       try {
         response = await fetchImpl(new URL(pathname, baseUrl), {
           method: 'POST',
+          ...(isRelay ? { signal: AbortSignal.timeout(10000) } : {}),
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',
@@ -195,6 +199,7 @@ export function createServiceHandlers({
           throw createIntegrationTransportError(arguments_, cause);
         }
         throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+          transportFailure: true,
           publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
         });
       }
@@ -227,11 +232,22 @@ export function createServiceHandlers({
       }
       throw createIntegrationTransportError(arguments_);
     }
-    const body = await response.json().catch(() => ({}));
+    const body = await response.json().catch((cause) => {
+      if (isRelay) throw Object.assign(new Error('Relay response was lost.', { cause }), { transportFailure: true });
+      return {};
+    });
     if (!response.ok) {
       throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
         publicMessage: body.message ?? 'UGK Cockpit 拒绝了这次状态更新，请刷新页面确认当前任务。',
+        ...(isRelay ? { relayPayload: {
+          ok: false, code: body.code ?? `HTTP_${response.status}`, retryable: false,
+          message: body.message, impact: body.impact, required_action: body.required_action,
+          clientRequestId: arguments_.clientRequestId,
+        } } : {}),
       });
+    }
+    if (isRelay && body?.ok !== true) {
+      throw Object.assign(new Error('Relay outcome is not confirmed.'), { transportFailure: true });
     }
     return body;
   }
@@ -264,6 +280,31 @@ export function createServiceHandlers({
     const result = await call(pathname, arguments_);
     rememberBinding(result);
     return result;
+  }
+
+  async function callRelay(pathname, arguments_) {
+    // Keep the same immutable intent across connection and response-body loss.
+    // The journal on the service, not this retry loop, proves the outcome.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await call(pathname, arguments_);
+        if (pathname.endsWith('/resume') && result.relayAccepted === true) rememberBinding(result);
+        return result;
+      } catch (error) {
+        if (!error.transportFailure) throw error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
+        throw Object.assign(error, { relayPayload: {
+          ok: false, code: 'RELAY_TRANSPORT_UNCERTAIN', status: 'recovery_pending',
+          retryable: true, clientRequestId: arguments_.clientRequestId,
+          message: '暂时无法确认接力结果，自动重试尚未成功。',
+          impact: '请求可能已被服务保存；不要重新 init 或假定接手成功。',
+          required_action: '连接恢复后在当前聊天原样重试本次请求，沿用同一 clientRequestId。',
+        } });
+      }
+    }
   }
 
   const handlers = {
@@ -310,8 +351,8 @@ export function createServiceHandlers({
       mcpWorkingDirectory: workingDirectory,
     }),
     ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
-    ugk_work_relay: (arguments_) => call('/api/v1/mcp/work/relay', arguments_),
-    ugk_work_resume: (arguments_) => callAndRemember('/api/v1/mcp/work/resume', {
+    ugk_work_relay: (arguments_) => callRelay('/api/v1/mcp/work/relay', arguments_),
+    ugk_work_resume: (arguments_) => callRelay('/api/v1/mcp/work/resume', {
       ...arguments_,
       mcpWorkingDirectory: workingDirectory,
     }),

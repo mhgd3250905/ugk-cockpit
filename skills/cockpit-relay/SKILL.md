@@ -21,7 +21,7 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 - 返回 `requiresUserConfirmation: true` 且 `bindingStatus: "unbound"` 时，只向用户确认是否“继续此工作会话”。用户确认后，使用上一次 context 返回的 `sessionId` 与 `revision` 成对调用 `ugk_work_context` 的 `confirmSessionId` 和 `expectedRevision`；确认期间 revision 变化则重新查询并再次确认。
 - 只有确认调用返回 `bindingEstablished: true`、`canContinue: true`、`status: "active"` 后，才可准备 relay。context 确认建立当前聊天绑定：支持宿主身份时由服务持久保存，未适配客户端可能仅保留连接内绑定；不改变平台工作会话、租约、心跳或 revision。
 
-新聊天已经收到 `continueCode` 时直接按模式二调用 `ugk_work_resume`，不要先用 context 的 `awaiting_resume` 结果阻挡恢复。
+新聊天已经收到 `continueCode` 时直接按模式二调用 `ugk_work_resume`，不要先用 context 的 `awaiting_resume`、`unbound` 或 `stale` 结果阻挡恢复。`bindingReason: not_resumed` 表示当前聊天尚未成功接手；历史 `relayGeneration` / `acceptedRevision` 是工作会话的历史，不是当前聊天已接手的证据。
 
 ## 模式一：准备接力（旧聊天）
 
@@ -70,9 +70,23 @@ description: 用户显式要求跨聊天接力时调用；同一 Skill 支持旧
 - 成功后使用返回的 `sessionId` 和 `revision` 作为后续调用（如 `$cockpit-progress`）的基准；接力恢复后直接继续工作，不得重新调用 `ugk_work_init`。
 - 恢复后由 MCP 返回已保存的 `relayContext`（包含 `summary`、`currentState`、`pendingItems` 等交接信息），简短向用户复述关键上下文与下一步焦点，并报告 `sessionId` 与 `revision` 后等待安排或继续工作。
 
+### 过期码在当前聊天确认恢复
+
+当恢复返回 `status: confirmation_required`、`relayAccepted: false`、`requiresUserConfirmation: true`，接手尚未完成。只向用户问：“接力码已过期，尚无人接走这份工作，是否在当前聊天继续接手？”不要让用户去找旧聊天或手动拼接参数。
+
+只有用户明确同意后，使用原 continueCode、新的 clientRequestId，并将该响应的 `confirmationRequestId` 与 `expectedRevision` 成对传回 ugk_work_resume。不得猜测版本或引用其他查询的 revision。原始接力请求、沉默、时间经过都不能代替这次过期确认。服务将复查当前聊天、最新接力和 revision；确认失效时重新查询并再次确认，不绕过校验。
+
+若返回 `RELAY_SUPERSEDED` 或 `RELAY_ALREADY_ACCEPTED`，此旧码不能取回归属；必须使用当前持有者生成的新接力。不要自动接管已经被其他聊天接走的工作。
+
+### 断线与回复丢失
+
+新版 MCP 对 relay/resume 的传输失败进行一次原样自动重试。仍返回 `RELAY_TRANSPORT_UNCERTAIN` / `status: recovery_pending` 时，结果未知，不能声称“平台没有更新”或“恢复成功”。连接恢复后，在当前聊天沿用同一 clientRequestId 和完全相同参数重试；确认请求也必须原样重试，不重复询问已明确确认的同一对象和方案。
+
+未成功恢复时保留待恢复请求，不因用户接着安排开发而遗忘恢复。再次工作前先补办恢复；不得重新 init，也不得以目录相同推测归属。
+
 ## 不变量与失败处理
 
 - `clientRequestId` 必须非空且唯一。传输结果不确定时，使用相同的 ID 重发完全相同的 payload；不要换 ID 或修改 revision。
-- 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 仅包含 `continueCode` 与 `clientRequestId`，不得携带 `currentTask`、`currentState`；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
-- MCP 报错、不可用、缺少成功标志（如 `relayPrepared: true` / `status: "awaiting_resume"` / 非空 `continueCode` / 非空 `continueMessage`）或状态不符时，向用户说明发生了什么、代码是否受影响及建议下一步；提示用户安装/启用或重新连接新版 `ugk-cockpit` 本地 MCP。缺少必要字段不得声称接力准备或恢复成功，也不要因为 context 不可用就重新 init。
+- 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 首次仅包含 `continueCode` 与 `clientRequestId`，用户明确确认过期恢复后才可加 `confirmationRequestId` 与 `expectedRevision`，不得携带 `currentTask`、`currentState`；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
+- MCP 报错或缺少成功标志时，按具体返回原因处理：待确认按当前聊天确认流程，结果未知按原样重试，已被替代则保留现有归属。只有工具不可用或不支持新参数时，才提示安装/启用或重新连接新版 `ugk-cockpit` 本地 MCP，不把所有错误都归结为需要重连。缺少必要字段不得声称接力准备或恢复成功，也不要因为 context 不可用就重新 init。
 - 恢复成功前不要修改代码；不得清理或重置工作区已有改动。

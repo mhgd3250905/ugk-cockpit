@@ -283,6 +283,13 @@ if (($Port -lt 1) -or ($Port -gt 65535)) {
 $HostAddress = '127.0.0.1'
 
 # 3. Resolve local data directory and log directory
+$savedDataDirectory = Join-Path $RepoDirectory '.data\service-directory.txt'
+if ([string]::IsNullOrWhiteSpace($DataDirectory) -and (Test-Path -LiteralPath $savedDataDirectory)) {
+  $DataDirectory = (Get-Content -LiteralPath $savedDataDirectory -Raw).Trim()
+  if (-not [System.IO.Path]::IsPathRooted($DataDirectory)) {
+    throw 'Saved service data directory must be an absolute path.'
+  }
+}
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
   $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
   if ([string]::IsNullOrWhiteSpace($localAppData)) {
@@ -414,7 +421,7 @@ Write-Status 'START' 'Starting UGK Cockpit background service...'
 
 $startParams = @{
   FilePath = 'node.exe'
-  ArgumentList = @($mainEntry)
+  ArgumentList = @(('"{0}" --data-directory "{1}"' -f $mainEntry, $DataDirectory))
   WorkingDirectory = $RepoDirectory
   WindowStyle = 'Hidden'
   RedirectStandardOutput = $stdOutLog
@@ -472,6 +479,16 @@ if (-not $isHealthy) {
   exit 1
 }
 
+if ([string]::IsNullOrWhiteSpace($TestMainEntry)) {
+  & node (Join-Path $PSScriptRoot 'verify-service-data.mjs') $DataDirectory $serviceUrl
+  if ($LASTEXITCODE -ne 0) {
+    Write-Status 'ERROR' 'Service started but existing project data could not be verified.'
+    Write-Status 'IMPACT' 'No project data was reset or replaced. Startup is not verified.'
+    Write-Status 'ACTION' 'See docs/LOCAL_SERVICE_RECOVERY.md; do not initialize or add existing projects again.'
+    exit 1
+  }
+}
+Write-Status 'DATA' $DataDirectory
 Write-Status 'OK' 'UGK Cockpit is running in background.'
 Write-Status 'URL' "http://${HostAddress}:${Port}/"
 Write-Status 'PID' "$newPid"

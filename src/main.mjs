@@ -7,6 +7,12 @@ import { acquireInstanceLock } from './core/single-instance.mjs';
 import { createCockpitHttpServer } from './service/http-server.mjs';
 
 function dataDirectory() {
+  const index = process.argv.indexOf('--data-directory');
+  if (index !== -1) {
+    const directory = process.argv[index + 1];
+    if (!directory || !path.isAbsolute(directory)) throw new Error('--data-directory requires an absolute path.');
+    return path.resolve(directory);
+  }
   const base = process.env.LOCALAPPDATA;
   if (!base) throw new Error('LOCALAPPDATA is required on Windows.');
   return path.join(base, 'UGK Cockpit');

@@ -397,6 +397,18 @@ const PUBLIC_ERRORS = {
     impact: '原 AI 工作会话仍保留其已有记录；没有创建新的会话。',
     requiredAction: '请回到 Cockpit 确认当前会话，必要时由用户重新安排接力。',
   },
+  RELAY_SUPERSEDED: {
+    status: 409,
+    message: '已有更新的接力记录，这个旧码不能再接手。',
+    impact: '当前会话归属和代码保持不变。',
+    requiredAction: '请使用最新接力消息；不要重试这个旧码。',
+  },
+  RELAY_CONFIRMATION_STALE: {
+    status: 409,
+    message: '接手确认与当前工作状态不一致。',
+    impact: '没有切换聊天归属或修改代码。',
+    requiredAction: '在当前聊天用原接力码重新查询；出现新的确认后请用户再次确认。',
+  },
   RELAY_ALREADY_ACCEPTED: {
     status: 409,
     message: '这次接力已经被另一个 AI 会话接收。',
@@ -1230,6 +1242,8 @@ const MCP_RELAY_KEYS = new Set([
 const MCP_RESUME_KEYS = new Set([
   'continueCode',
   'clientRequestId',
+  'confirmationRequestId',
+  'expectedRevision',
   // The stdio adapter adds this binding-only field before calling HTTP.
   'mcpWorkingDirectory',
 ]);
@@ -1302,6 +1316,12 @@ function validateMcpResumeBody(body) {
   requireString(body, 'continueCode');
   requireString(body, 'clientRequestId');
   requireString(body, 'mcpWorkingDirectory');
+  if ((body.confirmationRequestId !== undefined) !== (body.expectedRevision !== undefined)
+    || (body.confirmationRequestId !== undefined && (typeof body.confirmationRequestId !== 'string'
+      || !body.confirmationRequestId.trim() || body.confirmationRequestId === body.clientRequestId
+      || !Number.isInteger(body.expectedRevision) || body.expectedRevision < 1))) {
+    throw Object.assign(new Error('Invalid resume confirmation pair.'), { code: 'INVALID_REQUEST' });
+  }
 }
 
 function validateMcpContextBody(body) {
@@ -2128,9 +2148,14 @@ export async function createCockpitHttpServer({
         ok: true,
         ...safety,
         ...base,
-        bindingStatus: 'stale',
+        bindingStatus: hasBinding ? 'stale' : 'unbound',
+        bindingReason: hasBinding ? 'replaced' : 'not_resumed',
+        recoveryAction: hasBinding ? 'use_latest_relay' : 'resume_with_original_code',
+        generationScope: 'session_history_not_current_chat',
         requiresUserConfirmation: false,
-        message: '当前 bridge 绑定已经过期或被新的接力代际超越；没有把最新 revision 自动交给旧绑定。',
+        message: hasBinding
+          ? '这个聊天已被其他接手聊天替代，不能自动取回归属。请使用最新接力消息。'
+          : '当前聊天尚未成功接手。请用收到的接力码调用 ugk_work_resume；过期码会在当前聊天提供确认流程。历史 acceptedRevision 不表示当前聊天已接手。',
       };
     }
 
