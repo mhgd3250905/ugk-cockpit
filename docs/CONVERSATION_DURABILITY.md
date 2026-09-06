@@ -8,7 +8,7 @@
 
 用户明确确认后，使用新的 clientRequestId，附原确认响应的 confirmationRequestId 和 expectedRevision。服务在同一事务内再次核对原码、同一聊天、最新接力、项目身份、active 会话、写入租约及冻结版本，再完成接力消费和归属转移。旧会话推进版本、新接力取代旧码或其他聊天先接手都会拒绝，不把过期码当成自动接管权限。没有稳定宿主身份的旧客户端继续返回既有身份或过期错误，不能走此确认流程。
 
-MCP 对 relay/resume 的传输错误原样自动重试一次，仍失败返回 RELAY_TRANSPORT_UNCERTAIN：结果未知，不能声称“状态没有更新”。用户之后继续时沿用相同请求参数与请求 ID。成功命令回执及待确认回执都由持久日志恢复，进程缓存不承担正确性。
+MCP 对 relay/resume/takeover 的传输错误原样自动重试一次；仍失败分别返回 `RELAY_TRANSPORT_UNCERTAIN` 或 `CONVERSATION_TAKEOVER_TRANSPORT_UNCERTAIN`：结果未知，不能声称“状态没有更新”。用户之后继续时沿用相同请求参数与请求 ID。成功命令回执及待确认回执都由持久日志恢复，进程缓存不承担正确性。
 
 新聊天用 context 发现另一个 active 持有人时，服务返回 `bindingReason: "held_by_another_chat"`，并附 `owner`：持有类型、可用时的宿主和聊天定位符、任务、Agent、最后活动时间与绑定时间。查询仍然只读，不能因为目录相同或服务重启自动取得写入权。支持稳定宿主身份时，`owner` 会显示 `durable_chat` 与宿主定位符；未适配宿主显示 `previous_mcp_connection`，明确说明只能定位此前受认证的 MCP 连接，不能伪造聊天 ID。
 
