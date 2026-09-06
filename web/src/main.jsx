@@ -738,7 +738,11 @@ function App() {
             || prev.loadingMore
           ) return prev;
           const visibleCount = prev.data?.timeline?.items?.length ?? 0;
-          if (visibleCount > limit) return prev;
+          // Compare against what the server actually returned, not what we
+          // asked for: the server clamps the limit, and replacing the view with
+          // fewer items than the user loaded would silently truncate history.
+          const returnedCount = data?.timeline?.items?.length ?? 0;
+          if (visibleCount > returnedCount) return prev;
           return {
             ...prev,
             data,

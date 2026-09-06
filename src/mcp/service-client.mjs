@@ -184,7 +184,10 @@ export function createServiceHandlers({
   };
   const callTimeoutFor = (pathname) => {
     if (pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay') return 10_000;
-    return CALL_TIMEOUT_MS[pathname] ?? 60_000;
+    if (CALL_TIMEOUT_MS[pathname] !== undefined) return CALL_TIMEOUT_MS[pathname];
+    // begin/review/merge run git fetch/push against real remotes inside the request.
+    if (typeof pathname === 'string' && pathname.startsWith('/api/v1/mcp/integration/')) return 300_000;
+    return 60_000;
   };
 
   async function call(pathname, arguments_) {

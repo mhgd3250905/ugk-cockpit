@@ -173,6 +173,29 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.equal(wrongDirAccept.status, 404, await wrongDirAccept.clone().text());
   assert.equal((await wrongDirAccept.json()).code, 'PROJECT_NOT_FOUND');
 
+  // 已注册的其他项目目录同样拒绝接手，不能获得本派发的写租约。
+  const otherRepo = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-mcp-other-'));
+  t.after(() => rmSync(otherRepo, { recursive: true, force: true }));
+  execFileSync('git', ['init', '--quiet'], { cwd: otherRepo });
+  writeFileSync(path.join(otherRepo, 'README.md'), '# other\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: otherRepo });
+  execFileSync('git', ['-c', 'user.name=UGK Test', '-c', 'user.email=ugk@example.invalid', 'commit', '--quiet', '-m', 'other'], { cwd: otherRepo });
+  const otherDb = openCockpitDatabase(dbPath, { migrate: false });
+  registerProject(otherDb, {
+    commandId: 'register-other-project',
+    name: 'Other fixture',
+    authorizedRoot: otherRepo,
+    observation: await probeGitWorktree(otherRepo),
+  });
+  otherDb.close();
+  const mismatchAccept = await post(service, '/api/v1/mcp/work/accept', {
+    dispatchCode: standbyCode,
+    clientRequestId: 'accept-other-project',
+    mcpWorkingDirectory: otherRepo,
+  });
+  assert.equal(mismatchAccept.status, 409, await mismatchAccept.clone().text());
+  assert.equal((await mismatchAccept.json()).code, 'DISPATCH_GRANT_BINDING_MISMATCH');
+
   const standbyAcceptResponse = await post(service, '/api/v1/mcp/work/accept', {
     dispatchCode: standbyCode,
     clientRequestId: 'accept-2',
@@ -189,8 +212,10 @@ test('existing Agent initializes the registered project, continues, and hands of
     `http://${service.host}:${service.port}/api/v1/dashboard`,
     { headers: { authorization: `Bearer ${TOKEN}` } },
   )).json();
-  assert.equal(waitingDashboard.projects[0].statusReason, 'agent_waiting');
-  assert.equal(waitingDashboard.projects[0].activeRun, null);
+  // 注册第二个项目后按 id 定位，不依赖列表顺序。
+  const waitingRow = waitingDashboard.projects.find((p) => p.id === project.projectId);
+  assert.equal(waitingRow.statusReason, 'agent_waiting');
+  assert.equal(waitingRow.activeRun, null);
 
   const beginResponse = await post(service, '/api/v1/mcp/work/begin', {
     sessionId: waiting.sessionId,

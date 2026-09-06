@@ -2538,7 +2538,7 @@ export async function createCockpitHttpServer({
       const projectDetailMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
       if (request.method === 'GET' && projectDetailMatch) {
         const projectId = decodeURIComponent(projectDetailMatch[1]);
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
         const detail = readProjectDetail(db, projectId, { limit, offset });
         if (!detail) {
@@ -2802,7 +2802,7 @@ export async function createCockpitHttpServer({
           }
           status = statusParam;
         }
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
 
         const countRows = db.prepare(`
@@ -2863,7 +2863,7 @@ export async function createCockpitHttpServer({
       const projectTimelineMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/timeline$/);
       if (request.method === 'GET' && projectTimelineMatch) {
         const projectId = decodeURIComponent(projectTimelineMatch[1]);
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
         const project = readProjectContext(db, projectId);
         if (!project) {
