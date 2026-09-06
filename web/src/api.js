@@ -21,6 +21,14 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     });
   }
 
+  function malformedResponseError(cause) {
+    return Object.assign(new Error('本地控制台返回了无法解读的响应。', { cause }), {
+      code: 'SERVICE_UNAVAILABLE',
+      impact: '页面还没有收到操作结果；项目代码不会被 Cockpit 修改。',
+      required_action: '请确认 Cockpit 正在运行且页面为最新版本，然后重试。',
+    });
+  }
+
   function clientId() {
     let value = storage.getItem(CLIENT_ID_KEY);
     if (!CLIENT_ID_PATTERN.test(value ?? '')) {
@@ -85,7 +93,14 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     } catch (error) {
       throw connectionError(error);
     }
-    const body = await response.json();
+    let body;
+    try {
+      body = await response.json();
+    } catch (cause) {
+      // A proxy page, truncated body, or HTML error must not surface as a raw
+      // browser SyntaxError; treat it like an unavailable local service.
+      throw malformedResponseError(cause);
+    }
 
     if (isRead && mayRenewReadSession && response.status === 401 && body.code === 'AUTH_REQUIRED') {
       await ensureSession();

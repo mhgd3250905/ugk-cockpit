@@ -6,7 +6,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.37` — 接力断线可原样重试，过期码可在当前聊天确认接手；确认记录持久化，旧码及已被替代的聊天不能越权。启动器统一数据目录并核对已有项目加载。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。工作台仍处于用户试用期。
+`0.1.0-alpha.38` — 审计加固：本地服务校验 Host 头阻断 DNS rebinding 读取；本地路径含 `@` 不再被误判为内嵌凭据；送审保存时从当前内容重建候选树并核对指纹，杜绝检查窗口内的未确认内容进入提交；Git 索引锁在崩溃残留超时后自动回收，不再永久卡死；`/runs/:id/finish` 强制 `sessionId` 与运行一致并执行会话绑定校验；`ugk_work_accept` 与 init/resume 一致校验聊天工作目录；MCP 桥所有调用带超时。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。工作台仍处于用户试用期。
 
 保留轻量 Submit 工作说明：向所属项目发布说明，可以引用 PR、本地提交或其他分支的审核结果，不再默认保存上传或创建代码审核对象。说明发布不冻结分支，不结束会话，已有 progress 与 relay 照常推进。2026-09-03 的实现、切换及历史验收见 [Submit 工作说明](docs/SUBMIT_NOTES.md)。
 

@@ -104,6 +104,7 @@ test('service kill/restart replays start and finish without phantom completion',
 
   const finishBody = {
     commandId: 'service-crash-finish',
+    sessionId: 'service-crash-run',
     expectedRevision: started.revision,
     leaseGeneration: started.leaseGeneration,
     outcome: 'completed',

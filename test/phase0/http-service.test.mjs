@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -106,6 +108,60 @@ test('local HTTP boundary requires auth and rejects foreign origins', async (t) 
       origin: 'https://attacker.example',
     },
   }), 403, 'ORIGIN_REJECTED');
+});
+
+test('local HTTP boundary rejects foreign Host headers before any data or cookie is served', async (t) => {
+  const root = createRepository();
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const requestWithHost = (pathname, hostHeader) => new Promise((resolve, reject) => {
+    const req = http.request({
+      host: service.host,
+      port: service.port,
+      path: pathname,
+      headers: hostHeader === undefined ? {} : { host: hostHeader },
+    }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, setCookie: res.headers['set-cookie'] ?? [], body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+  // DNS rebinding 第一步：恶意主机名不能获得 web shell 或会话 cookie。
+  const shell = await requestWithHost('/', `evil.example:${service.port}`);
+  assert.equal(shell.status, 403);
+  assert.equal(shell.setCookie.length, 0);
+
+  // DNS rebinding 第二步：恶意主机名即使持有有效凭据也读不到数据。
+  const dash = await requestWithHost('/api/v1/dashboard', `evil.example:${service.port}`);
+  assert.equal(dash.status, 403);
+
+  // 缺失 Host 头（HTTP/1.0 风格裸请求）同样拒绝。
+  const noHostStatus = await new Promise((resolve, reject) => {
+    const socket = net.connect(service.port, service.host, () => {
+      socket.write('GET /health HTTP/1.0\r\n\r\n');
+    });
+    let raw = '';
+    socket.on('data', (chunk) => { raw += chunk.toString(); });
+    socket.on('end', () => resolve(Number.parseInt(raw.split(' ')[1], 10)));
+    socket.on('error', reject);
+  });
+  assert.equal(noHostStatus, 403);
+
+  // 合法本地 Host 仍然可用。
+  const health = await requestWithHost('/health', `127.0.0.1:${service.port}`);
+  assert.equal(health.status, 200);
+  const viaLocalhost = await requestWithHost('/health', `localhost:${service.port}`);
+  assert.equal(viaLocalhost.status, 200);
 });
 
 test('local MCP bootstrap rejects web origins and issues a token scoped away from dashboard', async (t) => {
@@ -573,6 +629,7 @@ test('invalid input and unknown runs do not create dangling commands', async (t)
     headers,
     body: JSON.stringify({
       commandId: 'missing-finish',
+      sessionId: 'missing-run',
       expectedRevision: 1,
       leaseGeneration: 1,
       outcome: 'completed',
@@ -698,6 +755,7 @@ test('unknown repository can start and finish through the HTTP service', async (
     headers,
     body: JSON.stringify({
       commandId: 'http-finish',
+      sessionId: 'http-run',
       expectedRevision: started.revision,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',
@@ -753,12 +811,72 @@ test('lease and revision conflicts are translated into actionable user errors', 
     headers,
     body: JSON.stringify({
       commandId: 'revision-conflict-finish',
+      sessionId: 'conflict-run-one',
       expectedRevision: 99,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',
       summary: 'must not complete',
     }),
   }), 409, 'RUN_REVISION_CONFLICT');
+});
+
+test('run finish requires a sessionId that matches the run being finalized', async (t) => {
+  const root = createRepository();
+  const service = await createCockpitHttpServer({
+    dbPath: dataPath(root),
+    token: TOKEN,
+    authorizedRoots: [root],
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup(root);
+  });
+  const headers = {
+    authorization: `Bearer ${TOKEN}`,
+    'content-type': 'application/json',
+  };
+  const startResponse = await request(service, '/api/v1/runs/start', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'finish-auth-start',
+      runId: 'finish-auth-run',
+      worktreePath: root,
+      agentClaim: 'finish-auth-agent',
+      goal: 'finish auth check',
+    }),
+  });
+  assert.equal(startResponse.status, 201);
+  const started = await startResponse.json();
+  const base = {
+    expectedRevision: started.revision,
+    leaseGeneration: started.leaseGeneration,
+    outcome: 'completed',
+    summary: 'auth check',
+  };
+
+  // 缺失 sessionId：不能绕过会话归属校验直接终结运行。
+  await assertUserError(await request(service, '/api/v1/runs/finish-auth-run/finish', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ commandId: 'finish-auth-missing', ...base }),
+  }), 400, 'INVALID_REQUEST');
+
+  // sessionId 指向别的运行：校验对象与操作对象必须一致。
+  await assertUserError(await request(service, '/api/v1/runs/finish-auth-run/finish', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ commandId: 'finish-auth-mismatch', sessionId: 'another-run', ...base }),
+  }), 400, 'INVALID_REQUEST');
+
+  // 一致的 sessionId 正常终结。
+  const ok = await request(service, '/api/v1/runs/finish-auth-run/finish', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ commandId: 'finish-auth-ok', sessionId: 'finish-auth-run', ...base }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).status, 'completed');
 });
 
 test('an incoherent final probe returns a safe next action and keeps the run active', async (t) => {
@@ -802,6 +920,7 @@ test('an incoherent final probe returns a safe next action and keeps the run act
     headers,
     body: JSON.stringify({
       commandId: 'incoherent-finish',
+      sessionId: 'incoherent-run',
       expectedRevision: started.revision,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',
@@ -914,6 +1033,7 @@ test('an undeclared external commit cannot become a completed receipt', async (t
     headers,
     body: JSON.stringify({
       commandId: 'foreign-finish',
+      sessionId: 'foreign-run',
       expectedRevision: started.revision,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',
@@ -950,6 +1070,7 @@ test('dirty changes require explicit unattributed acknowledgement before complet
   })).json();
   writeFileSync(path.join(root, 'README.md'), 'dirty change\n', 'utf8');
   const baseFinish = {
+    sessionId: 'dirty-run',
     expectedRevision: started.revision,
     leaseGeneration: started.leaseGeneration,
     outcome: 'completed',
@@ -1010,6 +1131,7 @@ test('replacing a repository at the same path cannot complete the old run', asyn
     headers,
     body: JSON.stringify({
       commandId: 'replace-finish',
+      sessionId: 'replace-run',
       expectedRevision: started.revision,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',
@@ -1142,6 +1264,7 @@ test('service restart preserves active run status and does not mark it recovery_
     headers,
     body: JSON.stringify({
       commandId: 'restart-active-finish',
+      sessionId: 'restart-active-run',
       expectedRevision: started.revision,
       leaseGeneration: started.leaseGeneration,
       outcome: 'completed',

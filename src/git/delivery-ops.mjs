@@ -146,8 +146,21 @@ export function validateRemoteUrlSecurity(url) {
       error.code = 'UNSAFE_REMOTE_URL';
       throw error;
     }
-  } else if (trimmed.includes('@')) {
-    // SCP-style syntax: git@host:path or user:pass@host:path
+  } else if (trimmed.startsWith('file://') && trimmed.includes('@')) {
+    // file:// userinfo is rejected (git would ignore it, but we would persist
+    // it verbatim in stored remote configuration). WHATWG URL cannot parse
+    // userinfo for the file scheme, so inspect the authority section directly.
+    const authorityEnd = trimmed.indexOf('/', 'file://'.length);
+    const authority = trimmed.slice('file://'.length, authorityEnd === -1 ? undefined : authorityEnd);
+    if (authority.includes('@')) {
+      const error = new Error('file remote URL contains embedded credentials.');
+      error.code = 'CREDENTIALS_IN_REMOTE_URL';
+      throw error;
+    }
+  } else if (trimmed.includes('@') && !isLocalPath(trimmed)) {
+    // SCP-style syntax: git@host:path or user:pass@host:path.
+    // Local filesystem paths are exempt: '@' is a legal filename character on
+    // Windows (Entra user profiles like C:\Users\user@domain\... rely on this).
     const atIndex = trimmed.indexOf('@');
     const userPart = trimmed.slice(0, atIndex);
     if (userPart.includes(':')) {
@@ -155,7 +168,7 @@ export function validateRemoteUrlSecurity(url) {
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
       throw error;
     }
-    if (userPart !== 'git' && !isLocalPath(trimmed)) {
+    if (userPart !== 'git') {
       const error = new Error('Remote URL contains unrecognized credentials.');
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
       throw error;
@@ -514,6 +527,28 @@ async function fileMode(cwd, file) {
   return ((await stat(path.resolve(cwd, file))).mode & 0o111) ? '100755' : '100644';
 }
 
+// Build the delivery candidate tree by hashing the CURRENT on-disk contents of
+// the selected files onto `head`. Inspection and save-time verification share
+// this derivation so the saved tree is always bound to the fingerprinted bytes.
+async function buildCandidateTree({ sourcePath, cachePath, head, files, indexFileName }) {
+  if (!files.length) {
+    return (await runGit(cachePath, ['rev-parse', `${head}^{tree}`])).stdout;
+  }
+  const cacheEnv = { GIT_INDEX_FILE: path.join(cachePath, indexFileName) };
+  await runGit(cachePath, ['read-tree', head], { env: cacheEnv });
+  for (const file of files) {
+    const fullPath = path.resolve(sourcePath, file);
+    if (existsSync(fullPath)) {
+      const hashRes = await runGit(sourcePath, ['hash-object', '-w', '--path', file, fullPath], { env: { GIT_OBJECT_DIRECTORY: path.join(cachePath, 'objects') } });
+      const mode = await fileMode(sourcePath, file);
+      await runGit(cachePath, ['update-index', '--add', '--cacheinfo', `${mode},${hashRes.stdout},${file}`], { env: cacheEnv });
+    } else {
+      await runGit(cachePath, ['update-index', '--force-remove', '--', file], { env: cacheEnv });
+    }
+  }
+  return (await runGit(cachePath, ['write-tree'], { env: cacheEnv })).stdout;
+}
+
 export async function inspectDelivery({ sourcePath, targetPath, files, targetBranch = 'main' }) {
   const [sourceLocation, targetLocation] = await Promise.all([
     readDeliveryLocation(sourcePath),
@@ -626,34 +661,16 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
   }
 
   // Create candidate tree and candidate commit in cachePath
-  let candidateTree;
-  let candidateCommit;
-  const tempIndex = path.join(cachePath, 'temp_idx');
-  const cacheEnv = { GIT_INDEX_FILE: tempIndex };
-
-  if (validatedFiles.length === 0) {
-    const headTreeRes = await runGit(cachePath, ['rev-parse', `${sourceLocation.head}^{tree}`]);
-    candidateTree = headTreeRes.stdout;
-    candidateCommit = sourceLocation.head;
-  } else {
-    await runGit(cachePath, ['read-tree', sourceLocation.head], { env: cacheEnv });
-
-    for (const file of validatedFiles) {
-      const fullPath = path.resolve(sourcePath, file);
-      if (existsSync(fullPath)) {
-        const hashRes = await runGit(sourcePath, ['hash-object', '-w', '--path', file, fullPath], { env: { GIT_OBJECT_DIRECTORY: path.join(cachePath, 'objects') } });
-        const blobSha = hashRes.stdout;
-        const mode = await fileMode(sourcePath, file);
-        await runGit(cachePath, ['update-index', '--add', '--cacheinfo', `${mode},${blobSha},${file}`], { env: cacheEnv });
-      } else {
-        await runGit(cachePath, ['update-index', '--force-remove', '--', file], { env: cacheEnv });
-      }
-    }
-
-    const treeRes = await runGit(cachePath, ['write-tree'], { env: cacheEnv });
-    candidateTree = treeRes.stdout;
-
-    const commitRes = await runGit(cachePath, [
+  const candidateTree = await buildCandidateTree({
+    sourcePath,
+    cachePath,
+    head: sourceLocation.head,
+    files: validatedFiles,
+    indexFileName: 'temp_idx',
+  });
+  const candidateCommit = validatedFiles.length === 0
+    ? sourceLocation.head
+    : (await runGit(cachePath, [
       'commit-tree', candidateTree, '-p', sourceLocation.head, '-m', 'Temporary candidate commit for inspection',
     ], {
       env: {
@@ -662,9 +679,7 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
         GIT_COMMITTER_NAME: 'UGK Inspector',
         GIT_COMMITTER_EMAIL: 'inspector@ugk.invalid',
       },
-    });
-    candidateCommit = commitRes.stdout;
-  }
+    })).stdout;
 
   // Set refs in cachePath
   await runGit(cachePath, ['update-ref', 'refs/heads/source', candidateCommit]);
@@ -791,6 +806,21 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
       const finalCheck = await readDeliveryLocation(sourcePath, { files: inspection.files });
       if (finalCheck.fingerprint !== inspection.fingerprint || finalCheck.branch !== inspection.branch) {
         throw Object.assign(new Error('Source changed while preparing commit'), { code: 'SOURCE_CONTENT_CHANGED' });
+      }
+      // Bind the candidate tree to the fingerprinted bytes: the tree was built
+      // from disk AFTER the fingerprint snapshot (network round trips happen in
+      // between), so transient edits in that window could otherwise slip into
+      // the commit unverified. Rebuilding from the current contents closes that
+      // gap — a mismatching tree is rejected exactly like changed contents.
+      const verifiedTree = await buildCandidateTree({
+        sourcePath,
+        cachePath: inspection.cachePath,
+        head: inspection.head,
+        files: inspection.files,
+        indexFileName: 'verify_idx',
+      });
+      if (verifiedTree !== inspection.candidateTree) {
+        throw Object.assign(new Error('Candidate tree does not match the fingerprinted contents'), { code: 'SOURCE_CONTENT_CHANGED' });
       }
       const headTree = (await runGit(sourcePath, ['rev-parse', `${inspection.head}^{tree}`])).stdout;
       if (headTree === inspection.candidateTree) {

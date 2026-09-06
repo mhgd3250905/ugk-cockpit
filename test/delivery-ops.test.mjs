@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync, utimesSync, lstatSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -20,7 +20,66 @@ import {
   validateDeliveryFiles,
 } from '../src/git/delivery-ops.mjs';
 import { createDeliveryCache, discardDeliveryCache } from '../src/core/delivery-cache.mjs';
+import { acquireDeliveryIndexLock, releaseDeliveryIndexLock } from '../src/git/delivery-index-lock.mjs';
 import { remoteAuthArguments } from '../src/git/remote-auth.mjs';
+
+test('delivery index lock stays fail-closed while fresh and self-heals once a crashed lock ages out', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ugk-index-lock-'));
+  try {
+    const indexPath = path.join(dir, 'index');
+    writeFileSync(indexPath, '');
+    const lockPath = `${indexPath}.lock`;
+    const identityOf = (target) => {
+      const stat = lstatSync(target, { bigint: true });
+      return `${stat.dev}:${stat.ino}`;
+    };
+    const backdate = (ageMs) => {
+      const old = new Date(Date.now() - ageMs);
+      utimesSync(lockPath, old, old);
+    };
+
+    // 新鲜的空锁（崩溃于创建与写入之间）短期内必须拒收——可能属于活跃 Git 进程。
+    writeFileSync(lockPath, '');
+    assert.throws(() => acquireDeliveryIndexLock(indexPath, 'cmd-fresh-empty'), { code: 'DELIVERY_INDEX_LOCKED' });
+
+    // 超过畸形锁回收时限后自动回收，不再永久卡死。
+    backdate(120_000);
+    const lock = acquireDeliveryIndexLock(indexPath, 'cmd-reclaimed-empty');
+    releaseDeliveryIndexLock(lock);
+    assert.equal(existsSync(lockPath), false);
+
+    // PID 被复用（进程存活）的完好锁：新鲜时拒收，超过硬上限后回收。
+    writeFileSync(lockPath, '');
+    writeFileSync(lockPath, JSON.stringify({
+      protocol: 'ugk-cockpit-delivery-index-lock-v1',
+      owner: '0f0e0d0c-0b0a-0908-0706-050403020100',
+      pid: process.pid,
+      commandId: 'cmd-crashed',
+      lockPath,
+      fileIdentity: identityOf(lockPath),
+    }));
+    assert.throws(() => acquireDeliveryIndexLock(indexPath, 'cmd-fresh-reused-pid'), { code: 'DELIVERY_INDEX_LOCKED' });
+    backdate(61 * 60_000);
+    const lock2 = acquireDeliveryIndexLock(indexPath, 'cmd-reclaimed-stale-owner');
+    releaseDeliveryIndexLock(lock2);
+    assert.equal(existsSync(lockPath), false);
+
+    // 半截 JSON（写入中途崩溃）与畸形锁同样按时限回收。
+    writeFileSync(lockPath, '{"protocol":"ugk-cockpit-delivery-index');
+    assert.throws(() => acquireDeliveryIndexLock(indexPath, 'cmd-fresh-partial'), { code: 'DELIVERY_INDEX_LOCKED' });
+    backdate(120_000);
+    const lock3 = acquireDeliveryIndexLock(indexPath, 'cmd-reclaimed-partial');
+    releaseDeliveryIndexLock(lock3);
+    assert.equal(existsSync(lockPath), false);
+
+    // release 对已被删除的锁文件不再抛出（掩盖原始错误的老问题）。
+    const lock4 = acquireDeliveryIndexLock(indexPath, 'cmd-release-missing');
+    rmSync(lockPath);
+    releaseDeliveryIndexLock(lock4); // must not throw
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('rename scope requires both old and new paths; owned caches cannot delete other directories', async (t) => {
   const changes = parseStatusZ('R  new.txt\0old.txt\0');
@@ -84,6 +143,32 @@ function createDeliveryFixture(t, parent = os.tmpdir()) {
   return { root, remoteGit, targetPath, sourcePath };
 }
 
+test('saveDelivery rejects a candidate tree that was never fingerprint-verified', async (t) => {
+  const f = createDeliveryFixture(t);
+  writeFileSync(path.join(f.sourcePath, 'README.md'), 'approved change\n');
+  const inspection = await inspectDelivery({ ...f, files: ['README.md'] });
+  t.after(() => discardDeliveryCache(inspection));
+
+  // 模拟检查窗口内的瞬时篡改：指纹在检查开头拍下“已确认内容”，
+  // candidateTree 在两次网络往返之后才从磁盘重建——那时文件被换成
+  // “未确认内容”，检查结束后又还原。攻击 inspection 的树与缓存完全
+  // 自洽（真实窗口攻击正是如此），只有指纹保持“已确认内容”。
+  writeFileSync(path.join(f.sourcePath, 'README.md'), 'UNVERIFIED TRANSIENT\n');
+  const poisoned = await inspectDelivery({ ...f, files: ['README.md'] });
+  writeFileSync(path.join(f.sourcePath, 'README.md'), 'approved change\n');
+  assert.notEqual(poisoned.candidateTree, inspection.candidateTree);
+  const attack = { ...poisoned, fingerprint: inspection.fingerprint };
+
+  const before = gitSync(f.sourcePath, ['rev-parse', 'HEAD']);
+  await assert.rejects(
+    saveDelivery({ sourcePath: f.sourcePath, inspection: attack, commandId: 'toctou-attack', summary: 'attack window' }),
+    { code: 'SOURCE_CONTENT_CHANGED' },
+  );
+  // 未产生提交，工作区保持已确认内容。
+  assert.equal(gitSync(f.sourcePath, ['rev-parse', 'HEAD']), before);
+  assert.equal(readFileSync(path.join(f.sourcePath, 'README.md'), 'utf8'), 'approved change\n');
+});
+
 test('selected index-only differences reuse the existing commit instead of making an empty commit', async (t) => {
   const f = createDeliveryFixture(t);
   writeFileSync(path.join(f.sourcePath,'feature.txt'),'feature\n');
@@ -136,6 +221,22 @@ test('remote identity normalizes https and ssh to same repo, and handles local p
   assert.throws(() => validateRemoteUrlSecurity('ext::sh -c "echo evil"'), {
     code: 'UNSAFE_REMOTE_URL',
   });
+
+  // Local Windows paths may legally contain '@' (e.g. Entra user profiles like
+  // C:\Users\user@domain\code). They must not be mistaken for scp-style credentials.
+  if (process.platform === 'win32') {
+    validateRemoteUrlSecurity(String.raw`E:\work\my@dir\repo`);
+    validateRemoteUrlSecurity(String.raw`C:\Users\user@domain\proj`);
+    validateRemoteUrlSecurity('D:/code/me@x/repo');
+    validateRemoteUrlSecurity(String.raw`\\server\share@x\repo`);
+  }
+  // file:// URLs with embedded userinfo are still rejected: git ignores the
+  // credentials but we would persist them in stored remote configuration.
+  assert.throws(() => validateRemoteUrlSecurity('file://user:secret@127.0.0.1/share/repo'), {
+    code: 'CREDENTIALS_IN_REMOTE_URL',
+  });
+  // A file:// URL whose path component contains '@' stays valid.
+  validateRemoteUrlSecurity('file:///C:/work/my@dir/repo');
 });
 
 test('structured conflict paths exclude explanatory text and preserve whitespace', () => {

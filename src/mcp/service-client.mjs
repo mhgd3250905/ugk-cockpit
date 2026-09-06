@@ -173,6 +173,20 @@ export function createServiceHandlers({
     return scopedToken;
   }
 
+  // Every call must be bounded: a hung service route (e.g. a folder picker the
+  // user never answers) otherwise freezes the bridge's serial stdio queue for
+  // its whole duration. The server-side command journal makes timed-out calls
+  // safe to retry with the same idempotency keys. Network-bound git endpoints
+  // get a generous ceiling; everything else stays close to local probe costs.
+  const CALL_TIMEOUT_MS = {
+    '/api/v1/mcp/work/submit': 300_000,
+    '/api/v1/mcp/work/submit/preflight': 300_000,
+  };
+  const callTimeoutFor = (pathname) => {
+    if (pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay') return 10_000;
+    return CALL_TIMEOUT_MS[pathname] ?? 60_000;
+  };
+
   async function call(pathname, arguments_) {
     const isRelay = pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay';
     const isStructured = typeof pathname === 'string' && (
@@ -186,7 +200,7 @@ export function createServiceHandlers({
       try {
         response = await fetchImpl(new URL(pathname, baseUrl), {
           method: 'POST',
-          ...(isRelay ? { signal: AbortSignal.timeout(10000) } : {}),
+          signal: AbortSignal.timeout(callTimeoutFor(pathname)),
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',
@@ -320,7 +334,9 @@ export function createServiceHandlers({
       if (result?.bindingEstablished === true) rememberBinding(result);
       return result;
     },
-    ugk_work_accept: (arguments_) => callAndRemember('/api/v1/mcp/work/accept', arguments_),
+    ugk_work_accept: (arguments_) => callAndRemember('/api/v1/mcp/work/accept', {
+      ...arguments_, mcpWorkingDirectory: workingDirectory,
+    }),
     ugk_work_progress: (arguments_) => call('/api/v1/mcp/work/progress', arguments_),
     ugk_work_submit_preflight: (arguments_) => call('/api/v1/mcp/work/submit/preflight', {
       ...arguments_, mcpWorkingDirectory: workingDirectory,

@@ -82,19 +82,28 @@ async function prepareDeliveryOnce(db, request, options = {}) {
       return finishCommand(db, commandId, { ok: true, ready: false, code: 'DELIVERY_ALREADY_INTEGRATED',
         projectName: project.name, sourceCommit: inspection.head, targetHead: inspection.targetHead });
     }
-    const preflightId = randomBytes(24).toString('base64url');
-    const expiresAt = Date.now() + 15 * 60_000;
-    db.prepare(`INSERT INTO delivery_preflights
-      (id,command_id,source_id,session_id,session_revision,inspection_json,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(preflightId, commandId, sourceId, sessionId ?? null, expectedRevision ?? null,
-        canonicalJson({ ...inspection, readOnly }), now(), expiresAt);
+    // The preflight row and the command journal entry must commit atomically:
+    // a crash between two separate writes used to leave a 'received' command
+    // with an already-inserted preflight, permanently failing every retry with
+    // the same commandId. Replacing any row left by such a crash also recovers
+    // pre-existing inconsistent state instead of failing on the UNIQUE key.
+    const result = withImmediateTransaction(db, () => {
+      db.prepare('DELETE FROM delivery_preflights WHERE command_id = ?').run(commandId);
+      const preflightId = randomBytes(24).toString('base64url');
+      const expiresAt = Date.now() + 15 * 60_000;
+      db.prepare(`INSERT INTO delivery_preflights
+        (id,command_id,source_id,session_id,session_revision,inspection_json,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(preflightId, commandId, sourceId, sessionId ?? null, expectedRevision ?? null,
+          canonicalJson({ ...inspection, readOnly }), now(), expiresAt);
+      return finishCommand(db, commandId, { ok: true, ready: true, preflightId, expiresAt,
+        projectName: project.name, sourceBranch: inspection.branch, sourceCommit: inspection.head,
+        targetHead: inspection.targetHead, files: inspection.files, changes: location.changes,
+        relation: inspection.relation, conflicts: inspection.conflicts, fastForward: inspection.fastForward,
+        requiresConflictConfirmation: inspection.relation === 'conflict',
+        nextAction: inspection.relation === 'conflict' ? '存在合并冲突；只有用户确认后才保存为需处理的待办。' : '预检通过，可以保存并送交主项目审核。' });
+    });
     retained = true;
-    return finishCommand(db, commandId, { ok: true, ready: true, preflightId, expiresAt,
-      projectName: project.name, sourceBranch: inspection.branch, sourceCommit: inspection.head,
-      targetHead: inspection.targetHead, files: inspection.files, changes: location.changes,
-      relation: inspection.relation, conflicts: inspection.conflicts, fastForward: inspection.fastForward,
-      requiresConflictConfirmation: inspection.relation === 'conflict',
-      nextAction: inspection.relation === 'conflict' ? '存在合并冲突；只有用户确认后才保存为需处理的待办。' : '预检通过，可以保存并送交主项目审核。' });
+    return result;
   } catch (error) {
     const completed = db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
     if (completed?.state === 'committed') return parseCommandResponse(completed);

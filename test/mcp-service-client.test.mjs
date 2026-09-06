@@ -19,7 +19,9 @@ test('MCP service handlers forward only tool arguments with the local bearer tok
   assert.equal((await handlers.ugk_work_accept(arguments_)).sessionId, 'session-1');
   assert.equal(calls[0].url, 'http://127.0.0.1:41737/api/v1/mcp/work/accept');
   assert.equal(calls[0].options.headers.authorization, `Bearer ${'x'.repeat(32)}`);
-  assert.deepEqual(JSON.parse(calls[0].options.body), arguments_);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    ...arguments_, mcpWorkingDirectory: 'E:\\fixture\\active-project',
+  });
 
   await handlers.ugk_work_begin({
     sessionId: 'session-1', clientRequestId: 'request-2', expectedRevision: 1, task: '开始工作',
