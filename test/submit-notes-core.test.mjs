@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -20,10 +20,17 @@ import { readSubmission } from '../src/core/integrations.mjs';
 import { registerDeliveryLocation } from '../src/core/delivery-sources.mjs';
 import { bindConversation } from '../src/core/conversation-bindings.mjs';
 
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
+
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 async function createFixture(t, name = 'submit-notes') {
-  const root = mkdtempSync(path.join(os.tmpdir(), `ugk-${name}-`));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), `ugk-${name}-`));
   const mainDir = path.join(root, 'main');
   const auditDir = path.join(root, 'audit');
 
@@ -192,7 +199,7 @@ test('unknown, ambiguous, and replaced repository directories are rejected', asy
   const { root, db, mainDir, projectId } = await createFixture(t, 'rejection-tests');
 
   // Unknown directory outside granted root
-  const foreignDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-foreign-'));
+  const foreignDir = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-foreign-'));
   t.after(() => rmSync(foreignDir, { recursive: true, force: true }));
 
   await assert.rejects(
@@ -208,7 +215,7 @@ test('unknown, ambiguous, and replaced repository directories are rejected', asy
   );
 
   // Worktree repository identity changed
-  const fakeRepoDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-fake-repo-'));
+  const fakeRepoDir = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-fake-repo-'));
   git(fakeRepoDir, ['init', '-b', 'main', fakeRepoDir]);
   t.after(() => rmSync(fakeRepoDir, { recursive: true, force: true }));
 
@@ -418,7 +425,7 @@ test('subdirectory is accepted, sibling directory is rejected, and metadata esca
   );
 
   // Metadata escape: git-common-dir or git-dir pointing outside authorized root is rejected
-  const outsideGitDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-outside-git-'));
+  const outsideGitDir = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-outside-git-'));
   t.after(() => rmSync(outsideGitDir, { recursive: true, force: true }));
   await assert.rejects(
     createSubmitNote(db, {

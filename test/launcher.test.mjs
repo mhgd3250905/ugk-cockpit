@@ -282,7 +282,7 @@ test('launcher script complies with pure ASCII encoding and formatting contracts
   assert.match(cmdContent, /%REPO_ROOT%scripts\\launch-cockpit\.ps1/i, 'cmd wrapper must call scripts/launch-cockpit.ps1');
 });
 
-test('launcher rejects unknown process occupying target port and preserves it untouched', { timeout: 30_000 }, async (t) => {
+test('launcher rejects unknown process occupying target port and preserves it untouched', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const foreignPort = 41740;
   let requestCount = 0;
   const server = createServer((req, res) => {
@@ -314,7 +314,7 @@ test('launcher rejects unknown process occupying target port and preserves it un
   assert.equal(ping.foreignApp, 'unrelated-service');
 });
 
-test('inverse proof: cross-directory mock returning UGK signatures without service.lock binding is NOT stopped', { timeout: 30_000 }, async (t) => {
+test('inverse proof: cross-directory mock returning UGK signatures without service.lock binding is NOT stopped', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41741;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-inverse-'));
   const cleanupTargets = [];
@@ -382,7 +382,7 @@ server.listen(${mockPort}, '127.0.0.1');
   assert.equal(ping.status, 'ok');
 });
 
-test('positive proof: mock service WITH valid service.lock binding and HTTP verification is identified and stopped cleanly', { timeout: 30_000 }, async (t) => {
+test('positive proof: mock service WITH valid service.lock binding and HTTP verification is identified and stopped cleanly', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41742;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-positive-'));
   const cleanupTargets = [];
@@ -515,7 +515,7 @@ server.listen(${mockPort}, '127.0.0.1');
   cleanupPidFiles.length = 0;
 });
 
-test('launcher cleans up stale service.lock with dead PID before starting new instance', { timeout: 30_000 }, async (t) => {
+test('launcher cleans up stale service.lock with dead PID before starting new instance', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41743;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-stale-'));
   const cleanupPidFiles = [];
@@ -592,7 +592,7 @@ server.listen(${mockPort}, '127.0.0.1');
   cleanupPidFiles.length = 0;
 });
 
-test('root cmd wrapper propagates arguments and exit codes without pausing when -NoPause is given', { timeout: 30_000 }, async (t) => {
+test('root cmd wrapper propagates arguments and exit codes without pausing when -NoPause is given', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const foreignPort = 41749;
   const server = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });

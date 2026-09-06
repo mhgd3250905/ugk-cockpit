@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,8 +14,15 @@ import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import { resumeRelay } from '../src/core/relays.mjs';
 import { conversationKey } from '../src/mcp/conversation-identity.mjs';
 
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 test('durable per-request conversations survive restarts, preserve legacy history and fence old chats', async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-conversation-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-conversation-'));
   const token = 'conversation-test-service-token-'.padEnd(44, 'x');
   const dbPath = path.join(root, 'state.db');
   execFileSync('git', ['init', '--quiet'], { cwd: root });
@@ -179,8 +186,16 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     assert.equal((await handlers('next').ugk_work_context({})).bindingReason, 'replaced');
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings WHERE revoked = 0 AND session_id = ?').get(initialized.sessionId).n, 1);
   } finally {
-    db?.close();
-    await service.close();
+    // 清理必须逐项独立进行且容忍已关闭状态：一项失败不能跳过其余清理，
+    // 也不能用清理错误掩盖测试的真实失败（泄漏的服务句柄会挂死整个套件）。
+    try {
+      db?.close();
+    } catch (error) {
+      if (error?.code !== 'ERR_INVALID_STATE') throw error;
+    }
+    try {
+      await service?.close();
+    } catch {}
     rmSync(root, { recursive: true, force: true });
   }
 });
