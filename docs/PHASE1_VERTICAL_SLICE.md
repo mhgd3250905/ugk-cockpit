@@ -7,6 +7,7 @@
 ## 实施状态
 
 - `0.1.0-alpha.37`：接力断线重试、过期码在当前聊天显式确认恢复、持久确认与并发归属保护；区分从未接手与已被替代的聊天。启动器传递明确数据目录并核对已有项目列表及详情。
+- `0.1.0-alpha.38`：context 在已有持有人时返回可解释的持有人摘要；新增用户确认的 `ugk_work_takeover`，在 revision CAS 下撤销旧绑定、写入审计并转移写权限。无稳定聊天 ID 的 MCP 把受认证连接摘要持久化为 connection-only 归属，服务重启后提示确认接手，不再退化成无主会话。
 
 - `0.1.0-alpha.1`：Project Registry、一次性且可恢复的文件夹授权、同源浏览器会话、首次添加项目、晨间简报首页。
 - `0.1.0-alpha.2`：本地服务重启后自动恢复浏览器会话；写操作先续期且只发送一次，避免用户处理“身份已失效”或重复写入。
@@ -150,7 +151,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息，不创建或接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 14 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
+- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_takeover`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息；只有 `ugk_work_takeover` 在用户逐次确认后才能接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 18 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。

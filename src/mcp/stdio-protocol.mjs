@@ -586,6 +586,33 @@ export const TOOLS = [
     }
   },
   {
+    name: 'ugk_work_takeover',
+    description: 'Only after work context reports that another chat holds this active session and the user explicitly asks to take it over. The first call creates a confirmation offer; do not make a confirmation call until the user has confirmed this exact transfer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The active sessionId returned by the context query'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'A new idempotency key for this request'
+        },
+        expectedRevision: {
+          type: 'integer', minimum: 1,
+          description: 'The exact revision returned by the context query'
+        },
+        confirmationRequestId: {
+          type: 'string',
+          description: 'Only after user confirmation: the confirmationRequestId returned by the preceding takeover offer'
+        }
+      },
+      required: ['sessionId', 'clientRequestId', 'expectedRevision'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'ugk_work_resume',
     description: 'Only when the user explicitly requests resuming with a continueCode. An expired code can return confirmation_required: ask the user before retrying with confirmationRequestId and expectedRevision from that response and a new clientRequestId. Never infer confirmation.',
     inputSchema: {
@@ -965,6 +992,31 @@ function validateRelayArgs(args) {
   return null;
 }
 
+function validateTakeoverArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowedKeys = ['sessionId', 'clientRequestId', 'expectedRevision', 'confirmationRequestId'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
+  }
+  if (args.confirmationRequestId !== undefined && (typeof args.confirmationRequestId !== 'string'
+    || !args.confirmationRequestId.trim() || args.confirmationRequestId === args.clientRequestId)) {
+    return 'Confirmation requires a prior confirmationRequestId and a new clientRequestId';
+  }
+  return null;
+}
+
 function validateResumeArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
@@ -1183,6 +1235,8 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateInitArgs(toolArgs);
       } else if (toolName === 'ugk_work_relay') {
         validationError = validateRelayArgs(toolArgs);
+      } else if (toolName === 'ugk_work_takeover') {
+        validationError = validateTakeoverArgs(toolArgs);
       } else if (toolName === 'ugk_work_resume') {
         validationError = validateResumeArgs(toolArgs);
       } else {
@@ -1257,9 +1311,9 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
           result: formattedResult
         };
       } catch (err) {
-        if (err?.relayPayload) {
+        if (err?.relayPayload || err?.takeoverPayload) {
           return { jsonrpc: '2.0', id, result: {
-            isError: true, content: [{ type: 'text', text: JSON.stringify(err.relayPayload) }],
+            isError: true, content: [{ type: 'text', text: JSON.stringify(err.relayPayload ?? err.takeoverPayload) }],
           } };
         }
         if (stderr?.write) {

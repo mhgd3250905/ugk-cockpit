@@ -149,32 +149,45 @@ export function createServiceHandlers({
   let bridgeBinding = null;
 
   async function bootstrapScopedToken() {
-    let response;
-    try {
-      response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
-        method: 'POST',
-        signal: AbortSignal.timeout(5000),
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
-      });
-    } catch (cause) {
-      throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
-        transportFailure: true,
-        publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
-      });
+    // A service restart can reset the previous keep-alive socket precisely
+    // while a host without its own durable credential asks for a fresh scoped
+    // token.  One short retry handles that transport hand-off without turning
+    // a persistent outage into an unbounded reconnect loop.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let response;
+      try {
+        response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
+          method: 'POST',
+          signal: AbortSignal.timeout(5000),
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
+        });
+      } catch (cause) {
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+        throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+          transportFailure: true,
+          publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
+        });
+      }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || typeof body.token !== 'string' || body.token.length < 32) {
+        throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
+          publicMessage: body.message ?? 'UGK Cockpit 无法建立本地 MCP 会话，请重启 Cockpit 后重试。',
+        });
+      }
+      scopedToken = body.token;
+      return scopedToken;
     }
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || typeof body.token !== 'string' || body.token.length < 32) {
-      throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
-        publicMessage: body.message ?? 'UGK Cockpit 无法建立本地 MCP 会话，请重启 Cockpit 后重试。',
-      });
-    }
-    scopedToken = body.token;
-    return scopedToken;
+    throw new Error('Unreachable scoped MCP token bootstrap state.');
   }
 
   async function call(pathname, arguments_) {
     const isRelay = pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay';
+    const isTakeover = pathname === '/api/v1/mcp/work/takeover';
+    const isRecoverableConversationWrite = isRelay || isTakeover;
     const isStructured = typeof pathname === 'string' && (
       pathname.startsWith('/api/v1/mcp/integration/')
       || pathname.startsWith('/api/v1/mcp/submit-notes/')
@@ -186,7 +199,7 @@ export function createServiceHandlers({
       try {
         response = await fetchImpl(new URL(pathname, baseUrl), {
           method: 'POST',
-          ...(isRelay ? { signal: AbortSignal.timeout(10000) } : {}),
+          ...(isRecoverableConversationWrite ? { signal: AbortSignal.timeout(10000) } : {}),
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',
@@ -233,7 +246,9 @@ export function createServiceHandlers({
       throw createIntegrationTransportError(arguments_);
     }
     const body = await response.json().catch((cause) => {
-      if (isRelay) throw Object.assign(new Error('Relay response was lost.', { cause }), { transportFailure: true });
+      if (isRecoverableConversationWrite) {
+        throw Object.assign(new Error('Conversation recovery response was lost.', { cause }), { transportFailure: true });
+      }
       return {};
     });
     if (!response.ok) {
@@ -243,11 +258,15 @@ export function createServiceHandlers({
           ok: false, code: body.code ?? `HTTP_${response.status}`, retryable: false,
           message: body.message, impact: body.impact, required_action: body.required_action,
           clientRequestId: arguments_.clientRequestId,
+        } } : isTakeover ? { takeoverPayload: {
+          ok: false, code: body.code ?? `HTTP_${response.status}`, retryable: false,
+          message: body.message, impact: body.impact, required_action: body.required_action,
+          clientRequestId: arguments_.clientRequestId,
         } } : {}),
       });
     }
-    if (isRelay && body?.ok !== true) {
-      throw Object.assign(new Error('Relay outcome is not confirmed.'), { transportFailure: true });
+    if (isRecoverableConversationWrite && body?.ok !== true) {
+      throw Object.assign(new Error('Conversation recovery outcome is not confirmed.'), { transportFailure: true });
     }
     return body;
   }
@@ -307,6 +326,31 @@ export function createServiceHandlers({
     }
   }
 
+  async function callTakeover(arguments_) {
+    // The command journal makes this safe to retry with the identical intent
+    // if the local service restarts after committing but before responding.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await call('/api/v1/mcp/work/takeover', arguments_);
+        if (result.takeoverAccepted === true) rememberBinding(result);
+        return result;
+      } catch (error) {
+        if (!error.transportFailure) throw error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
+        throw Object.assign(error, { takeoverPayload: {
+          ok: false, code: 'CONVERSATION_TAKEOVER_TRANSPORT_UNCERTAIN', status: 'recovery_pending',
+          retryable: true, clientRequestId: arguments_.clientRequestId,
+          message: '暂时无法确认接手结果，自动重试尚未成功。',
+          impact: '接手请求可能已被服务保存；原聊天和代码都没有被自动清理或覆盖。',
+          required_action: '连接恢复后在当前聊天原样重试本次请求，沿用同一 clientRequestId。',
+        } });
+      }
+    }
+  }
+
   const handlers = {
     ugk_work_context: async (arguments_ = {}) => {
       const request = {};
@@ -352,6 +396,10 @@ export function createServiceHandlers({
     }),
     ugk_work_begin: (arguments_) => call('/api/v1/mcp/work/begin', arguments_),
     ugk_work_relay: (arguments_) => callRelay('/api/v1/mcp/work/relay', arguments_),
+    ugk_work_takeover: (arguments_) => callTakeover({
+      ...arguments_,
+      mcpWorkingDirectory: workingDirectory,
+    }),
     ugk_work_resume: (arguments_) => callRelay('/api/v1/mcp/work/resume', {
       ...arguments_,
       mcpWorkingDirectory: workingDirectory,

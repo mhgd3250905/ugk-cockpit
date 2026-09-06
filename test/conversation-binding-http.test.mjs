@@ -48,7 +48,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     service = await createCockpitHttpServer({ dbPath, token, port });
     db = openCockpitDatabase(dbPath);
     assert.deepEqual(snapshot(), before);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 23);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
     const first = handlers('original');
     let context = await first.ugk_work_context({});
     assert.equal(context.bindingStatus, 'unbound');
@@ -56,17 +56,32 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     assert.deepEqual(snapshot(), before); // Binding migration never edits business records.
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings').get().n, 1);
     await service.close();
-    // Preserve an already-migrated v22 binding when upgrading its ownership key.
-    const boundBefore = db.prepare('SELECT * FROM conversation_bindings').all();
+    // Preserve the historical v22 binding fields while adding the owner
+    // locator columns.  A real v22 database cannot contain those new fields.
+    const boundBefore = db.prepare(`SELECT
+      conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+      accepted_revision, revoked, bound_at
+      FROM conversation_bindings`).all();
     db.exec(`ALTER TABLE conversation_bindings RENAME TO binding_fixture;
       DROP INDEX conversation_binding_owner;
-      CREATE TABLE conversation_bindings AS SELECT * FROM binding_fixture;
+      CREATE TABLE conversation_bindings AS SELECT
+        conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+        accepted_revision, revoked, bound_at
+        FROM binding_fixture;
       DROP TABLE binding_fixture;
       CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;
-      DELETE FROM schema_migrations WHERE version = 23;
+      DELETE FROM schema_migrations WHERE version >= 23;
       PRAGMA user_version = 22;`);
     service = await createCockpitHttpServer({ dbPath, token, port });
-    assert.deepEqual(db.prepare('SELECT * FROM conversation_bindings').all(), boundBefore);
+    assert.deepEqual(db.prepare(`SELECT
+      conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+      accepted_revision, revoked, bound_at
+      FROM conversation_bindings`).all(), boundBefore);
+    const legacyOwner = db.prepare(`SELECT binding_kind, owner_host, owner_locator
+      FROM conversation_bindings`).get();
+    assert.equal(legacyOwner.binding_kind, 'legacy');
+    assert.equal(legacyOwner.owner_host, null);
+    assert.equal(legacyOwner.owner_locator, null);
     context = await handlers('original').ugk_work_context({});
     assert.equal(context.canContinue, true);
     assert.equal(context.bindingPersistence, 'durable');
@@ -143,7 +158,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     db.prepare('UPDATE relays SET expires_at = 1 WHERE id = ?').run(expiring.relayId);
     const missing = await handlers('third').ugk_work_context({});
     assert.equal(missing.bindingStatus, 'unbound');
-    assert.equal(missing.bindingReason, 'not_resumed');
+    assert.equal(missing.bindingReason, 'held_by_another_chat');
     assert.equal(missing.generationScope, 'session_history_not_current_chat');
     assert.equal((await handlers('next').ugk_work_context({})).canContinue, true);
     const offerA = await handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-a' });

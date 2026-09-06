@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 23;
+export const SUPPORTED_SCHEMA_VERSION = 24;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -766,11 +766,31 @@ CREATE TABLE conversation_bindings (
 `,
     apply(db) {
       if (db.prepare('SELECT count(*) AS n FROM conversation_bindings_v22').get().n) {
-        db.exec('INSERT INTO conversation_bindings SELECT * FROM conversation_bindings_v22;');
+        // Name the historical columns explicitly.  This keeps this recovery
+        // migration safe even if an interrupted local upgrade left additive
+        // columns on a table whose recorded version still says v22.
+        db.exec(`INSERT INTO conversation_bindings (
+          conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+          accepted_revision, revoked, bound_at
+        ) SELECT
+          conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+          accepted_revision, revoked, bound_at
+        FROM conversation_bindings_v22;`);
       }
       db.exec(`DROP TABLE conversation_bindings_v22;
         CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;`);
     },
+  },
+  {
+    version: 24,
+    name: 'conversation-owner-locators',
+    sql: `
+ALTER TABLE conversation_bindings
+  ADD COLUMN binding_kind TEXT NOT NULL DEFAULT 'legacy'
+  CHECK (binding_kind IN ('host', 'connection', 'legacy'));
+ALTER TABLE conversation_bindings ADD COLUMN owner_host TEXT;
+ALTER TABLE conversation_bindings ADD COLUMN owner_locator TEXT;
+`,
   },
 ];
 

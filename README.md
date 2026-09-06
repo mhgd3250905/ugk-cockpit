@@ -6,7 +6,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 当前版本
 
-`0.1.0-alpha.37` — 接力断线可原样重试，过期码可在当前聊天确认接手；确认记录持久化，旧码及已被替代的聊天不能越权。启动器统一数据目录并核对已有项目加载。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。工作台仍处于用户试用期。
+`0.1.0-alpha.38` — 项目已有持有人时，context 会展示持有者的可用定位信息、任务和最后活动时间；用户可明确确认让当前聊天安全接手，或在接手后再 Relay 到新聊天。无稳定聊天 ID 的 MCP 在服务重启后保留“此前连接持有”状态，不会退化为无主会话。启动器统一数据目录并核对已有项目加载。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。工作台仍处于用户试用期。
 
 保留轻量 Submit 工作说明：向所属项目发布说明，可以引用 PR、本地提交或其他分支的审核结果，不再默认保存上传或创建代码审核对象。说明发布不冻结分支，不结束会话，已有 progress 与 relay 照常推进。2026-09-03 的实现、切换及历史验收见 [Submit 工作说明](docs/SUBMIT_NOTES.md)。
 
@@ -72,7 +72,7 @@ Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node <仓库绝对路�
 
 ## 配套 Skills
 
-仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，新的只读 MCP 工具 `ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管，只有用户明确确认后才建立当前聊天绑定；支持稳定宿主身份时由平台持久保存，未适配客户端可能仅保留连接内绑定。查询不会改变平台会话、写入归属、租约、心跳或 revision；旧 bridge 被新接力代际超越时会安全标为 stale。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有持有人时，它会显示可用的持有人摘要；用户可选择返回原聊天，或明确确认由当前聊天通过 `ugk_work_takeover` 接手，再按需 Relay 到新聊天。支持稳定宿主身份时平台持久保存聊天定位符；未适配客户端持久保存受认证 MCP 连接摘要，重启后仍会显示此前连接持有并要求确认，而不是把会话当作无主。context 查询不会改变平台会话、写入归属、租约、心跳或 revision；旧 bridge 被新接力代际超越时会安全标为 stale。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 安装到当前用户的 Codex：
 

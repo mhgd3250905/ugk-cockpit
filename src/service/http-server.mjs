@@ -4,7 +4,11 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openCockpitDatabase, withImmediateTransaction } from '../core/database.mjs';
-import { bindConversation, readConversationBinding } from '../core/conversation-bindings.mjs';
+import {
+  bindConversation,
+  readConversationBinding,
+  readConversationOwner,
+} from '../core/conversation-bindings.mjs';
 import { conversationIdentity, conversationKey } from '../mcp/conversation-identity.mjs';
 import {
   acceptAssignment,
@@ -20,6 +24,7 @@ import {
 import { FolderGrantStore, EmptyFolderGrantStore } from '../core/folder-grants.mjs';
 import { createHandoff, readLatestHandoff } from '../core/handoffs.mjs';
 import { createRelay, resumeRelay } from '../core/relays.mjs';
+import { takeOverConversation } from '../core/conversation-takeovers.mjs';
 import { beginCommand, parseCommandResponse, readCommand } from '../core/command-journal.mjs';
 import {
   authorizeEmptyDirectory,
@@ -89,7 +94,25 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '当前聊天没有此工作会话的有效绑定，或已由另一聊天接手。',
     impact: '代码和已有运行记录没有被修改。',
-    requiredAction: '请查询当前工作会话；新聊天通过 Relay 接手，原聊天按提示恢复关联。',
+    requiredAction: '请先查询当前工作会话查看持有人；只有用户明确确认后，才可由当前聊天接手或再准备接力。',
+  },
+  CONVERSATION_IDENTITY_REQUIRED: {
+    status: 409,
+    message: '当前 MCP 连接没有可用于接手的会话身份。',
+    impact: '代码、会话归属和已有记录都没有被修改。',
+    requiredAction: '请重新连接当前 AI 工具后重新查询工作会话；不要重新 init 或猜测其他聊天身份。',
+  },
+  CONVERSATION_TAKEOVER_NOT_REQUIRED: {
+    status: 409,
+    message: '当前聊天已经持有这个工作会话，无需接手。',
+    impact: '代码和已有记录没有被修改。',
+    requiredAction: '请刷新当前工作会话后继续；如需换到新聊天，请由用户明确发起接力。',
+  },
+  CONVERSATION_TAKEOVER_STALE: {
+    status: 409,
+    message: '接手确认已过期：这次工作会话或持有人刚刚发生了变化。',
+    impact: '原有持有人、代码和运行记录都没有被覆盖。',
+    requiredAction: '请重新查询当前工作会话，向用户展示最新持有人后再次确认。',
   },
   SERVICE_UNAVAILABLE: {
     status: 503,
@@ -1248,6 +1271,15 @@ const MCP_RESUME_KEYS = new Set([
   'mcpWorkingDirectory',
 ]);
 
+const MCP_TAKEOVER_KEYS = new Set([
+  'sessionId',
+  'clientRequestId',
+  'expectedRevision',
+  'confirmationRequestId',
+  // The stdio adapter adds this binding-only field before calling HTTP.
+  'mcpWorkingDirectory',
+]);
+
 const MCP_CONTEXT_KEYS = new Set([
   'mcpWorkingDirectory',
   'confirmSessionId',
@@ -1321,6 +1353,22 @@ function validateMcpResumeBody(body) {
       || !body.confirmationRequestId.trim() || body.confirmationRequestId === body.clientRequestId
       || !Number.isInteger(body.expectedRevision) || body.expectedRevision < 1))) {
     throw Object.assign(new Error('Invalid resume confirmation pair.'), { code: 'INVALID_REQUEST' });
+  }
+}
+
+function validateMcpTakeoverBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_TAKEOVER_KEYS, 'conversation takeover');
+  requireString(body, 'sessionId');
+  requireString(body, 'clientRequestId');
+  requireString(body, 'mcpWorkingDirectory');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+    throw Object.assign(new Error('Invalid conversation takeover expectedRevision.'), { code: 'INVALID_REQUEST' });
+  }
+  if (body.confirmationRequestId !== undefined
+    && (typeof body.confirmationRequestId !== 'string'
+      || !body.confirmationRequestId.trim()
+      || body.confirmationRequestId === body.clientRequestId)) {
+    throw Object.assign(new Error('Invalid conversation takeover confirmation request id.'), { code: 'INVALID_REQUEST' });
   }
 }
 
@@ -1524,6 +1572,7 @@ function readSessionStateRow(db, row, now = Date.now()) {
     leaseHeld,
     relay: relay.waiting,
     generation: relay.generation,
+    lastActivityAt: context.run?.lastHeartbeatAt ?? context.lastHeartbeatAt ?? context.updatedAt ?? null,
   };
 }
 
@@ -1549,6 +1598,21 @@ function publicSessionState(state) {
     leaseHeld: state.leaseHeld,
     relay: state.relay,
     relayGeneration: state.generation,
+    lastActivityAt: state.lastActivityAt,
+  };
+}
+
+function publicConversationOwner(owner, state) {
+  if (!owner || !state) return null;
+  return {
+    bindingPersistence: owner.bindingKind === 'host' ? 'durable' : 'connection_only',
+    holderType: owner.bindingKind === 'host' ? 'durable_chat' : 'previous_mcp_connection',
+    host: owner.ownerHost ?? null,
+    conversationLocator: owner.ownerLocator ?? null,
+    task: state.task,
+    agent: state.agent,
+    lastActivityAt: state.lastActivityAt,
+    boundAt: owner.boundAt,
   };
 }
 
@@ -2020,7 +2084,7 @@ export async function createCockpitHttpServer({
     return matches;
   }
 
-  async function readMcpWorkContext(body, key = null) {
+  async function readMcpWorkContext(body, key = null, conversationBinding = null) {
     const safety = {
       impact: '本次查询没有修改代码、平台会话、写入归属、租约、心跳或 revision。',
       required_action: '请根据 status、bindingStatus 和 canContinue 处理；不要猜测编号或自动接管。',
@@ -2116,16 +2180,15 @@ export async function createCockpitHttpServer({
     if (key) {
       body = { ...body, bridgeBinding: readConversationBinding(db, key, current.worktreeId, current.sessionId) };
     }
-    const owner = db.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ? AND revoked = 0')
-      .get(current.sessionId);
-    const ownedElsewhere = owner && owner.conversation_key !== key;
+    const owner = readConversationOwner(db, current.sessionId);
+    const ownedElsewhere = owner && owner.conversationKey !== key;
     const base = {
       ...publicSessionState(current),
       candidates: [publicSessionState(current)],
       requiresUserConfirmation: false,
       canContinue: false,
       bindingStatus: body.bridgeBinding ? 'stale' : 'unbound',
-      ...(key ? { bindingPersistence: 'durable' } : { bindingPersistence: 'connection_only' }),
+      bindingPersistence: conversationBinding?.bindingKind === 'host' ? 'durable' : 'connection_only',
     };
 
     if (current.status !== 'active') {
@@ -2153,19 +2216,35 @@ export async function createCockpitHttpServer({
       };
     }
 
-    if (hasBinding || ownedElsewhere) {
+    if (ownedElsewhere) {
       return {
         ok: true,
         ...safety,
         ...base,
         bindingStatus: hasBinding ? 'stale' : 'unbound',
-        bindingReason: hasBinding ? 'replaced' : 'not_resumed',
-        recoveryAction: hasBinding ? 'use_latest_relay' : 'resume_with_original_code',
+        bindingReason: hasBinding ? 'replaced' : 'held_by_another_chat',
+        recoveryAction: 'request_takeover',
         generationScope: 'session_history_not_current_chat',
         requiresUserConfirmation: false,
+        owner: publicConversationOwner(owner, current),
+        availableActions: ['return_to_owner', 'request_takeover', 'takeover_then_relay'],
         message: hasBinding
-          ? '这个聊天已被其他接手聊天替代，不能自动取回归属。请使用最新接力消息。'
-          : '当前聊天尚未成功接手。请用收到的接力码调用 ugk_work_resume；过期码会在当前聊天提供确认流程。历史 acceptedRevision 不表示当前聊天已接手。',
+          ? '这个聊天已被其他聊天替代，当前持有人已显示。请先查看其最后进度；如确实无法回到原聊天，可在用户明确确认后请求接手。'
+          : '这个项目仍由另一条 AI 聊天持有。请先查看持有者的最后进度；如确实无法回到原聊天，可在用户明确确认后请求接手。',
+      };
+    }
+
+    if (hasBinding) {
+      return {
+        ok: true,
+        ...safety,
+        ...base,
+        bindingStatus: 'stale',
+        bindingReason: 'replaced',
+        recoveryAction: 'use_latest_relay',
+        generationScope: 'session_history_not_current_chat',
+        requiresUserConfirmation: false,
+        message: '这个聊天已被其他接手聊天替代，不能自动取回归属。请使用最新接力消息。',
       };
     }
 
@@ -2176,7 +2255,12 @@ export async function createCockpitHttpServer({
         error.context = base;
         throw error;
       }
-      if (key) withImmediateTransaction(db, () => bindConversation(db, key, publicBridgeBinding(current)));
+      if (key) withImmediateTransaction(db, () => bindConversation(
+        db,
+        key,
+        publicBridgeBinding(current),
+        { owner: conversationBinding },
+      ));
       return {
         ok: true,
         ...safety,
@@ -2214,13 +2298,18 @@ export async function createCockpitHttpServer({
     }
   }
 
-  function rememberConversation(key, result) {
+  function rememberConversation(key, result, conversationBinding = null) {
     if (!key || !result?.ok) return result;
     const current = readExactSessionState(db, result.sessionId);
     if (!current || current.sessionId !== result.sessionId || current.generation) {
       throw Object.assign(new Error('An old initialization cannot replace a relay binding.'), { code: 'CONVERSATION_BINDING_CONFLICT' });
     }
-    withImmediateTransaction(db, () => bindConversation(db, key, publicBridgeBinding(current)));
+    withImmediateTransaction(db, () => bindConversation(
+      db,
+      key,
+      publicBridgeBinding(current),
+      { owner: conversationBinding },
+    ));
     return result;
   }
 
@@ -2231,9 +2320,10 @@ export async function createCockpitHttpServer({
       const url = new URL(request.url, `http://${host}:${currentPort}`);
       requestPath = url.pathname;
       let key = null;
+      let identity = null;
       if (request.headers['x-ugk-conversation']) {
         try {
-          const identity = JSON.parse(Buffer.from(request.headers['x-ugk-conversation'], 'base64url').toString('utf8'));
+          identity = JSON.parse(Buffer.from(request.headers['x-ugk-conversation'], 'base64url').toString('utf8'));
           key = conversationKey(conversationIdentity({ 'io.ugk.cockpit/conversation': identity }));
         } catch {
           sendError(response, 'INVALID_REQUEST');
@@ -2303,6 +2393,22 @@ export async function createCockpitHttpServer({
         sendError(response, 'AUTH_REQUIRED');
         return;
       }
+      const conversationBinding = identity
+        ? {
+          key,
+          bindingKind: 'host',
+          host: identity.host,
+          locator: identity.id,
+        }
+        : authentication.kind === 'mcp'
+          ? {
+            key: conversationKey({ host: 'ugk-mcp-connection', id: authentication.principalHash }),
+            bindingKind: 'connection',
+            host: null,
+            locator: null,
+          }
+          : null;
+      key = conversationBinding?.key ?? key;
       if (
         authentication.kind === 'browser'
         && request.method !== 'GET'
@@ -3040,7 +3146,7 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         validateMcpContextBody(body);
         try {
-          sendJson(response, 200, await readMcpWorkContext(body, key));
+          sendJson(response, 200, await readMcpWorkContext(body, key, conversationBinding));
         } catch (error) {
           if (error?.code === 'SESSION_CONTEXT_CONFIRMATION_STALE') {
             sendError(response, error.code, {
@@ -3095,7 +3201,7 @@ export async function createCockpitHttpServer({
             message: latestHandoff
               ? '已读取最后一次交接；当前没有写入权限，请向用户复述现状并等待安排。'
               : '这个项目还没有交接手册；当前没有写入权限，请告知用户并等待安排。',
-          }));
+          }, conversationBinding));
           return;
         }
         const started = startWriteRun(db, {
@@ -3128,7 +3234,7 @@ export async function createCockpitHttpServer({
           leaseGeneration: started.leaseGeneration,
           acceptedAt: accepted.acceptedAt,
           latestHandoff,
-        }));
+        }, conversationBinding));
         return;
       }
 
@@ -3263,7 +3369,7 @@ export async function createCockpitHttpServer({
           preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
           latestHandoff,
           message: '当前项目已接入 Cockpit；已有改动已作为接入基线保留。',
-        }));
+        }, conversationBinding));
         return;
       }
 
@@ -3323,12 +3429,46 @@ export async function createCockpitHttpServer({
           canonicalPath: working.observation.canonicalPath,
           repositoryIdentity: working.observation.repositoryIdentity,
           worktreeIdentity: working.observation.worktreeIdentity,
-        });
+        }, { faultInjector, conversationBinding });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
           extra: {
             session_id: result.sessionId ?? null,
             relay_id: result.relayId ?? null,
+            revision: result.revision ?? null,
+          },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/takeover') {
+        const body = await readJson(request);
+        validateMcpTakeoverBody(body);
+        if (!conversationBinding) {
+          sendError(response, 'CONVERSATION_IDENTITY_REQUIRED');
+          return;
+        }
+        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        const context = readSessionContext(db, body.sessionId);
+        if (!context.ok) {
+          sendError(response, context.code);
+          return;
+        }
+        if (context.projectId !== working.project.id || context.worktreeId !== working.worktreeId) {
+          sendError(response, 'RELAY_BINDING_MISMATCH', {
+            extra: { session_id: body.sessionId, revision: context.revision ?? null },
+          });
+          return;
+        }
+        const result = takeOverConversation(db, {
+          ...body,
+          conversationKey: key,
+          binding: conversationBinding,
+        });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          extra: {
+            session_id: result.sessionId ?? body.sessionId,
             revision: result.revision ?? null,
           },
         });

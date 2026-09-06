@@ -815,7 +815,7 @@ export function resumeRelay(db, request = {}, options = {}) {
     bindConversation(db, request.conversationKey, {
       sessionId: row.session_id, worktreeId: row.worktree_id,
       relayId: row.id, relaySequence: row.sequence, acceptedRevision: nextRevision,
-    }, { transfer: true });
+    }, { transfer: true, owner: options.conversationBinding });
     options.faultInjector?.('resume.after_command_commit_before_transaction_commit');
     return committed;
   });
