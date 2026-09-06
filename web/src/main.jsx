@@ -1562,9 +1562,6 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
     >
       <header className="project-detail-header">
         <div className="project-detail-heading">
-          <button type="button" className="detail-back-link" onClick={onBack}>
-            ← 返回项目列表
-          </button>
           <div className="detail-identity-row">
             <ProjectAvatar
               project={project}
@@ -1641,9 +1638,11 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
 function DetailLoadingState() {
   return (
     <div className="detail-loading" role="status">
-      <Skeleton effect="shimmer" className="h-4 w-[min(600px,90%)] rounded-full" />
-      <Skeleton effect="shimmer" className="h-3 w-[min(460px,76%)] rounded-full" />
-      <Skeleton effect="shimmer" className="mb-5 h-3 w-[min(320px,52%)] rounded-full" />
+      <div className="detail-skeleton" aria-hidden="true">
+        <Skeleton effect="shimmer" className="detail-skeleton-title" />
+        <Skeleton effect="shimmer" className="detail-skeleton-line" />
+        <Skeleton effect="shimmer" className="detail-skeleton-short" />
+      </div>
       <p>正在整理项目运行详情…</p>
     </div>
   );
@@ -1758,10 +1757,10 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
               <div className="timeline-heading">
                 <div>
                   <span className="timeline-overline">WORK HISTORY</span>
-                  <h3 id="timeline-title">运行节点</h3>
-                  <p>最新确认的节点在上方；工作副本沿各自工作线延续。</p>
+                  <h3 id="timeline-title">开发足迹</h3>
+                  <p>最新进展在上方，点击历史摘要查看详情。</p>
                 </div>
-                <span className="timeline-count">{timeline.total} 个节点</span>
+                <span className="timeline-count">已显示 {timelineItems.length} / {timeline.total} 条记录</span>
               </div>
 
               <TimelineLaneControls
@@ -2097,6 +2096,18 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
   const historyRef = useRef(null);
   const rowRefs = useRef(new Map());
   const [geometry, setGeometry] = useState(null);
+  const [expansion, setExpansion] = useState({ lane: focusedLaneKey, entries: new Map() });
+  const expandedEntries = expansion.lane === focusedLaneKey ? expansion.entries : new Map();
+  const latestEntry = entries.find((entry) => entry.entryKind === 'event'
+    && (!focusedLaneKey || entry.laneKey === focusedLaneKey));
+  const latestKey = latestEntry ? timelineEntryKey(latestEntry) : null;
+  const dayLabel = (entry) => {
+    if (entry.entryKind === 'origin-continuation') return '更早的来源';
+    const date = new Date(entry.timestamp);
+    return Number.isFinite(date.getTime())
+      ? date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })
+      : '日期未记录';
+  };
 
   useEffect(() => {
     const history = historyRef.current;
@@ -2220,6 +2231,8 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
       )}
       <ol className="project-timeline" aria-label="最新在上的项目运行节点">
         {entries.map((entry, index) => {
+          const dateLabel = index === 0 || dayLabel(entry) !== dayLabel(entries[index - 1])
+            ? dayLabel(entry) : null;
           const lane = lanes.find((candidate) => candidate.key === entry.laneKey) || lanes[0];
           const isFocused = focusedLaneKey === lane.key;
           const isDimmed = Boolean(focusedLaneKey && !isFocused);
@@ -2253,6 +2266,7 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
                 style={rowStyle}
                 focusedLaneKey={focusedLaneKey}
                 onFocusLane={onFocusLane}
+                dateLabel={dateLabel}
               />
             );
           }
@@ -2262,12 +2276,20 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
               key={timelineEntryKey(entry)}
               ref={setRowRef}
               item={entry}
-              index={index}
               lane={lane}
               className={rowClass}
               style={rowStyle}
               focusedLaneKey={focusedLaneKey}
               onFocusLane={onFocusLane}
+              dateLabel={dateLabel}
+              isLatest={timelineEntryKey(entry) === latestKey}
+              expanded={expandedEntries.get(timelineEntryKey(entry)) ?? timelineEntryKey(entry) === latestKey}
+              onToggle={() => {
+                const key = timelineEntryKey(entry);
+                const next = new Map(expandedEntries);
+                next.set(key, !(next.get(key) ?? key === latestKey));
+                setExpansion({ lane: focusedLaneKey, entries: next });
+              }}
             />
           );
         })}
@@ -2283,6 +2305,7 @@ const TimelineOriginNode = React.forwardRef(function TimelineOriginNode({
   style,
   focusedLaneKey,
   onFocusLane,
+  dateLabel,
 }, ref) {
   const origin = entry.origin ?? {};
   const baseCommit = origin.baseCommit ? origin.baseCommit.slice(0, 7) : null;
@@ -2294,6 +2317,7 @@ const TimelineOriginNode = React.forwardRef(function TimelineOriginNode({
 
   return (
     <li ref={ref} className={className} style={style} data-lane-key={lane.key}>
+      {dateLabel && <div className="timeline-date-divider">{dateLabel}</div>}
       <article className="timeline-origin-card" onClick={onCardClick}>
         <header className="timeline-origin-header">
           <button
@@ -2321,10 +2345,13 @@ const TimelineOriginNode = React.forwardRef(function TimelineOriginNode({
         ) : (
           <>
             <p><strong>开发空间已创建</strong>，从这里开始沿独立工作线记录。</p>
-            <small>
-              创建时采用的基线 {baseCommit ? <code>{baseCommit}</code> : '未记录'}
-              {origin.branch ? <> · 工作线 <code>{origin.branch}</code></> : ''}
-            </small>
+            <details>
+              <summary>来源详情</summary>
+              <small>
+                创建时采用的基线 {baseCommit ? <code>{baseCommit}</code> : '未记录'}
+                {origin.branch ? <> · 工作线 <code>{origin.branch}</code></> : ''}
+              </small>
+            </details>
           </>
         )}
       </article>
@@ -2334,12 +2361,15 @@ const TimelineOriginNode = React.forwardRef(function TimelineOriginNode({
 
 const TimelineNode = React.forwardRef(function TimelineNode({
   item,
-  index,
   lane,
   className,
   style,
   focusedLaneKey,
   onFocusLane,
+  dateLabel,
+  isLatest,
+  expanded,
+  onToggle,
 }, ref) {
   const kind = TIMELINE_KINDS[item.kind] ?? { code: 'EVENT', label: item.typeLabel || '运行节点' };
   const detailGroups = [
@@ -2365,8 +2395,8 @@ const TimelineNode = React.forwardRef(function TimelineNode({
   );
 
   const onCardClick = (event) => {
-    if (event.target?.closest?.('button, a, summary, input, select, textarea')) return;
-    onFocusLane(lane.key);
+    if (event.target?.closest?.('button, a, summary, input, select, textarea, .timeline-expanded-content')) return;
+    onToggle();
   };
 
   return (
@@ -2377,7 +2407,8 @@ const TimelineNode = React.forwardRef(function TimelineNode({
       data-lane-key={lane.key}
       data-lane-role={lane.role}
     >
-      <article className="timeline-bubble" onClick={onCardClick}>
+      {dateLabel && <div className="timeline-date-divider">{dateLabel}</div>}
+      <article className={`timeline-bubble${expanded ? ' is-expanded' : ''}${isLatest ? ' is-latest' : ''}`} onClick={onCardClick}>
         <header className="timeline-node-header">
           <div className="timeline-kind-wrap">
             <button
@@ -2396,10 +2427,33 @@ const TimelineNode = React.forwardRef(function TimelineNode({
             </button>
             <span className="timeline-kind-code">{kind.code}</span>
             <strong>{kind.label}</strong>
+            {isLatest && <span className="timeline-latest-label">最新</span>}
           </div>
           <time dateTime={item.timestamp}>{formatTime(item.timestamp)}</time>
         </header>
 
+        <h4 className="timeline-summary-heading">
+          <button type="button" className="timeline-summary-toggle" aria-expanded={expanded}
+            aria-controls={`timeline-content-${item.kind}-${item.id}`} onClick={onToggle}>
+            <span className="timeline-summary-text">{item.summary || item.note || kind.label}</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+          </button>
+        </h4>
+        <div className="timeline-expanded-content" id={`timeline-content-${item.kind}-${item.id}`} hidden={!expanded}>
+          <div className="timeline-preview-meta">
+            {item.agent && <span>{item.agent}</span>}
+            {relayInfo && <span>{relayInfo.label}</span>}
+            {item.kind === 'handoff' && <span>阶段已交接</span>}
+            {item.kind === 'integration' && <span>已确认接入主项目</span>}
+            {isSubmitNote && <span>{noteStatusLabel(item.status)}</span>}
+          </div>
+          {item.nextSessionFocus && <p className="timeline-next-preview" title={item.nextSessionFocus}><span>下一步</span>{item.nextSessionFocus}</p>}
+          {item.kind === 'progress' && item.details?.length > 0 && (
+            <ul className="timeline-preview-list">{item.details.slice(0, 2).map((detail, index) => <li key={index}>{detail}</li>)}</ul>
+          )}
+          <details className="timeline-record">
+            <summary>完整记录与技术详情</summary>
+            <p className="timeline-record-summary">{item.summary || item.note || kind.label}</p>
         <div className="timeline-context-row">
           {item.kind !== 'integration' && (
             <span className="timeline-agent">
@@ -2449,8 +2503,6 @@ const TimelineNode = React.forwardRef(function TimelineNode({
             </span>
           )}
         </div>
-
-        <h4>{item.summary || item.note || kind.label}</h4>
 
         {hasCounts && (
           <div className="timeline-counts-row">
@@ -2579,6 +2631,8 @@ const TimelineNode = React.forwardRef(function TimelineNode({
             <pre>{item.note}</pre>
           </details>
         )}
+          </details>
+        </div>
       </article>
     </li>
   );

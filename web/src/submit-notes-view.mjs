@@ -3,6 +3,7 @@ import { Button } from '@appica/ui-react/button';
 import { Badge } from '@appica/ui-react/badge';
 import { Tabs, TabsList, TabsTrigger } from '@appica/ui-react/tabs';
 import { Textarea } from '@appica/ui-react/textarea';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from '@appica/ui-react/dialog';
 import {
   Alert,
   AlertDescription,
@@ -11,6 +12,7 @@ import {
 } from '@appica/ui-react/alert';
 import { Spinner } from '@appica/ui-react/spinner';
 import { noteStatusLabel } from './delivery-view.mjs';
+import { copyNoteText } from './copy-note-text.mjs';
 
 const PAGE_SIZE = 30;
 const e = React.createElement;
@@ -102,7 +104,6 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
   const [actionErrors, setActionErrors] = useState({});
   const lastRequestsRef = useRef({});
   const pendingWritesRef = useRef(new Set());
-  const [copiedNotes, setCopiedNotes] = useState({});
 
   const requestSeqRef = useRef(0);
   const isMountedRef = useRef(true);
@@ -166,24 +167,6 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
     }, 4500);
     return () => clearInterval(timer);
   }, [fetchNotes, projectId, api]);
-
-  async function handleCopy(item) {
-    try {
-      if (!item.copyText) throw new Error('缺少完整处理说明，请重新加载后再复制。');
-      await navigator.clipboard.writeText(item.copyText);
-      if (!isMountedRef.current) return;
-      setCopiedNotes((prev) => ({ ...prev, [item.noteId]: true }));
-      setTimeout(() => {
-        if (isMountedRef.current) setCopiedNotes((prev) => ({ ...prev, [item.noteId]: false }));
-      }, 2500);
-    } catch (error) {
-      if (!isMountedRef.current) return;
-      setCopiedNotes((prev) => ({ ...prev, [item.noteId]: false }));
-      setActionErrors((prev) => ({ ...prev, [item.noteId]: prev[item.noteId]?.retryable ? prev[item.noteId] : {
-        message: '复制未成功，请检查剪贴板权限或重新加载。', retryable: false,
-      } }));
-    }
-  }
 
   async function handleStatusUpdate(item, targetStatus, isRetry = false) {
     const noteId = item.noteId;
@@ -295,12 +278,10 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
           : items.map((item) => e(SubmitNoteCard, {
               key: item.noteId,
               item,
-              copied: copiedNotes[item.noteId] || false,
               busy: busyNotes[item.noteId] || false,
               actionError: actionErrors[item.noteId] || null,
               draftRemark: draftRemarks[item.noteId] !== undefined ? draftRemarks[item.noteId] : (item.handlingNote || ''),
               onDraftRemarkChange: (val) => setDraftRemarks((prev) => ({ ...prev, [item.noteId]: val })),
-              onCopy: () => handleCopy(item),
               onStatusChange: (targetStatus) => handleStatusUpdate(item, targetStatus, false),
               onRetry: (targetStatus) => handleStatusUpdate(item, targetStatus, true),
             }))
@@ -327,15 +308,55 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
 
 function SubmitNoteCard({
   item,
-  copied,
   busy,
   actionError,
   draftRemark,
   onDraftRemarkChange,
-  onCopy,
   onStatusChange,
   onRetry,
 }) {
+  const [copyStatus, setCopyStatus] = useState('');
+  const [copying, setCopying] = useState(false);
+  const [manualCopyOpen, setManualCopyOpen] = useState(false);
+  const copyPending = useRef(false);
+  const mounted = useRef(true);
+  const copyField = useRef(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  async function handleCopy() {
+    if (copyPending.current) return;
+    if (typeof item.copyText !== 'string' || !item.copyText.trim()) {
+      setCopyStatus('说明缺失，请刷新');
+      return;
+    }
+    copyPending.current = true;
+    setCopying(true);
+    setCopyStatus('正在复制…');
+    try {
+      const copied = await copyNoteText(item.copyText);
+      if (!mounted.current) return;
+      setCopyStatus(copied ? '已复制，可粘贴' : '请手动复制');
+      if (!copied) setManualCopyOpen(true);
+    } catch {
+      if (mounted.current) {
+        setCopyStatus('请手动复制');
+        setManualCopyOpen(true);
+      }
+    } finally {
+      copyPending.current = false;
+      if (mounted.current) setCopying(false);
+    }
+  }
+
+  function selectCopyText() {
+    copyField.current?.focus({ preventScroll: true });
+    copyField.current?.select();
+  }
+
   const source = item.source || {};
   const references = Array.isArray(item.references) ? item.references : [];
 
@@ -428,9 +449,11 @@ function SubmitNoteCard({
         e(Button, {
           variant: 'soft',
           size: 'sm',
-          onClick: onCopy,
+          onClick: handleCopy,
+          disabled: copying,
+          'aria-busy': copying,
           title: '复制说明与处理指令，只读操作不改变状态',
-        }, copied ? '已复制处理说明' : '复制说明'),
+        }, '复制说明'),
         item.status === 'pending' && [
           e(Button, {
             key: 'handle-btn',
@@ -494,6 +517,31 @@ function SubmitNoteCard({
           e('div', null, e('dt', null, '更新时间'), e('dd', null, item.updatedAt)),
           item.handledAt && e('div', null, e('dt', null, '处理时间'), e('dd', null, item.handledAt)),
           item.archivedAt && e('div', null, e('dt', null, '归档时间'), e('dd', null, item.archivedAt))
+        )
+      )
+    ),
+    e('div', { className: 'note-copy-feedback' },
+      e('span', { role: 'status', 'aria-live': 'polite', 'aria-atomic': true }, copyStatus),
+      e('button', {
+        type: 'button', className: 'note-manual-copy', disabled: !item.copyText,
+        onClick: () => setManualCopyOpen(true),
+      }, '手动复制')
+    ),
+    e(Dialog, { open: manualCopyOpen, onOpenChange: setManualCopyOpen },
+      e(DialogContent, { className: 'ugk-dialog note-copy-dialog', closeButton: true, closeLabel: '关闭手动复制', initialFocus: () => {
+        selectCopyText();
+        return copyField.current;
+      } },
+        e(DialogHeader, null,
+          e(DialogTitle, null, '手动复制说明'),
+          e(DialogDescription, null, `${copyStatus === '请手动复制' ? '浏览器未能自动复制。' : ''}下方包含完整说明与处理指令。请按 Ctrl+C（Mac：⌘C），或长按选中的文字复制。说明状态和项目代码不受影响。`)
+        ),
+        e(DialogBody, null,
+          e(Textarea, { ref: copyField, className: 'note-copy-text', 'aria-label': '完整说明与处理指令', readOnly: true, rows: 10, value: item.copyText || '' })
+        ),
+        e(DialogFooter, null,
+          e(Button, { variant: 'soft', onClick: selectCopyText }, '全选文本'),
+          e(Button, { variant: 'primary', onClick: () => setManualCopyOpen(false) }, '关闭')
         )
       )
     )
