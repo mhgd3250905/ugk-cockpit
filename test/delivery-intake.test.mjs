@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync, readFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,10 +15,17 @@ import { verifyReviewDelivery } from '../src/core/delivery-review.mjs';
 import { readSubmission } from '../src/core/integrations.mjs';
 import { readProjectContext } from '../src/core/projects.mjs';
 
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore','pipe','pipe'] }).trim();
 const TOKEN = 'delivery-test-token-xxxxxxxxxxxxxxxxxxxxxxxx';
 async function fixture(t) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-intake-test-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-intake-test-'));
   const main = path.join(root, 'main');
   const source = path.join(root, 'source');
   const remote = path.join(root, 'remote.git');

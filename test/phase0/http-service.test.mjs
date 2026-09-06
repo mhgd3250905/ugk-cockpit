@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,10 +11,17 @@ import { probeGitWorktree } from '../../src/git/probe.mjs';
 import { createCockpitHttpServer } from '../../src/service/http-server.mjs';
 import { VERSION } from '../../src/version.mjs';
 
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
+
 const TOKEN = 'phase-zero-test-token-that-is-long-enough';
 
 function createRepository() {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-http-'));
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-http-'));
   const root = path.join(container, 'repository');
   mkdirSync(root, { recursive: true });
   initializeRepository(root, 'fixture');
@@ -438,7 +445,7 @@ test('a selected folder without a Git project returns a human recovery action', 
 
 test('a manually selected folder below a junction ancestor cannot receive a grant', async (t) => {
   const root = createRepository();
-  const linkContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-http-link-'));
+  const linkContainer = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-http-link-'));
   const ancestorLink = path.join(linkContainer, 'opened-link');
   symlinkSync(path.dirname(root), ancestorLink, process.platform === 'win32' ? 'junction' : 'dir');
   const selectedThroughLink = path.join(ancestorLink, path.basename(root));
@@ -1154,7 +1161,7 @@ test('service restart preserves active run status and does not mark it recovery_
 test('HTTP empty folder selection, spaces listing, and space workspace creation', async (t) => {
   const root = createRepository();
   const dbPath = dataPath(root);
-  const tempContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-spaces-'));
+  const tempContainer = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-test-spaces-'));
   const emptyFolder = path.join(tempContainer, 'empty-dir');
   const nonEmptyFolder = path.join(tempContainer, 'non-empty-dir');
   const regularFile = path.join(tempContainer, 'regular-file.txt');
@@ -1335,7 +1342,7 @@ test('HTTP empty folder selection, spaces listing, and space workspace creation'
 test('HTTP refreshes a stale main-project observation before development-space creation', async (t) => {
   const root = createRepository();
   const dbPath = dataPath(root);
-  const tempContainer = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-stale-space-'));
+  const tempContainer = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-test-stale-space-'));
   const emptyFolder = path.join(tempContainer, 'empty-dir');
   mkdirSync(emptyFolder, { recursive: true });
 

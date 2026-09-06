@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { probeGitWorktree } from '../../src/git/probe.mjs';
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 
 function git(cwd, args) {
   return execFileSync('git', args, {
@@ -16,7 +23,7 @@ function git(cwd, args) {
 }
 
 function createRepository(t, marker = 'fixture') {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-git-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-git-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   git(root, ['init', '-b', 'main']);
   git(root, ['config', 'user.name', 'UGK Fixture']);

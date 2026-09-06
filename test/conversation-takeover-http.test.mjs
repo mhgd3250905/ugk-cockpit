@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -13,6 +13,12 @@ import { takeOverConversation } from '../src/core/conversation-takeovers.mjs';
 import { conversationKey } from '../src/mcp/conversation-identity.mjs';
 
 const TOKEN = 'conversation-takeover-http-test-token-that-is-long-enough';
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
 
 function relayFields() {
   return {
@@ -29,7 +35,7 @@ function relayFields() {
 }
 
 async function createFixture(t, task = '验证会话接手') {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-takeover-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-takeover-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# conversation takeover fixture\n');
   execFileSync('git', ['add', 'README.md'], { cwd: root });
