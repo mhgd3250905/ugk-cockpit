@@ -1226,7 +1226,25 @@ export function recordIntegrationReceipt(db, request = {}, options = {}) {
   }
 
   const timestamp = iso(nowMillis(options));
-  const receiptId = request.receiptId ?? request.id ?? receiptIdFor(submissionId, outcome, timestamp);
+  // A timestamp-derived receipt id inside the journal request makes every
+  // replay of the same command look like new content: the digest changes with
+  // the clock and recovery replays fail with COMMAND_CONFLICT forever.
+  // Command-backed receipts therefore derive their id from the stable command
+  // id, and a replay reuses the receipt id frozen in the existing journal row;
+  // this is compatibility only and never rewrites a stored receipt.
+  let journalRequest = null;
+  if (commandId) {
+    const existingCommand = readCommand(db, commandId);
+    if (existingCommand?.kind === 'integration.receipt' && existingCommand.request_json) {
+      try { journalRequest = JSON.parse(existingCommand.request_json); } catch { journalRequest = null; }
+    }
+  }
+  const receiptId = request.receiptId
+    ?? request.id
+    ?? journalRequest?.receiptId
+    ?? (commandId
+      ? receiptIdFor(submissionId, outcome, commandId)
+      : receiptIdFor(submissionId, outcome, timestamp));
 
   const frozenRequest = {
     commandId,
