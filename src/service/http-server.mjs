@@ -103,6 +103,12 @@ const PUBLIC_ERRORS = {
     impact: '代码和已有记录都没有被修改。',
     requiredAction: '请关闭当前页面后重新打开 UGK Cockpit。',
   },
+  INVALID_HOST: {
+    status: 403,
+    message: '这个请求不是通过 UGK Cockpit 的本地地址发起的。',
+    impact: '代码和 Cockpit 记录都没有被修改，也没有发放任何会话凭据。',
+    requiredAction: '请始终通过本地服务地址（127.0.0.1 或 localhost）访问控制台。',
+  },
   ORIGIN_REJECTED: {
     status: 403,
     message: '已拒绝来自其他网页的控制请求。',
@@ -1005,6 +1011,7 @@ function validateStartBody(body) {
 
 function validateFinishBody(body) {
   requireString(body, 'commandId');
+  requireString(body, 'sessionId');
   if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
     const error = new Error('Invalid expectedRevision');
     error.code = 'INVALID_REQUEST';
@@ -1733,6 +1740,14 @@ function isLoopbackAddress(address) {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
+function allowedHostHeader(hostHeader, port) {
+  if (typeof hostHeader !== 'string') return false;
+  const normalized = hostHeader.trim().toLowerCase();
+  return normalized === `127.0.0.1:${port}`
+    || normalized === `localhost:${port}`
+    || normalized === `[::1]:${port}`;
+}
+
 function allowedOrigin(origin, port) {
   if (!origin) return true;
   return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
@@ -2228,6 +2243,13 @@ export async function createCockpitHttpServer({
     let requestPath = '<unparsed>';
     try {
       const currentPort = server.address().port;
+      // DNS-rebinding defense: the browser derives the Host header from the URL it
+      // fetches, so only our own loopback hostnames may ever reach this handler.
+      // This gates static assets and session-cookie issuance as well.
+      if (!allowedHostHeader(request.headers.host, currentPort)) {
+        sendError(response, 'INVALID_HOST');
+        return;
+      }
       const url = new URL(request.url, `http://${host}:${currentPort}`);
       requestPath = url.pathname;
       let key = null;
@@ -2516,7 +2538,7 @@ export async function createCockpitHttpServer({
       const projectDetailMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
       if (request.method === 'GET' && projectDetailMatch) {
         const projectId = decodeURIComponent(projectDetailMatch[1]);
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
         const detail = readProjectDetail(db, projectId, { limit, offset });
         if (!detail) {
@@ -2780,7 +2802,7 @@ export async function createCockpitHttpServer({
           }
           status = statusParam;
         }
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
 
         const countRows = db.prepare(`
@@ -2841,7 +2863,7 @@ export async function createCockpitHttpServer({
       const projectTimelineMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/timeline$/);
       if (request.method === 'GET' && projectTimelineMatch) {
         const projectId = decodeURIComponent(projectTimelineMatch[1]);
-        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const limit = Math.max(1, Math.min(500, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
         const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
         const project = readProjectContext(db, projectId);
         if (!project) {
@@ -3064,9 +3086,19 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         requireString(body, 'dispatchCode');
         requireString(body, 'clientRequestId');
+        requireString(body, 'mcpWorkingDirectory');
         const context = readDispatchContext(db, body);
         if (!context.ok) {
           sendError(response, context.code);
+          return;
+        }
+        // A dispatch must be accepted from the chat that actually works in the
+        // dispatched worktree — otherwise work done in another directory gets
+        // attributed to (and granted a write lease for) this assignment.
+        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        if (working.project.id !== context.projectId
+          || working.worktreeId !== context.worktreeId) {
+          sendError(response, 'DISPATCH_GRANT_BINDING_MISMATCH');
           return;
         }
         const { observation } = await observeRegisteredProject(context.projectId, context);
@@ -3727,6 +3759,16 @@ export async function createCockpitHttpServer({
         const runId = decodeURIComponent(finishMatch[1]);
         const body = await readJson(request);
         validateFinishBody(body);
+        // The binding is asserted for body.sessionId below, so it must describe
+        // the very run being finalized — otherwise a bound session could finish
+        // a different run it never owned.
+        if (body.sessionId !== runId) {
+          sendError(response, 'INVALID_REQUEST', {
+            commandId: body.commandId,
+            extra: { run_id: runId },
+          });
+          return;
+        }
         const row = db.prepare(`
           SELECT worktrees.canonical_path,
                  worktrees.repository_identity,

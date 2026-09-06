@@ -44,6 +44,24 @@ async function fixture(t) {
   return {root,main,source,remote,dbPath,db,projectId:registered.projectId,preflight,submit,register,closers};
 }
 
+test('a crash between the preflight insert and the journal finish no longer fails the command forever', async (t) => {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.source,'feature.txt'),'feature\n');
+  const registration = await f.register();
+  const request = { commandId:'crashed-preflight', sourceId:registration.id, files:['feature.txt'] };
+  const first = await prepareDelivery(f.db, request);
+  assert.equal(first.ready, true);
+  // 模拟旧版本的崩溃窗口：preflight 行已插入，但 finishCommand 没有执行。
+  f.db.prepare("UPDATE commands SET state='received', response_json=NULL WHERE id=?").run(request.commandId);
+  const retry = await prepareDelivery(f.db, request);
+  assert.equal(retry.ok, true);
+  assert.equal(retry.ready, true);
+  assert.equal(f.db.prepare('SELECT state FROM commands WHERE id=?').get(request.commandId).state, 'committed');
+  // 重试得到的新 preflightId 可继续送审，命令日志不再永久失败。
+  const rows = f.db.prepare('SELECT id FROM delivery_preflights WHERE command_id=?').get(request.commandId);
+  assert.equal(rows.id, retry.preflightId);
+});
+
 test('no-init independent clone is scoped, saved, pushed and deduplicated without a fake session', async (t) => {
   const f = await fixture(t);
   writeFileSync(path.join(f.source,'feature.txt'),'feature\n');

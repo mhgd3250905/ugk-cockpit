@@ -489,7 +489,9 @@ function ThemeSwitch({ mode, onChange }) {
 
 export function calculateRefreshLimit(currentCount) {
   const count = typeof currentCount === 'number' && Number.isFinite(currentCount) ? currentCount : 30;
-  return Math.min(100, Math.max(30, Math.floor(count)));
+  // No upper cap: a cap froze polling permanently once the user loaded more
+  // history than the cap allowed — refreshes must cover everything visible.
+  return Math.max(30, Math.floor(count));
 }
 
 export function getRelayStateInfo(item) {
@@ -736,7 +738,11 @@ function App() {
             || prev.loadingMore
           ) return prev;
           const visibleCount = prev.data?.timeline?.items?.length ?? 0;
-          if (visibleCount > limit) return prev;
+          // Compare against what the server actually returned, not what we
+          // asked for: the server clamps the limit, and replacing the view with
+          // fewer items than the user loaded would silently truncate history.
+          const returnedCount = data?.timeline?.items?.length ?? 0;
+          if (visibleCount > returnedCount) return prev;
           return {
             ...prev,
             data,
@@ -1003,7 +1009,11 @@ function App() {
     const projectId = current.seed.id;
     const requestId = current.requestId;
     if (!isCurrentDetailRequest(requestId, projectId)) return;
-    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=30&offset=0`);
+    // Keep whatever history the user has already loaded instead of resetting
+    // the timeline back to the first page on every note-status refresh.
+    const visibleCount = current.data?.timeline?.items?.length ?? 30;
+    const limit = calculateRefreshLimit(visibleCount);
+    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=${limit}&offset=0`);
     if (!isCurrentDetailRequest(requestId, projectId)) return;
     setProjectDetail((previous) => {
       if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) return previous;
@@ -1082,12 +1092,53 @@ function App() {
         }),
       });
       if (!isCurrentDetailRequest(requestId, projectId)) return;
-      await navigator.clipboard.writeText(result.message);
+      // The assignment already exists from here on: a clipboard failure must
+      // not look like a creation failure (that invited a duplicate POST with a
+      // fresh clientRequestId). Surface it separately with a copy-only retry.
+      const messageText = result.message;
+      let copied = true;
+      try {
+        await navigator.clipboard.writeText(messageText);
+      } catch {
+        copied = false;
+      }
       if (!isCurrentDetailRequest(requestId, projectId)) return;
-      await refreshOpenProjectDetail({
+      await refreshOpenProjectDetail(copied ? {
         message: '开发空间接入消息已复制。',
         detail: '请把它粘贴给将在该代码位置工作的 Agent。',
+      } : {
+        error: true,
+        message: '开发空间接入消息已生成，但无法自动写入剪贴板。',
+        detail: '接手任务已创建；请使用页面右上方的“重试复制”，不要重复生成交付消息。',
       });
+      if (!copied) {
+        const retryCopy = () => {
+          navigator.clipboard.writeText(messageText)
+            .then(() => setNotice({
+              tone: 'success',
+              message: '开发空间接入消息已复制。',
+              required_action: '请把它粘贴给将在该代码位置工作的 Agent。',
+              actionLabel: '知道了',
+              retry: () => setNotice(null),
+            }))
+            .catch(() => setNotice({
+              tone: 'error',
+              message: '无法自动写入剪贴板。',
+              impact: '接手任务已创建成功，项目代码不受影响；不要重复点击“生成接入消息”。',
+              required_action: '请打开项目页重新生成接入指令，并手动复制完整文本。',
+              actionLabel: '重试复制',
+              retry: retryCopy,
+            }));
+        };
+        setNotice({
+          tone: 'error',
+          message: '开发空间接入消息已生成，但无法自动写入剪贴板。',
+          impact: '接手任务已创建成功，项目代码不受影响；不要重复点击“生成接入消息”，以免创建重复任务。',
+          required_action: '请点击“重试复制”；或打开项目页重新生成接入指令后手动复制。',
+          actionLabel: '重试复制',
+          retry: retryCopy,
+        });
+      }
     } catch (error) {
       if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {

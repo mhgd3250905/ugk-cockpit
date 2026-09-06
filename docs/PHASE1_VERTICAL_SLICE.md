@@ -6,6 +6,7 @@
 
 ## 实施状态
 
+- `0.1.0-alpha.38`：外部审计加固轮。安全：全部请求强制 Host ∈ {127.0.0.1, localhost, [::1]}:port，阻断 DNS rebinding 未授权读取与 cookie 发放（实测复现后修复）。可用性：本地 Windows 路径含 `@`（如 Entra 用户目录）不再误判为远程凭据，交付流程恢复可用；`file://` userinfo 仍被拒绝。数据正确性：`saveDelivery` 从当前文件内容重建候选树并与预检指纹核对，检查窗口内的瞬时篡改内容不再可能进入提交（红绿测试证明）。可恢复性：`.git/index.lock` 崩溃残留（空/半截文件、PID 复用）分别按 60 秒/1 小时时限自动回收，与仓库级锁 TTL 接管模式对齐；释放锁不再可能掩盖原始错误。归属：`POST /api/v1/runs/:id/finish` 强制 `sessionId === runId` 并执行会话绑定断言；`ugk_work_accept` 要求 MCP 桥注入的工作目录与派发目标一致（未注册目录返回 PROJECT_NOT_FOUND，错项目返回 DISPATCH_GRANT_BINDING_MISMATCH）。幂等：预检行与命令日志原子提交，崩溃后同请求号可恢复。稳定性：MCP 桥全部调用加超时（默认 60 秒，送审类 5 分钟，relay 保持 10 秒），文件夹选择器挂起不再冻结整个桥。前端：详情轮询不再因已加载历史超过上限而永久冻结；说明状态操作保留已加载历史；开发空间接入消息的剪贴板失败不再诱导重复创建任务；非 JSON 响应给出人话错误。
 - `0.1.0-alpha.37`：接力断线重试、过期码在当前聊天显式确认恢复、持久确认与并发归属保护；区分从未接手与已被替代的聊天。启动器传递明确数据目录并核对已有项目列表及详情。
 
 - `0.1.0-alpha.1`：Project Registry、一次性且可恢复的文件夹授权、同源浏览器会话、首次添加项目、晨间简报首页。
@@ -37,7 +38,7 @@
 - `0.1.0-alpha.34`：审核领取不再按时间失效，修复领取/结论重试和 HTTP 至 MCP 的恢复信息传递。继续保留固定版本、唯一审核领取、状态 CAS 与明确合并授权。全量测试 250/250、Phase 0 89/89、独立定向验收 40/40 及 Web 构建通过；运行中的服务尚未切换。方案与验收见 [统一送审](UNIFIED_SUBMIT.md)。
 - `0.1.0-alpha.35`：轻量 Submit 工作说明，本地实现与验收完成；2026-09-03 已切换运行服务、页面资源与用户级 `cockpit-submit` Skill，已有客户端须重连 MCP 并重新加载 Skill。发布说明与代码保存上传、旧审核对象及会话生命周期分开；项目待办支持复制、标记处理、归档与恢复，不增加冻结、领取或退回流程。`npm test` 289/289、Phase 0 90/90、隔离构建、Skill 校验及浏览器实测通过，Antigravity 独立复核通过。完整契约与本轮验证记录见 [Submit 工作说明](SUBMIT_NOTES.md)。
 - `0.1.0-alpha.36`：会话绑定由平台持久保存，支持宿主身份的聊天重连恢复，保留接力代际失效；修复合并中断恢复与自有 Git 索引锁恢复，见 [持久性契约](CONVERSATION_DURABILITY.md)。
-- 当前小步：会话持久绑定与中断恢复服务已升级，当前 Codex 已重连新版 MCP，并经用户确认完成旧会话持久关联；工作台界面继续等待用户试用反馈。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+- 当前小步：会话持久绑定与中断恢复服务已升级，当前 Codex 已重连新版 MCP，并经用户确认完成旧会话持久关联；工作台界面已收到并处理 2026-09-06 的用户试用反馈（见工作台试用反馈记录），仍处于用户试用期。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
 
 ### alpha.35 工作台与本机认证收束（2026-09-05）
 
@@ -113,7 +114,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - `可以继续`：没有阻断，可开始下一段工作；
 - `暂时放下`：用户主动暂停。
 
-项目总览按行展示名称、人话状态、最近记录时间、真实进展摘要与可用动作；左侧可搜索和切换项目。详情默认打开工作线，工作说明、开发空间置于独立页签，右侧展示当前工作和最近代码检查，原始技术信息按需展开。
+项目总览按行动状态分组，以紧凑卡片展示名称、状态与时间、两行进展和真实动作（2026-09-06 起由行布局改为卡片，见工作台试用反馈）；左侧可搜索和切换项目。详情默认打开工作线，工作说明、开发空间置于独立页签，右侧展示当前工作和最近代码检查，原始技术信息按需展开。
 
 ### 4. 交给 AI 与继续
 
@@ -150,7 +151,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息，不创建或接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 14 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
+- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息，不创建或接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容；加上 alpha.35 新增的 `ugk_work_submit_note`、`ugk_submit_note_get`、`ugk_submit_note_update` 三个工作说明工具，共 17 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。
