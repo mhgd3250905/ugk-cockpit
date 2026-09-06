@@ -162,6 +162,26 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     assert.equal((await invalid.json()).code, 'INVALID_REQUEST');
   }
 
+  // A stale development-space record can point at a folder that was removed
+  // outside Cockpit. It must not prevent the current registered worktree from
+  // resolving and consuming its own relay code.
+  const stalePath = path.join(root, 'removed-development-space');
+  const staleDb = openCockpitDatabase(dbPath, { migrate: false });
+  const staleAt = new Date().toISOString();
+  staleDb.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('relay-http-stale-worktree', ?, ?, 'relay-http-stale-identity', ?)
+  `).run(stalePath, observation.repositoryIdentity, staleAt);
+  staleDb.prepare(`
+    INSERT INTO development_spaces (
+      id, project_id, worktree_id, name, branch, base_commit, status, created_at, updated_at
+    ) VALUES (
+      'relay-http-stale-space', ?, 'relay-http-stale-worktree',
+      'Removed development space', 'ugk/removed-space', ?, 'ready', ?, ?
+    )
+  `).run(project.projectId, observation.after.head, staleAt, staleAt);
+  staleDb.close();
+
   const resumeResponse = await post(service, '/api/v1/mcp/work/resume', resumeBody);
   assert.equal(resumeResponse.status, 200, await resumeResponse.clone().text());
   const resumed = await resumeResponse.json();

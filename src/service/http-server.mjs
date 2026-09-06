@@ -1919,6 +1919,16 @@ export async function createCockpitHttpServer({
     return { project, space: spaceRow, observation, worktreeId: targetWorktreeId };
   }
 
+  function isUnusableMcpWorkingCandidate(error) {
+    return [
+      'ENOENT',
+      'PATH_OUTSIDE_SCOPE',
+      'PATH_NOT_AUTHORIZED',
+      'REPARSE_POINT',
+      'PATH_NOT_FOUND',
+    ].includes(error?.code);
+  }
+
   async function resolveMcpWorkingProject(workingDirectory) {
     if (typeof workingDirectory !== 'string' || !workingDirectory.trim()) {
       const error = new Error('MCP working directory is unavailable.');
@@ -1944,7 +1954,7 @@ export async function createCockpitHttpServer({
         revalidateAuthorizedPath(binding);
         return observeRegisteredProject(candidate.project_id, { worktreeId: candidate.worktree_id });
       } catch (error) {
-        if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(error?.code)) continue;
+        if (isUnusableMcpWorkingCandidate(error)) continue;
         throw error;
       }
     }
@@ -1983,7 +1993,7 @@ export async function createCockpitHttpServer({
         revalidateAuthorizedPath(binding);
         pathMatches.push(candidate);
       } catch (error) {
-        if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(error?.code)) continue;
+        if (isUnusableMcpWorkingCandidate(error)) continue;
         throw error;
       }
     }
@@ -2215,9 +2225,11 @@ export async function createCockpitHttpServer({
   }
 
   const server = createServer(async (request, response) => {
+    let requestPath = '<unparsed>';
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
+      requestPath = url.pathname;
       let key = null;
       if (request.headers['x-ugk-conversation']) {
         try {
@@ -3782,6 +3794,9 @@ export async function createCockpitHttpServer({
       const code = error instanceof SyntaxError
         ? 'INVALID_REQUEST'
         : (sqliteBusy ? 'DATABASE_BUSY' : error?.code);
+      if (!PUBLIC_ERRORS[code]) {
+        process.stderr.write(`[ugk-service] unclassified request failure: ${request.method} ${requestPath}; ${error?.name ?? 'Error'}: ${error?.message ?? String(error)}\n`);
+      }
       sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED');
     }
   });
