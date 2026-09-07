@@ -42,11 +42,19 @@
 - `0.1.0-alpha.36`：会话绑定由平台持久保存，支持宿主身份的聊天重连恢复，保留接力代际失效；修复合并中断恢复与自有 Git 索引锁恢复，见 [持久性契约](CONVERSATION_DURABILITY.md)。
 - 当前小步：会话节点与工作台授权转交完成，当前 Codex 可继续，用户确认 ZCode 原聊天完成授权消费并可写；其他旧宿主需重连加载新版工具定义。工作台仍处于试用期，跨机 MCP、托管平台合并 API、清理或删除工作副本不在本次范围。
 
+### alpha.39 main 集成与阶段发布（2026-09-07）
+
+用户随后明确授权合并 main、保存对齐、push、tag 和 Release。本轮集成基线为本地及远端 main `670fbfce1dafcb3121dfa1f0c703ca64b606fa35`；从 `codex/conversation-continuity` 快进到候选 `d2907c584c291f6525455c4180e0a392dcee017a`，保留 6 个提交、39 个路径的完整实现历史，无合并冲突。版本为 `0.1.0-alpha.39`，未修改生产代码、依赖或业务数据。
+
+独立 readiness 审核未发现阻断项：版本四处一致，已测实现到候选只含版本/文档差异，无运行数据库或凭据纳入版本；发布条件为最终 main 门禁通过及发布提交与候选源码一致。main 候选完整复验 `npm test -- --test-concurrency=4` **389/389**（375.50 秒）、`npm run test:phase0` **93/93**（135.43 秒）、`npm run build:web`、`git diff --check` 全部通过，无失败或跳过；随后仅保存本发布记录，不改变被测源码。既有大包警告保留，不扩大为界面优化任务。
+
+阶段标识为 `v0.1.0-alpha.39`，GitHub Release 按 prerelease 发布，指向 main 最终记录提交；发布说明包含 schema 25 回退边界、MCP/技能重载和 ZCode 用户现场反馈的准确范围，不附加安装器或二进制资产。发布是否成功以远端 main/tag SHA 与 GitHub Release 回执为准。保留原开发分支及其他工作副本，不创建终态 handoff、不重启用户正在使用的服务。后续从本节及会话持久性/本机恢复文档继续；不要因切分支重新 init 或覆盖运行中数据库。
+
 ### alpha.39 节点追溯与平台转交收束（2026-09-07）
 
 实施基线 `c004dd56bc743ef63ee3e6e5cdb6b445545b83b7`；Preflight HEAD `d36e66ac687060249b6887f52263f465bf704c20`，两提交、32 路径，全部为本轮已授权实现与部署，工作区暂存/未暂存/未跟踪均 0。代码定版 `291648e983a6c11202161793428dcc4b7ce81793` 的全仓 `npm test -- --test-concurrency=4` 389/389、Phase 0 93/93、网页构建及隔离浏览器流程通过；到 Preflight HEAD 仅补部署文档，代码证据仍适用。本次仅递增开发版本、对齐当前入口和阶段记录、补记用户提供的原 ZCode 现场结果，不修改生产逻辑或依赖版本，不创建发布标签。
 
-当前契约以 [会话身份与中断恢复](CONVERSATION_DURABILITY.md) 为准，需求与测试范围见 [节点与转交验收](CONVERSATION_NODE_TRANSFER_REQUIREMENTS.md)，部署/备份/技能切换及现场反馈见 [本机服务恢复](LOCAL_SERVICE_RECOVERY.md)。alpha.32 恢复计划和此前两步 takeover 记录为历史，不作为当前操作指令。用户已明确授权普通 push，目标为当前 `codex/conversation-continuity` 分支；不合并 main 或创建 release。
+当前契约以 [会话身份与中断恢复](CONVERSATION_DURABILITY.md) 为准，需求与测试范围见 [节点与转交验收](CONVERSATION_NODE_TRANSFER_REQUIREMENTS.md)，部署/备份/技能切换及现场反馈见 [本机服务恢复](LOCAL_SERVICE_RECOVERY.md)。alpha.32 恢复计划和此前两步 takeover 记录为历史，不作为当前操作指令。此前收束只获授权普通 push 到 `codex/conversation-continuity`，当时未合并 main 或创建 release；后续明确授权的 main 集成与发布见上节。
 
 收束验证对应 Preflight HEAD 加本次 8 文件版本/文档工作树：`node --test test/phase0/version.test.mjs` 1/1，`npm test -- --test-concurrency=4 --test-name-pattern='VERSION, package metadata'` 通过（仅匹配版本断言，其他文件加载不算全量业务复验），`npm run build:web` 与 `git diff --check` 通过。生产及测试源码未变，复用代码定版的 389/389 和 93/93 证据。版本文件改为 alpha.39；此次不重启用户已恢复使用的服务，运行进程的版本标识在下次正常重启时更新，已部署的 schema 25 业务逻辑不变。
 
