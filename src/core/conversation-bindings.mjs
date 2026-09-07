@@ -1,3 +1,5 @@
+import { readTransferState } from './conversation-transfers.mjs';
+
 // The service database owns conversation bindings. A process is only a transport.
 export function readConversationBinding(db, key, worktreeId, sessionId = null) {
   if (!key) return null;
@@ -44,6 +46,7 @@ export function readConversationAuthorization(db, key, state, allowedStatuses = 
     ? readConversationBinding(db, key, state.worktreeId, state.sessionId) : null;
   let reason = null;
   if (!state) reason = 'session_missing';
+  else if (readTransferState(db, state.sessionId)?.frozen) reason = 'transfer_pending';
   else if (!key) reason = 'metadata_missing';
   else if (!allowedStatuses.includes(state.status)) reason = 'session_not_active';
   else if (!binding) reason = owner && owner.conversationKey !== key ? 'held_elsewhere' : 'binding_missing';

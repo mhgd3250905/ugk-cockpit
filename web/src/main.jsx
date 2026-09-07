@@ -142,6 +142,26 @@ function stableLaneColor(lane) {
   return TIMELINE_SPACE_COLORS[Math.abs(hash) % TIMELINE_SPACE_COLORS.length];
 }
 
+function timelineDetailText(detail) {
+  if (typeof detail === 'string') return detail;
+  if (typeof detail === 'number') return String(detail);
+  if (!detail || typeof detail !== 'object') return '未提供详情';
+  const transferLabels = {
+    'conversation.transfer.issue': '用户授权转交，等待新聊天接手',
+    'conversation.transfer.consume': '新聊天已接手',
+    'conversation.transfer.cancel': '取消转交并恢复原聊天',
+  };
+  const label = transferLabels[detail.nodeType];
+  if (label) {
+    const actor = detail.actor;
+    const identity = actor?.type === 'user' ? '项目所有者' : actor?.type === 'ai'
+      && typeof actor.platform === 'string' && typeof actor.conversationId === 'string'
+      ? `${actor.platform} / ${actor.conversationId}` : '身份未记录';
+    return `${label} · ${identity}`;
+  }
+  return typeof detail.summary === 'string' ? detail.summary : '结构化工作记录（未提供文字摘要）';
+}
+
 function timelineTimestamp(value) {
   const parsed = Date.parse(value ?? '');
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -1970,10 +1990,181 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
             loading={diagnosticsLoading}
             onLoad={onLoadDiagnostics}
           />
+          <ConversationControlPanel key={project.id} projectId={project.id} />
         </aside>
       </div>
     </>
   );
+}
+
+function ConversationControlPanel({ projectId }) {
+  const [chains, setChains] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const requestRef = useRef(0);
+  const path = `/api/v1/projects/${encodeURIComponent(projectId)}/conversation-control`;
+
+  useEffect(() => () => { requestRef.current += 1; }, []);
+
+  async function refresh() {
+    const request = ++requestRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api(path);
+      if (request === requestRef.current) setChains(result.chains);
+    } catch (failure) {
+      if (request === requestRef.current) setError(failure);
+    } finally {
+      if (request === requestRef.current) setLoading(false);
+    }
+  }
+
+  return (
+    <section className="context-section conversation-control" aria-label="会话接续与转交">
+      <h3>会话接续与转交</h3>
+      <p>按工作会话分别查看最后节点。接手成功本身就是新节点；不会改写此前成果的归属。</p>
+      <Button variant="soft" size="sm" onClick={refresh} disabled={loading}>
+        {loading ? '正在读取…' : '刷新会话接续情况'}
+      </Button>
+      {error && <ConversationControlError error={error} />}
+      {chains?.length === 0 && <p>当前项目尚无工作会话。</p>}
+      {chains?.map((chain) => (
+        <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} />
+      ))}
+    </section>
+  );
+}
+
+function ConversationControlError({ error }) {
+  return <div role="alert" className="conversation-control-error">
+    <p>{error.message || '操作未完成。'}</p>
+    <p>{error.impact || '项目代码不会被清理或覆盖。'}</p>
+    <p>{error.required_action || '请刷新会话状态核对结果；不要反复签发新授权。'}</p>
+  </div>;
+}
+
+function ConversationControlChain({ chain, path, onRefresh }) {
+  const [dialog, setDialog] = useState(null);
+  const [targetHost, setTargetHost] = useState('');
+  const [targetConversationId, setTargetConversationId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [issued, setIssued] = useState(null);
+  const [requestNotice, setRequestNotice] = useState('');
+  const [copied, setCopied] = useState('');
+  const pendingRequest = useRef(null);
+  const owner = chain.owner;
+  const node = chain.latestNode;
+  const waiting = Boolean(chain.transfer);
+  const actionable = ['active', 'awaiting_resume'].includes(chain.status);
+  const nodeLabels = { init: '接入', accept: '接入', progress: '工作进展', relay: '准备接力', resume: '接收接力', takeover: '接手', handoff: '结束阶段', transfer_authorized: '用户授权转交', transfer_cancelled: '用户取消转交' };
+
+  useEffect(() => {
+    if (issued && chain.revision > issued.revision) setIssued(null);
+  }, [chain.revision, issued]);
+
+  async function copy(value, label) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+    } catch {
+      setCopied('复制失败，请手动选择文字复制。');
+    }
+  }
+
+  async function submit(retry = false) {
+    if (busy) return;
+    if (!retry) {
+      if (dialog === 'transfer' && Boolean(targetHost.trim()) !== Boolean(targetConversationId.trim())) {
+        setError({ message: '目标平台和会话 ID 必须同时填写，或同时留空。' });
+        return;
+      }
+      pendingRequest.current = {
+        action: dialog,
+        body: {
+          clientRequestId: crypto.randomUUID(),
+          expectedRevision: chain.revision,
+          ...(dialog === 'cancel' ? { restorePreviousOwner: true } : targetHost.trim() ? {
+            targetHost: targetHost.trim().toLowerCase(), targetConversationId: targetConversationId.trim(),
+          } : {}),
+        },
+      };
+    }
+    const request = pendingRequest.current;
+    if (!request) return;
+    setBusy(true);
+    setError(null);
+    setCopied('');
+    setRequestNotice('');
+    try {
+      const result = await api(`${path}/${encodeURIComponent(chain.sessionId)}/${request.action}`, {
+        method: 'POST', body: JSON.stringify(request.body),
+      });
+      const hasCurrentAuthorization = request.action === 'transfer' && Boolean(result.transferCode);
+      setIssued(hasCurrentAuthorization ? result : null);
+      if (request.action === 'transfer' && !hasCurrentAuthorization) {
+        const statusLabels = { consumed: '已被接手', cancelled: '已取消', expired: '已过期', superseded: '已被后续授权替代' };
+        setRequestNotice(`历史请求已处理：${statusLabels[result.currentStatus] || '不再提供有效接手授权'}。正在刷新当前会话状态；不能使用该历史请求接手。`);
+      } else if (request.action === 'cancel') {
+        setRequestNotice('取消请求已处理。请以刷新后的当前会话状态为准。');
+      }
+      pendingRequest.current = null;
+      setDialog(null);
+      await onRefresh();
+    } catch (failure) {
+      setError(failure);
+      // Keep the exact request for an uncertain-result retry; never mint a new authorization automatically.
+      if (failure.code && !['SERVICE_UNAVAILABLE', 'AUTH_REQUIRED'].includes(failure.code)) pendingRequest.current = null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <article className="conversation-chain">
+    <h4>{chain.task || '未命名工作会话'}</h4>
+    <dl>
+      <div><dt>工作会话</dt><dd>{chain.sessionId}</dd></div>
+      <div><dt>当前接续</dt><dd>{waiting ? '等待用户授权的聊天接手' : chain.status === 'active' ? '进行中' : chain.status === 'awaiting_resume' ? '等待接力接收' : chain.status === 'standby' ? '待继续（当前不可转交）' : '已结束'}</dd></div>
+      <div><dt>持有人</dt><dd>{owner?.host || '此前连接'} / {owner?.conversationLocator || '无法定位具体聊天'}</dd></div>
+      <div><dt>最后节点</dt><dd>{node ? `${nodeLabels[node.type] || '工作流操作'} · ${node.actorHost || (node.actorKind === 'user' ? '项目所有者' : node.actorKind === 'system' ? '系统' : '历史身份未知')}${node.actorConversationId ? ` / ${node.actorConversationId}` : ''}` : '历史记录未提供节点信息'}</dd></div>
+      {node && <div><dt>节点内容</dt><dd>{node.summary || '未提供摘要'} · {formatTime(node.createdAt)}</dd></div>}
+    </dl>
+    {owner?.conversationLocator && <Button size="sm" variant="soft" onClick={() => copy(`${owner.host || '未知平台'} / ${owner.conversationLocator}`, '已复制持有人身份')}>复制平台与会话 ID</Button>}
+    {waiting && <p>授权{chain.transfer.status === 'expired' ? '已过期' : `有效至 ${formatTime(chain.transfer.expiresAt)}`}。旧聊天已冻结；过期不会自动恢复旧聊天，也不会向其他聊天开放。</p>}
+    <div className="conversation-control-actions">
+      {actionable && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('transfer'); }}>授权其他聊天接手</Button>}
+      {waiting && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('cancel'); }}>取消转交并恢复原聊天</Button>}
+      {pendingRequest.current && !busy && <Button size="sm" variant="soft" onClick={() => submit(true)}>以原请求核对 / 重试</Button>}
+    </div>
+    {issued && <div className="conversation-transfer-result">
+      <p>授权已签发，有效至 {formatTime(issued.expiresAt)}。请只交给你希望接手的聊天。指令仅在本次页面中显示，不保存到浏览器存储。</p>
+      <pre>{issued.continueMessage || issued.transferCode}</pre>
+      <Button size="sm" variant="soft" onClick={() => copy(issued.continueMessage || issued.transferCode, '已复制接手指令')}>复制接手指令</Button>
+    </div>}
+    {copied && <p role="status">{copied}</p>}
+    {requestNotice && <p role="status">{requestNotice}</p>}
+    {error && <ConversationControlError error={error} />}
+    <Dialog open={Boolean(dialog)} onOpenChange={createDialogCloseGuard(busy, () => setDialog(null))}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>{dialog === 'cancel' ? '恢复原聊天的接续权限？' : '停止旧聊天推进并授权转交？'}</DialogTitle>
+          <DialogDescription>目标：{chain.task || chain.sessionId}。代码不会被清理或覆盖。</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <p>当前持有人：{owner?.host || '此前连接'} / {owner?.conversationLocator || '无法定位具体聊天'}。</p>
+          {dialog === 'cancel' ? <p>确认后撤销待接手授权，并恢复先前聊天的权限。若已有新聊天接手，本次取消将被拒绝。</p> : <>
+            <p>确认后原聊天立即失去推进权。接手授权 10 分钟有效，超时仍保持待处理，必须由你重新授权或明确恢复原聊天。</p>
+            <Field><FieldLabel htmlFor={`target-host-${chain.sessionId}`}>目标平台标识（可选）</FieldLabel><Input id={`target-host-${chain.sessionId}`} value={targetHost} onChange={(event) => setTargetHost(event.target.value)} placeholder="例如 zcode、codex" disabled={busy} /></Field>
+            <Field><FieldLabel htmlFor={`target-chat-${chain.sessionId}`}>目标宿主会话 ID（与平台一起填写）</FieldLabel><Input id={`target-chat-${chain.sessionId}`} value={targetConversationId} onChange={(event) => setTargetConversationId(event.target.value)} disabled={busy} /></Field>
+            <p>都留空时，持有一次性指令的聊天可以接手，请勿公开分享。</p>
+          </>}
+          {error && <ConversationControlError error={error} />}
+          {pendingRequest.current && !busy && <Button variant="soft" onClick={() => submit(true)}>以原请求核对 / 重试</Button>}
+        </DialogBody>
+        <DialogFooter><Button variant="soft" disabled={busy} onClick={() => setDialog(null)}>返回</Button><Button disabled={busy || Boolean(pendingRequest.current)} onClick={() => submit()}>{busy ? '正在提交…' : dialog === 'cancel' ? '确认恢复原聊天' : '确认冻结并签发授权'}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </article>;
 }
 
 function SessionDiagnosticsPanel({ projectId, diagnostics, loading, onLoad }) {
@@ -2553,7 +2744,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
           </div>
           {item.nextSessionFocus && <p className="timeline-next-preview" title={item.nextSessionFocus}><span>下一步</span>{item.nextSessionFocus}</p>}
           {item.kind === 'progress' && item.details?.length > 0 && (
-            <ul className="timeline-preview-list">{item.details.slice(0, 2).map((detail, index) => <li key={index}>{detail}</li>)}</ul>
+            <ul className="timeline-preview-list">{item.details.slice(0, 2).map((detail, index) => <li key={index}>{timelineDetailText(detail)}</li>)}</ul>
           )}
           <details className="timeline-record">
             <summary>完整记录与技术详情</summary>
@@ -2693,7 +2884,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
               <div className="timeline-progress-details-wrap">
                 <ul className="timeline-progress-details">
                   {item.details.slice(0, 3).map((detail, dIdx) => (
-                    <li key={`detail-${dIdx}`}>{detail}</li>
+                    <li key={`detail-${dIdx}`}>{timelineDetailText(detail)}</li>
                   ))}
                 </ul>
                 {item.details.length > 3 && (
@@ -2701,7 +2892,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
                     <summary>查看更多详情（共 {item.details.length} 条）</summary>
                     <ul className="timeline-progress-details">
                       {item.details.slice(3).map((detail, dIdx) => (
-                        <li key={`detail-more-${dIdx}`}>{detail}</li>
+                        <li key={`detail-more-${dIdx}`}>{timelineDetailText(detail)}</li>
                       ))}
                     </ul>
                   </details>

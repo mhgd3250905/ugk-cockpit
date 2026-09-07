@@ -587,7 +587,7 @@ export const TOOLS = [
   },
   {
     name: 'ugk_work_takeover',
-    description: 'Only after work context reports that another chat holds this active session and the user explicitly asks to take it over. The first call creates a confirmation offer; do not make a confirmation call until the user has confirmed this exact transfer.',
+    description: 'Consume a one-time transferCode explicitly issued by the user in the Cockpit workbench. Chat confirmation alone cannot authorize takeover. The host must provide a stable conversation identity. Never initialize or clear the workspace to recover.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -599,22 +599,18 @@ export const TOOLS = [
           type: 'string',
           description: 'A new idempotency key for this request'
         },
-        expectedRevision: {
-          type: 'integer', minimum: 1,
-          description: 'The exact revision returned by the context query'
-        },
-        confirmationRequestId: {
+        transferCode: {
           type: 'string',
-          description: 'Only after user confirmation: the confirmationRequestId returned by the preceding takeover offer'
+          description: 'The one-time authorization from the workbench; never invent or reuse another chat’s authorization'
         }
       },
-      required: ['sessionId', 'clientRequestId', 'expectedRevision'],
+      required: ['sessionId', 'clientRequestId', 'transferCode'],
       additionalProperties: false
     }
   },
   {
     name: 'ugk_work_resume',
-    description: 'Only when the user explicitly requests resuming with a continueCode. An expired code can return confirmation_required: ask the user before retrying with confirmationRequestId and expectedRevision from that response and a new clientRequestId. Never infer confirmation.',
+    description: 'Only when the user explicitly requests resuming with a continueCode. An expired code requires a new authorization in the Cockpit workbench, never chat-only confirmation. Historical uncertain requests may be replayed unchanged; do not invent confirmation fields.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -996,7 +992,7 @@ function validateTakeoverArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
   }
-  const allowedKeys = ['sessionId', 'clientRequestId', 'expectedRevision', 'confirmationRequestId'];
+  const allowedKeys = ['sessionId', 'clientRequestId', 'transferCode'];
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
     if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
@@ -1007,12 +1003,8 @@ function validateTakeoverArgs(args) {
   if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
     return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
   }
-  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
-    return 'Missing or invalid required field: expectedRevision (must be a positive integer)';
-  }
-  if (args.confirmationRequestId !== undefined && (typeof args.confirmationRequestId !== 'string'
-    || !args.confirmationRequestId.trim() || args.confirmationRequestId === args.clientRequestId)) {
-    return 'Confirmation requires a prior confirmationRequestId and a new clientRequestId';
+  if (typeof args.transferCode !== 'string' || !args.transferCode.trim()) {
+    return 'Platform authorization required: obtain transferCode from the Cockpit workbench; chat confirmation cannot authorize takeover';
   }
   return null;
 }

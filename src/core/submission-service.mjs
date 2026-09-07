@@ -328,8 +328,11 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
         const dirty = await (options.hasUncommittedChanges ?? hasUncommittedChanges)(context.canonicalPath);
         if (dirty) {
           try {
+            options.assertSessionWrite?.(sessionId);
             const identity = await (options.ensureLocalCommitIdentity ?? ensureLocalCommitIdentity)(context.canonicalPath);
+            options.assertSessionWrite?.(sessionId);
             await (options.stageAllChanges ?? stageAllChanges)(context.canonicalPath);
+            options.assertSessionWrite?.(sessionId);
             await (options.createSubmissionCommit ?? createSubmissionCommit)(context.canonicalPath, {
               summary,
               commandId,
@@ -337,6 +340,7 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
               authorEmail: identity?.email,
             });
           } catch (error) {
+            if (error?.code === 'CONVERSATION_BINDING_CONFLICT') throw error;
             const code = error?.code === 'COMMIT_IDENTITY_MISSING' ? error.code : 'COMMIT_FAILED';
             return retryableAttemptError(db, attempt, code, error.message, {}, options);
           }
@@ -392,6 +396,7 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
         }, options);
         return { ok: false, code: 'SOURCE_CHANGED_AFTER_SAVE', humanActionRequired: true, localSaved: true, pushed: false };
       }
+      options.assertSessionWrite?.(sessionId);
       try {
         await (options.pushSubmissionBranch ?? pushSubmissionBranch)(context.canonicalPath, {
           remote: attempt.remoteName,
@@ -412,6 +417,7 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
     }
 
     if (attempt.state === 'pushed') {
+      options.assertSessionWrite?.(sessionId);
       const created = createSubmission(db, {
         commandId: `create_submission:${commandId}`,
         projectId: attempt.projectId,
@@ -429,6 +435,7 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
         return retryableAttemptError(db, attempt, created.code, created.message ?? 'Could not create submission record.', {}, options);
       }
       await options.faultInjector?.('after_submission_before_space_status');
+      options.assertSessionWrite?.(sessionId);
       const currentSpace = readDevelopmentSpaceByWorktree(db, attempt.sourceWorktreeId);
       if (currentSpace.status !== 'awaiting_review') {
         const updated = updateDevelopmentSpaceStatus(db, {

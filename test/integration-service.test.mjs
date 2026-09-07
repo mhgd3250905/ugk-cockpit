@@ -155,6 +155,30 @@ async function approve(f) {
   return { begun, reviewed };
 }
 
+test('transfer freeze prevents merge and subsequent push at write boundaries', async (t) => {
+  for (const frozenAt of ['merge', 'push']) {
+    const f = await fixture(t);
+    const { begun, reviewed } = await approve(f);
+    const before = git(f.mainPath, ['rev-parse', 'HEAD']);
+    let frozen = frozenAt === 'merge';
+    let pushes = 0;
+    const result = await mergeApprovedSubmission(f.db, {
+      commandId: `freeze-${frozenAt}`, sessionId: 'session-main', submissionId: f.submissionId,
+      claimId: begun.claimId, expectedRevision: 2, expectedSubmissionRevision: reviewed.submissionRevision,
+      expectedClaimRevision: reviewed.claimRevision, summary: '冻结边界',
+    }, {
+      assertSessionWrite() { if (frozen) throw Object.assign(new Error('frozen'), { code: 'CONVERSATION_BINDING_CONFLICT' }); },
+      faultInjector(point) { if (point === 'after_fast_forward_before_persist') frozen = true; },
+      pushIntegratedMain: async () => { pushes += 1; },
+    });
+    assert.equal(result.code, 'CONVERSATION_BINDING_CONFLICT');
+    assert.equal(pushes, 0);
+    if (frozenAt === 'merge') assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), before);
+    else assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), f.sourceCommit);
+    assert.equal(git(f.remotePath, ['rev-parse', 'refs/heads/main']), before);
+  }
+});
+
 test('main session claims, reviews, fast-forwards, pushes, receipts, and replays idempotently', async (t) => {
   const f = await fixture(t);
   const { begun, reviewed } = await approve(f);

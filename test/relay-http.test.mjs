@@ -122,7 +122,7 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   const relayRetry = await post(service, '/api/v1/mcp/work/relay', relayBody);
   assert.equal(relayRetry.status, 200, await relayRetry.clone().text());
   const retried = await relayRetry.json();
-  assert.deepEqual(retried, prepared);
+  assert.deepEqual({ ...retried, diagnosticId: undefined }, { ...prepared, diagnosticId: undefined });
   assert.equal(retried.git.head, prepared.git.head);
 
   const relayConflict = await post(service, '/api/v1/mcp/work/relay', {
@@ -205,7 +205,7 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     mcpWorkingDirectory: root,
   });
   assert.equal(replay.status, 200, await replay.clone().text());
-  assert.deepEqual(await replay.json(), resumed);
+  assert.deepEqual({ ...await replay.json(), diagnosticId: undefined }, { ...resumed, diagnosticId: undefined });
 
   const state = openCockpitDatabase(dbPath, { migrate: false });
   const row = state.prepare(`
@@ -228,5 +228,27 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     WHERE request_json LIKE ? OR response_json LIKE ?
   `).get(`%${prepared.continueCode}%`, `%${prepared.continueCode}%`).count, 0);
   assert.equal(state.prepare('SELECT count(*) AS count FROM write_leases').get().count, 1);
+
+  // Only the isolated fixture clock is advanced; an expired public capability
+  // must not regain authority through the old chat-confirmation fields.
+  const expiringResponse = await post(service, '/api/v1/mcp/work/relay', {
+    ...relayBody, expectedRevision: resumed.revision, clientRequestId: 'relay-http-expiring',
+  });
+  assert.equal(expiringResponse.status, 200, await expiringResponse.clone().text());
+  const expiring = await expiringResponse.json();
+  state.prepare('UPDATE relays SET expires_at = 0 WHERE id = ?').run(expiring.relayId);
+  for (const confirmation of [false, true]) {
+    const rejected = await post(service, '/api/v1/mcp/work/resume', {
+      continueCode: expiring.continueCode, clientRequestId: `relay-http-expired-${confirmation}`,
+      mcpWorkingDirectory: root,
+      ...(confirmation ? { confirmationRequestId: 'old-offer', expectedRevision: expiring.revision } : {}),
+    });
+    assert.equal(rejected.status, 409);
+    const error = await rejected.json();
+    assert.equal(error.code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+    assert.equal(error.session_id, initialized.sessionId);
+    assert.equal(error.revision, expiring.revision);
+  }
+  assert.equal(state.prepare('SELECT revision FROM runs WHERE id = ?').get(initialized.sessionId).revision, expiring.revision);
   state.close();
 });

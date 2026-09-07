@@ -36,6 +36,24 @@ function relayFields() {
   };
 }
 
+async function authorizeTransfer(fixture, session, clientRequestId, target = {}) {
+  const baseUrl = fixture.baseUrl();
+  const shell = await fetch(baseUrl + '/');
+  const cookie = shell.headers.get('set-cookie')?.split(';')[0];
+  assert.ok(cookie);
+  const response = await fetch(`${baseUrl}/api/v1/projects/${fixture.projectId}/conversation-control/${session.sessionId}/transfer`, {
+    method: 'POST',
+    headers: { cookie, origin: baseUrl, 'sec-fetch-site': 'same-origin',
+      'x-ugk-client-id': 'conversation-transfer-browser-test', 'content-type': 'application/json' },
+    body: JSON.stringify({ clientRequestId, expectedRevision: session.revision, ...target }),
+  });
+  const result = await response.json();
+  assert.ok(response.ok, JSON.stringify(result));
+  assert.equal(result.revision, session.revision + 1);
+  assert.ok(result.transferCode);
+  return result;
+}
+
 async function createFixture(t, task = '验证会话接手') {
   const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-takeover-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
@@ -86,6 +104,7 @@ async function createFixture(t, task = '验证会话接手') {
   return {
     root,
     dbPath,
+    projectId: project.projectId,
     initCode,
     baseUrl: () => `http://${service.host}:${service.port}`,
     restart: async () => {
@@ -119,7 +138,9 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
   assert.equal(held.status, 'active');
   assert.equal(held.bindingReason, 'held_by_another_chat');
   assert.equal(held.canContinue, false);
-  assert.deepEqual(held.availableActions, ['return_to_owner', 'request_takeover', 'takeover_then_relay']);
+  assert.equal(held.latestNode.type, 'init');
+  assert.equal(held.latestNode.summary, 'A 正在工作');
+  assert.deepEqual(held.availableActions, ['return_to_owner', 'open_workbench_transfer']);
   assert.deepEqual(held.owner, {
     bindingPersistence: 'durable',
     holderType: 'durable_chat',
@@ -131,34 +152,42 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
     boundAt: held.owner.boundAt,
   });
 
-  const offer = await replacement.ugk_work_takeover({
+  await assert.rejects(replacement.ugk_work_takeover({
     sessionId: held.sessionId,
     clientRequestId: 'takeover-offer-b',
     expectedRevision: held.revision,
+  }), /CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED/);
+  const legacyBypass = await fetch(`${fixture.baseUrl()}/api/v1/mcp/work/takeover`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json',
+      'x-ugk-conversation': Buffer.from(JSON.stringify({ host: 'zcode', id: 'chat-b' })).toString('base64url') },
+    body: JSON.stringify({ sessionId: held.sessionId, clientRequestId: 'legacy-direct-takeover',
+      expectedRevision: held.revision, confirmationRequestId: 'old-confirmation', mcpWorkingDirectory: fixture.root }),
   });
-  assert.equal(offer.status, 'confirmation_required');
-  assert.equal(offer.requiresUserConfirmation, true);
-  assert.equal(offer.confirmationRequestId, 'takeover-offer-b');
-  assert.equal(offer.expectedRevision, initialized.revision);
+  assert.equal((await legacyBypass.json()).code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+  const offer = await authorizeTransfer(fixture, held, 'takeover-authorize-b', {
+    targetHost: 'zcode', targetConversationId: 'chat-b',
+  });
+  const frozen = await original.ugk_work_context({});
+  assert.equal(frozen.canContinue, false);
+  assert.equal(frozen.latestNode.type, 'transfer_authorized');
+  assert.equal(frozen.latestNode.summary, '用户在工作台授权转交，等待新的聊天接手。');
 
-  // An offer belongs to one exact current conversation and remains safe if
-  // the local Cockpit process exits before the user answers it.
+  // Platform authorization is target-bound and survives service replacement.
   await fixture.restart();
   await assert.rejects(handlers('chat-c').ugk_work_takeover({
     sessionId: held.sessionId,
     clientRequestId: 'takeover-wrong-chat',
-    expectedRevision: held.revision,
-    confirmationRequestId: offer.confirmationRequestId,
-  }), /CONVERSATION_TAKEOVER_STALE/);
+    transferCode: offer.transferCode,
+  }), /CONVERSATION_TRANSFER_TARGET_MISMATCH/);
 
   const accepted = await replacement.ugk_work_takeover({
     sessionId: held.sessionId,
     clientRequestId: 'takeover-confirm-b',
-    expectedRevision: held.revision,
-    confirmationRequestId: offer.confirmationRequestId,
+    transferCode: offer.transferCode,
   });
   assert.equal(accepted.takeoverAccepted, true);
-  assert.equal(accepted.revision, initialized.revision + 1);
+  assert.equal(accepted.revision, initialized.revision + 2);
   await assert.rejects(original.ugk_work_progress({
     sessionId: held.sessionId,
     clientRequestId: 'old-chat-progress',
@@ -174,11 +203,13 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
   assert.equal(owner.owner_host, 'zcode');
   assert.equal(owner.owner_locator, 'chat-b');
   const audit = state.prepare(`SELECT status, summary, expected_revision, revision
-    FROM progress_events WHERE client_request_id = ?`).get('takeover-confirm-b');
+    FROM progress_events WHERE client_request_id = ?`).get(`conversation.transfer.consume.${held.sessionId}.takeover-confirm-b`);
   assert.equal(audit.status, 'working');
-  assert.equal(audit.summary, '用户确认：由新的 AI 聊天接手当前工作会话。');
-  assert.equal(audit.expected_revision, initialized.revision);
+  assert.equal(audit.summary, '新的聊天已通过工作台授权接手。');
+  assert.equal(audit.expected_revision, offer.revision);
   assert.equal(audit.revision, accepted.revision);
+  assert.ok(state.prepare('SELECT request_json, response_json FROM commands').all()
+    .every(row => !JSON.stringify(row).includes(offer.transferCode)));
   state.close();
 
   // The user may choose to make a new C after B has explicitly taken over.
@@ -199,7 +230,7 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
   assert.equal(staleReplacement.bindingReason, 'replaced');
   assert.equal(staleReplacement.owner.conversationLocator, 'chat-c');
   assert.deepEqual(staleReplacement.availableActions, [
-    'return_to_owner', 'request_takeover', 'takeover_then_relay',
+    'return_to_owner', 'open_workbench_transfer',
   ]);
 });
 
@@ -209,17 +240,26 @@ test('connection-only MCP bindings survive a service restart as a recoverable he
     baseUrl: fixture.baseUrl(),
     workingDirectory: fixture.root,
   });
-  const firstConnection = connection();
+  const firstConnection = createServiceHandlers({
+    baseUrl: fixture.baseUrl(), workingDirectory: fixture.root,
+    conversationIdentity: { host: 'fixture', id: 'pre-upgrade-holder' },
+  });
   const initialized = await firstConnection.ugk_work_init({
     initCode: fixture.initCode,
     clientRequestId: 'connection-init',
     currentTask: '恢复无聊天 ID 的连接',
     currentState: '此前 MCP 连接正在工作',
   });
+  const historicalDb = openCockpitDatabase(fixture.dbPath, { migrate: false });
+  // Only this temporary fixture simulates the metadata unavailable in v24.
+  historicalDb.prepare(`UPDATE conversation_bindings SET conversation_key = ?, binding_kind = 'connection',
+    owner_host = NULL, owner_locator = NULL WHERE session_id = ?`)
+    .run(conversationKey({ host: 'ugk-mcp-connection', id: 'historical-principal' }), initialized.sessionId);
+  historicalDb.close();
 
   await fixture.restart();
-  const afterRestart = connection();
-  const held = await afterRestart.ugk_work_context({});
+  const anonymousAfterRestart = connection();
+  const held = await anonymousAfterRestart.ugk_work_context({});
   assert.equal(held.bindingReason, 'held_by_another_chat');
   assert.equal(held.owner.bindingPersistence, 'connection_only');
   assert.equal(held.owner.holderType, 'previous_mcp_connection');
@@ -228,17 +268,18 @@ test('connection-only MCP bindings survive a service restart as a recoverable he
   assert.equal(held.owner.task, '恢复无聊天 ID 的连接');
   assert.equal(held.revision, initialized.revision);
 
-  const offer = await afterRestart.ugk_work_takeover({
-    sessionId: held.sessionId,
-    clientRequestId: 'connection-takeover-offer',
-    expectedRevision: held.revision,
+  const offer = await authorizeTransfer(fixture, held, 'connection-takeover-authorize');
+  await assert.rejects(anonymousAfterRestart.ugk_work_takeover({
+    sessionId: held.sessionId, clientRequestId: 'connection-anonymous-consume', transferCode: offer.transferCode,
+  }), /CONVERSATION_IDENTITY_REQUIRED/);
+  const afterRestart = createServiceHandlers({
+    baseUrl: fixture.baseUrl(), workingDirectory: fixture.root,
+    conversationIdentity: { host: 'zcode', id: 'recovered-chat' },
   });
-  assert.equal(offer.requiresUserConfirmation, true);
   const accepted = await afterRestart.ugk_work_takeover({
     sessionId: held.sessionId,
     clientRequestId: 'connection-takeover-confirm',
-    expectedRevision: held.revision,
-    confirmationRequestId: offer.confirmationRequestId,
+    transferCode: offer.transferCode,
   });
   assert.equal(accepted.takeoverAccepted, true);
   assert.equal(accepted.binding.relayId, null);
@@ -288,7 +329,7 @@ for (const identityMode of ['host', 'connection']) {
     const fixture = await createFixture(t);
     const connection = (id) => createServiceHandlers({
       baseUrl: fixture.baseUrl(), workingDirectory: fixture.root,
-      ...(identityMode === 'host' ? { conversationIdentity: { host: 'test', id } } : {}),
+      conversationIdentity: { host: 'test', id },
       fetchImpl: (url, options) => fetch(url, {
         ...options, headers: { ...options.headers, connection: 'close' },
       }),
@@ -305,18 +346,28 @@ for (const identityMode of ['host', 'connection']) {
       lastResume = { continueCode: prepared.continueCode, clientRequestId: `history-resume-${index}` };
       current = await holder.ugk_work_resume(lastResume);
     }
-    const replacement = connection('takeover');
-    const offer = await replacement.ugk_work_takeover({ sessionId: current.sessionId,
-      expectedRevision: current.revision, clientRequestId: 'history-offer' });
-    const confirmation = { sessionId: current.sessionId, expectedRevision: current.revision,
-      clientRequestId: 'history-confirm', confirmationRequestId: offer.confirmationRequestId };
+    if (identityMode === 'connection') {
+      const historicalDb = openCockpitDatabase(fixture.dbPath, { migrate: false });
+      for (const row of historicalDb.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ?').all(current.sessionId)) {
+        historicalDb.prepare(`UPDATE conversation_bindings SET conversation_key = ?, binding_kind = 'connection',
+          owner_host = NULL, owner_locator = NULL WHERE session_id = ? AND conversation_key = ?`)
+          .run(conversationKey({ host: 'ugk-mcp-connection', id: row.conversation_key }), current.sessionId, row.conversation_key);
+      }
+      historicalDb.close();
+    }
+    const replacement = createServiceHandlers({ baseUrl: fixture.baseUrl(), workingDirectory: fixture.root,
+      conversationIdentity: { host: 'test', id: 'takeover' },
+      fetchImpl: (url, options) => fetch(url, { ...options, headers: { ...options.headers, connection: 'close' } }),
+    });
+    const offer = await authorizeTransfer(fixture, current, 'history-authorize');
+    const confirmation = { sessionId: current.sessionId,
+      clientRequestId: 'history-confirm', transferCode: offer.transferCode };
     const accepted = await replacement.ugk_work_takeover(confirmation);
     assert.equal(accepted.takeoverAccepted, true);
     assert.equal(accepted.binding.relayId, null);
     assert.equal(accepted.capabilities.writeSession, true);
 
-    // These are the already persisted takeover rows produced by older versions.
-    // Recovery must neither rewrite their history nor require another takeover.
+    // Historical relay rows must remain untouched by recovery after transfer.
     const snapshot = () => {
       const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
       try {
@@ -387,7 +438,7 @@ for (const identityMode of ['host', 'connection']) {
   });
 }
 
-test('a process kill before takeover transaction commit leaves the old holder intact and the confirmation retryable', async (t) => {
+test('legacy core takeover: process kill before commit leaves historical holder intact and confirmation retryable', async (t) => {
   const fixture = await createFixture(t, '验证接手进程中断');
   const original = createServiceHandlers({
     token: TOKEN,

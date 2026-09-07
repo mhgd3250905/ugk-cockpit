@@ -64,6 +64,24 @@ async function jsonFetch(service, pathname, body, token = TOKEN) {
   return { response, body: await response.json() };
 }
 
+async function authorizeTransfer(service, fixture, session, clientRequestId) {
+  const baseUrl = `http://${service.host}:${service.port}`;
+  const shell = await fetch(baseUrl + '/');
+  const cookie = shell.headers.get('set-cookie')?.split(';')[0];
+  assert.ok(cookie);
+  const response = await fetch(`${baseUrl}/api/v1/projects/${fixture.project.projectId}/conversation-control/${session.sessionId}/transfer`, {
+    method: 'POST',
+    headers: { cookie, origin: baseUrl, 'sec-fetch-site': 'same-origin',
+      'x-ugk-client-id': 'continuity-transfer-browser-test', 'content-type': 'application/json' },
+    body: JSON.stringify({ clientRequestId, expectedRevision: session.revision }),
+  });
+  const result = await response.json();
+  assert.ok(response.ok, JSON.stringify(result));
+  assert.equal(result.revision, session.revision + 1);
+  assert.ok(result.transferCode);
+  return result;
+}
+
 function relayFields() {
   return {
     nextSessionFocus: '在新的 AI 聊天继续工作',
@@ -78,14 +96,16 @@ function relayFields() {
   };
 }
 
-test('scoped MCP connection handle preserves an anonymous bridge binding across service restart', async () => {
+test('scoped handle preserves historical anonymous identity across restart without permitting unidentified writes', async () => {
   const fixture = await createRegisteredFixture();
   let service = await createCockpitHttpServer({ dbPath: fixture.dbPath, token: TOKEN });
   try {
-    const fetchImpl = (url, options) => fetch(url, {
-      ...options,
-      headers: { ...options.headers, connection: 'close' },
-    });
+    let connectionHandle;
+    const fetchImpl = async (url, options) => {
+      const response = await fetch(url, { ...options, headers: { ...options.headers, connection: 'close' } });
+      if (url.pathname === '/api/v1/mcp/session' && response.ok) connectionHandle = (await response.clone().json()).connectionHandle;
+      return response;
+    };
     const handler = () => createServiceHandlers({
       baseUrl: `http://127.0.0.1:${service.port}`,
       workingDirectory: fixture.root,
@@ -99,26 +119,46 @@ test('scoped MCP connection handle preserves an anonymous bridge binding across 
     });
     const initCode = assignment.body.message.match(/initCode: "([^"]+)"/)[1];
     const live = handler();
-    const initialized = await live.ugk_work_init({
+    const initialized = await createServiceHandlers({ token: TOKEN,
+      baseUrl: `http://127.0.0.1:${service.port}`, workingDirectory: fixture.root,
+      conversationIdentity: { host: 'fixture', id: 'historical-source' },
+    }).ugk_work_init({
       initCode,
       clientRequestId: 'continuity-init',
       currentTask: 'Preserve bridge identity',
       currentState: 'Connected',
     });
-    assert.equal(initialized.bindingKind, 'connection');
-    assert.equal(initialized.bindingPersistence, 'connection_only');
+    await live.ugk_work_context({});
+    assert.ok(connectionHandle);
+    const principalHash = createHash('sha256')
+      .update(`ugk-cockpit:mcp-connection-principal:v1\0${connectionHandle.split('.')[1]}`).digest('hex');
+    const historicalKey = conversationKey({ host: 'ugk-mcp-connection', id: principalHash });
+    const historicalDb = openCockpitDatabase(fixture.dbPath, { migrate: false });
+    // Isolated v24 fixture: historical unknown metadata must not be inferred.
+    historicalDb.prepare(`UPDATE conversation_bindings SET conversation_key = ?, binding_kind = 'connection',
+      owner_host = NULL, owner_locator = NULL WHERE session_id = ?`).run(historicalKey, initialized.sessionId);
+    const nodeCount = historicalDb.prepare('SELECT count(*) n FROM work_session_nodes').get().n;
+    historicalDb.close();
     const restartPort = service.port;
     await service.close();
     service = await createCockpitHttpServer({ dbPath: fixture.dbPath, token: TOKEN, port: restartPort });
 
-    const progressed = await live.ugk_work_progress({
+    const current = await live.ugk_work_context({});
+    assert.equal(current.sessionId, initialized.sessionId);
+    assert.equal(current.bindingKind, 'connection');
+    assert.equal(current.canContinue, false);
+    await assert.rejects(live.ugk_work_progress({
       sessionId: initialized.sessionId,
       clientRequestId: 'continuity-progress',
       expectedRevision: initialized.revision,
       status: 'working',
       summary: 'Restart preserved the connection binding',
-    });
-    assert.equal(progressed.revision, initialized.revision + 1);
+    }), /CONVERSATION_IDENTITY_REQUIRED/);
+    const preservedDb = openCockpitDatabase(fixture.dbPath, { migrate: false });
+    assert.equal(preservedDb.prepare('SELECT count(*) n FROM work_session_nodes').get().n, nodeCount);
+    assert.equal(preservedDb.prepare('SELECT revision FROM runs WHERE id = ?').get(initialized.sessionId).revision, initialized.revision);
+    assert.equal(preservedDb.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ?').get(initialized.sessionId).conversation_key, historicalKey);
+    preservedDb.close();
     const newBridge = handler();
     const held = await newBridge.ugk_work_context({});
     assert.equal(held.bindingKind, 'connection');
@@ -177,7 +217,7 @@ test('a changed service-token signing key explicitly rejects an old connection h
   }
 });
 
-test('a legacy scoped client without handle negotiation keeps its token-level binding', async () => {
+test('legacy token-level binding remains readable but cannot create unidentified workflow nodes', async () => {
   const fixture = await createRegisteredFixture();
   let service = await createCockpitHttpServer({ dbPath: fixture.dbPath, token: TOKEN });
   try {
@@ -196,6 +236,7 @@ test('a legacy scoped client without handle negotiation keeps its token-level bi
         headers: {
           authorization: `Bearer ${session.body.token}`,
           'content-type': 'application/json',
+          'x-ugk-conversation': Buffer.from(JSON.stringify({ host: 'fixture', id: 'legacy-source' })).toString('base64url'),
         },
         body: JSON.stringify({
           initCode,
@@ -208,9 +249,7 @@ test('a legacy scoped client without handle negotiation keeps its token-level bi
     );
     const initialized = await initializedResponse.json();
     assert.equal(initializedResponse.status, 200);
-    assert.equal(initialized.bindingKind, 'connection');
-    await service.close();
-    service = null;
+    assert.equal(initialized.bindingKind, 'host');
 
     const db = openCockpitDatabase(fixture.dbPath);
     try {
@@ -218,10 +257,21 @@ test('a legacy scoped client without handle negotiation keeps its token-level bi
         .update(`mcp:${session.body.token}`)
         .digest('hex');
       const legacyKey = conversationKey({ host: 'ugk-mcp-connection', id: principalHash });
+      db.prepare(`UPDATE conversation_bindings SET conversation_key = ?, binding_kind = 'connection',
+        owner_host = NULL, owner_locator = NULL WHERE session_id = ?`).run(legacyKey, initialized.sessionId);
       const binding = db.prepare(`
         SELECT binding_kind FROM conversation_bindings WHERE conversation_key = ?
       `).get(legacyKey);
       assert.equal(binding.binding_kind, 'connection');
+      const current = await jsonFetch(service, '/api/v1/mcp/work/context', { mcpWorkingDirectory: fixture.root }, session.body.token);
+      assert.equal(current.response.status, 200);
+      assert.equal(current.body.canContinue, false);
+      const rejected = await jsonFetch(service, '/api/v1/mcp/work/progress', {
+        sessionId: initialized.sessionId, expectedRevision: initialized.revision,
+        clientRequestId: 'legacy-unidentified-write', status: 'working', summary: 'Must not write',
+      }, session.body.token);
+      assert.equal(rejected.body.code, 'CONVERSATION_IDENTITY_REQUIRED');
+      assert.equal(db.prepare('SELECT revision FROM runs WHERE id = ?').get(initialized.sessionId).revision, initialized.revision);
     } finally {
       db.close();
     }
@@ -285,16 +335,11 @@ test('resume receipts keep current capabilities after progress and lose them aft
 
     const replacement = handlers('chat-b');
     const held = await replacement.ugk_work_context({});
-    const offer = await replacement.ugk_work_takeover({
-      sessionId: held.sessionId,
-      expectedRevision: progressed.revision,
-      clientRequestId: 'resume-replay-takeover-offer',
-    });
+    const offer = await authorizeTransfer(service, fixture, held, 'resume-replay-takeover-authorize');
     const takeover = await replacement.ugk_work_takeover({
       sessionId: held.sessionId,
-      expectedRevision: progressed.revision,
       clientRequestId: 'resume-replay-takeover-confirm',
-      confirmationRequestId: offer.confirmationRequestId,
+      transferCode: offer.transferCode,
     });
     const revokedReplay = await original.ugk_work_resume(resumeRequest);
     assert.equal(revokedReplay.status, 'active');
@@ -350,16 +395,11 @@ test('takeover receipts do not regain write capability after replacement or fini
     });
     const original = handlers('chat-a');
     const held = await original.ugk_work_context({});
-    const offer = await original.ugk_work_takeover({
-      sessionId: held.sessionId,
-      expectedRevision: held.revision,
-      clientRequestId: 'takeover-replay-a-offer',
-    });
+    const offer = await authorizeTransfer(service, fixture, held, 'takeover-replay-a-authorize');
     const takeoverRequest = {
       sessionId: held.sessionId,
-      expectedRevision: held.revision,
       clientRequestId: 'takeover-replay-a-confirm',
-      confirmationRequestId: offer.confirmationRequestId,
+      transferCode: offer.transferCode,
     };
     const accepted = await original.ugk_work_takeover(takeoverRequest);
     const progressed = await original.ugk_work_progress({
@@ -376,16 +416,11 @@ test('takeover receipts do not regain write capability after replacement or fini
 
     const replacement = handlers('chat-b');
     const replacementContext = await replacement.ugk_work_context({});
-    const replacementOffer = await replacement.ugk_work_takeover({
-      sessionId: replacementContext.sessionId,
-      expectedRevision: progressed.revision,
-      clientRequestId: 'takeover-replay-b-offer',
-    });
+    const replacementOffer = await authorizeTransfer(service, fixture, replacementContext, 'takeover-replay-b-authorize');
     const replacementRequest = {
       sessionId: replacementContext.sessionId,
-      expectedRevision: progressed.revision,
       clientRequestId: 'takeover-replay-b-confirm',
-      confirmationRequestId: replacementOffer.confirmationRequestId,
+      transferCode: replacementOffer.transferCode,
     };
     const replacementAccepted = await replacement.ugk_work_takeover(replacementRequest);
     const revokedReplay = await original.ugk_work_takeover(takeoverRequest);
@@ -454,16 +489,11 @@ test('old-holder MCP errors retain safe context and project diagnostics stay iso
     });
     const replacement = handlers(fixture.root, 'chat-b');
     const held = await replacement.ugk_work_context({});
-    const offer = await replacement.ugk_work_takeover({
-      sessionId: held.sessionId,
-      expectedRevision: held.revision,
-      clientRequestId: 'diagnostics-takeover-offer',
-    });
+    const offer = await authorizeTransfer(service, fixture, held, 'diagnostics-takeover-authorize');
     const accepted = await replacement.ugk_work_takeover({
       sessionId: held.sessionId,
-      expectedRevision: held.revision,
       clientRequestId: 'diagnostics-takeover-confirm',
-      confirmationRequestId: offer.confirmationRequestId,
+      transferCode: offer.transferCode,
     });
 
     const otherAssignment = await jsonFetch(
@@ -511,6 +541,18 @@ test('old-holder MCP errors retain safe context and project diagnostics stay iso
     assert.equal(errorPayload.revision, accepted.revision);
     assert.equal(errorPayload.bindingReason, 'replaced');
     assert.equal(errorPayload.reason, 'replaced');
+    assert.equal(errorPayload.projectId, fixture.project.projectId);
+    assert.equal(errorPayload.worktreeId, accepted.worktreeId);
+    assert.equal(errorPayload.owner.host, 'codex');
+    assert.equal(errorPayload.owner.conversationLocator, 'chat-b');
+    assert.equal(errorPayload.latestNode.type, 'takeover');
+    assert.equal(errorPayload.latestNode.actorHost, 'codex');
+    assert.equal(errorPayload.latestNode.actorConversationId, 'chat-b');
+    assert.match(errorPayload.latestNode.summary, /接手/);
+    assert.equal(errorPayload.status, 'active');
+    assert.equal(errorPayload.canContinue, false);
+    assert.equal(errorPayload.recoveryAction, 'open_workbench_transfer');
+    assert.ok(!rpcResponse.result.content[0].text.includes(offer.transferCode));
     assert.match(errorPayload.diagnosticId, /^diag_[A-Za-z0-9_-]{16,64}$/);
     assert.doesNotMatch(rpcResponse.result.content[0].text, /Conversation binding is missing or stale/);
 
@@ -622,6 +664,11 @@ test('stdio preserves the safe diagnostic contract for ordinary service failures
           required_action: '请先查询当前工作会话。',
           reason: 'held_by_another_chat',
           diagnosticId: 'diag_1234567890abcdef',
+          owner: { host: 'zcode', conversationLocator: 'sess-current', holderType: 'durable_chat',
+            bindingPersistence: 'durable', transferCode: 'must-not-leak-owner-secret', privatePath: 'private-owner-path' },
+          latestNode: { id: 'node-current', type: 'takeover', actorKind: 'ai', actorHost: 'zcode',
+            actorConversationId: 'sess-current', summary: 'Current chat took over',
+            rawCommand: { token: 'must-not-leak-node-secret' } },
         });
       },
     },
@@ -634,6 +681,12 @@ test('stdio preserves the safe diagnostic contract for ordinary service failures
   assert.equal(payload.diagnosticId, 'diag_1234567890abcdef');
   assert.equal(payload.impact, '代码和已有记录没有被修改。');
   assert.equal(payload.required_action, '请先查询当前工作会话。');
+  assert.equal(payload.owner.conversationLocator, 'sess-current');
+  assert.equal(payload.latestNode.actorConversationId, 'sess-current');
+  assert.equal(payload.owner.transferCode, undefined);
+  assert.equal(payload.owner.privatePath, undefined);
+  assert.equal(payload.latestNode.rawCommand, undefined);
+  assert.doesNotMatch(response.result.content[0].text, /must-not-leak|private-owner-path/);
   assert.doesNotMatch(response.result.content[0].text, /private backend exception/);
 });
 

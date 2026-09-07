@@ -82,12 +82,12 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
   assert.deepEqual(contextTool.inputSchema.required ?? [], []);
   const takeoverTool = TOOLS.find((tool) => tool.name === 'ugk_work_takeover');
   assert.deepEqual(Object.keys(takeoverTool.inputSchema.properties), [
-    'sessionId', 'clientRequestId', 'expectedRevision', 'confirmationRequestId',
+    'sessionId', 'clientRequestId', 'transferCode',
   ]);
   assert.deepEqual(takeoverTool.inputSchema.required, [
-    'sessionId', 'clientRequestId', 'expectedRevision',
+    'sessionId', 'clientRequestId', 'transferCode',
   ]);
-  assert.match(takeoverTool.description, /another chat.*holds.*explicitly/i);
+  assert.match(takeoverTool.description, /one-time transferCode.*workbench/i);
 });
 
 test('context validation keeps confirmation fields optional but paired', async () => {
@@ -117,7 +117,7 @@ test('context validation keeps confirmation fields optional but paired', async (
   assert.deepEqual(received, [{ confirmSessionId: 'session-1', expectedRevision: 4 }]);
 });
 
-test('takeover validation requires a current revision and a distinct confirmation request', async () => {
+test('takeover requires workbench authorization and rejects the old chat confirmation route', async () => {
   const invalid = await dispatchMessage({
     jsonrpc: '2.0', id: 'takeover-invalid', method: 'tools/call',
     params: { name: 'ugk_work_takeover', arguments: {
@@ -125,14 +125,13 @@ test('takeover validation requires a current revision and a distinct confirmatio
     } },
   });
   assert.equal(invalid.result.isError, true);
-  assert.match(invalid.result.content[0].text, /new clientRequestId/);
+  assert.match(invalid.result.content[0].text, /Unexpected property/);
 
   const received = [];
   const valid = await dispatchMessage({
     jsonrpc: '2.0', id: 'takeover-valid', method: 'tools/call',
     params: { name: 'ugk_work_takeover', arguments: {
-      sessionId: 'session-1', clientRequestId: 'confirm-2', expectedRevision: 7,
-      confirmationRequestId: 'offer-1',
+      sessionId: 'session-1', clientRequestId: 'consume-2', transferCode: 'workbench-issued-code',
     } },
   }, { handlers: { ugk_work_takeover: async (args) => {
     received.push(args);
@@ -140,8 +139,7 @@ test('takeover validation requires a current revision and a distinct confirmatio
   } } });
   assert.equal(valid.result.content[0].text, JSON.stringify({ ok: true, takeoverAccepted: true }));
   assert.deepEqual(received, [{
-    sessionId: 'session-1', clientRequestId: 'confirm-2', expectedRevision: 7,
-    confirmationRequestId: 'offer-1',
+    sessionId: 'session-1', clientRequestId: 'consume-2', transferCode: 'workbench-issued-code',
   }]);
 });
 

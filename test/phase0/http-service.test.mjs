@@ -154,6 +154,16 @@ test('local MCP bootstrap rejects web origins and issues a token scoped away fro
       'content-type': 'application/json',
     },
     body: '{}',
+  }), 409, 'CONVERSATION_IDENTITY_REQUIRED');
+
+  await assertUserError(await request(service, '/api/v1/mcp/work/progress', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${issued.token}`,
+      'content-type': 'application/json',
+      'x-ugk-conversation': Buffer.from(JSON.stringify({ host: 'test', id: 'bootstrap-chat' })).toString('base64url'),
+    },
+    body: '{}',
   }), 400, 'INVALID_REQUEST');
 });
 

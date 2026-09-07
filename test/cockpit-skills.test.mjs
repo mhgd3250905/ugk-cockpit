@@ -258,14 +258,14 @@ test('cockpit-relay defines two explicit modes and precise success reporting cri
   }
   assert.doesNotMatch(instructions, /"reason"|"nextTask"/);
 
-  // Initial resume remains minimal; expired recovery requires explicit confirmation.
+  // Initial resume remains minimal; expired recovery requires workbench authorization.
   const resumeSection = instructions.split(/## 模式二：恢复接力/)[1] || '';
   assert.match(resumeSection, /"continueCode"/);
   assert.match(resumeSection, /"clientRequestId"/);
   assert.doesNotMatch(resumeSection, /"currentTask"|"currentState"|"expectedRevision"/);
   assert.match(resumeSection, /confirmation_required/);
-  assert.match(resumeSection, /只有用户明确同意后/);
-  assert.match(resumeSection, /confirmationRequestId.*expectedRevision/);
+  assert.match(resumeSection, /工作台.*授权转交/);
+  assert.match(resumeSection, /不继续旧的聊天内确认流程/);
   assert.match(resumeSection, /RELAY_TRANSPORT_UNCERTAIN/);
   assert.match(resumeSection, /再次工作前先补办恢复/);
 

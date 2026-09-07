@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 24;
+export const SUPPORTED_SCHEMA_VERSION = 25;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -791,6 +791,83 @@ ALTER TABLE conversation_bindings
 ALTER TABLE conversation_bindings ADD COLUMN owner_host TEXT;
 ALTER TABLE conversation_bindings ADD COLUMN owner_locator TEXT;
 `,
+  },
+  {
+    version: 25,
+    name: 'workbench-conversation-transfers',
+    sql: `
+CREATE TABLE IF NOT EXISTS conversation_transfers (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES assignments(session_id),
+  worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'consumed', 'cancelled', 'superseded')),
+  code_hash TEXT NOT NULL UNIQUE,
+  issued_revision INTEGER NOT NULL,
+  previous_owner_key TEXT NOT NULL,
+  target_host TEXT,
+  target_conversation_id TEXT,
+  expires_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  consumed_by TEXT
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_transfer_pending ON conversation_transfers(session_id) WHERE state = 'pending';
+`,
+    apply(db) {
+      // Historical migration fixtures may contain only the subsystem under
+      // migration. Do not invent absent command history in those partial DBs.
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'commands'").get()) return;
+      const columns = new Set(db.prepare('PRAGMA table_info(commands)').all().map((row) => row.name));
+      for (const name of ['actor_host', 'actor_conversation_id', 'actor_kind']) {
+        if (!columns.has(name)) db.exec(`ALTER TABLE commands ADD COLUMN ${name} TEXT;`);
+      }
+      // Index committed workflow commands, never infer historical actors. Existing
+      // events remain legacy history; only post-upgrade commits create nodes.
+      db.exec(`
+CREATE TABLE IF NOT EXISTS work_session_nodes (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),
+  predecessor_id TEXT REFERENCES work_session_nodes(id),
+  type TEXT NOT NULL,
+  actor_kind TEXT NOT NULL,
+  actor_host TEXT,
+  actor_conversation_id TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS work_session_nodes_chain ON work_session_nodes(session_id, sequence DESC);
+CREATE TRIGGER IF NOT EXISTS work_session_node_on_commit
+AFTER UPDATE OF state ON commands
+WHEN NEW.state = 'committed' AND OLD.state <> 'committed'
+  AND NEW.run_id IS NOT NULL
+  AND json_extract(NEW.response_json, '$.ok') = 1
+  AND COALESCE(json_extract(NEW.response_json, '$.requiresUserConfirmation'), 0) <> 1
+  AND NOT (NEW.kind = 'assignment.complete' AND EXISTS (
+    SELECT 1 FROM handoffs WHERE session_id = NEW.run_id
+      AND client_request_id = json_extract(NEW.request_json, '$.clientRequestId')))
+  AND (NEW.kind IN ('assignment.progress', 'relay.create', 'relay.resume',
+    'conversation.transfer.issue', 'conversation.transfer.consume',
+    'conversation.transfer.cancel', 'handoff.create', 'assignment.complete')
+    OR (NEW.kind = 'conversation.takeover' AND json_extract(NEW.response_json, '$.takeoverAccepted') = 1))
+BEGIN
+  INSERT INTO work_session_nodes (id, session_id, command_id, predecessor_id, type,
+    actor_kind, actor_host, actor_conversation_id, created_at)
+  VALUES (NEW.id, NEW.run_id, NEW.id,
+    (SELECT id FROM work_session_nodes WHERE session_id = NEW.run_id ORDER BY sequence DESC LIMIT 1),
+    CASE NEW.kind
+      WHEN 'assignment.progress' THEN CASE WHEN json_extract(NEW.response_json, '$.status') = 'adopted' THEN 'init' ELSE 'progress' END
+      WHEN 'relay.create' THEN 'relay'
+      WHEN 'relay.resume' THEN 'resume'
+      WHEN 'conversation.transfer.issue' THEN 'transfer_authorized'
+      WHEN 'conversation.transfer.cancel' THEN 'transfer_cancelled'
+      WHEN 'handoff.create' THEN 'handoff'
+      WHEN 'assignment.complete' THEN 'handoff'
+      ELSE 'takeover' END,
+    COALESCE(NEW.actor_kind, 'unattributed'), NEW.actor_host, NEW.actor_conversation_id, NEW.updated_at);
+END;
+`);
+    },
   },
 ];
 

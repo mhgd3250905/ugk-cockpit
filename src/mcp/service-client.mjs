@@ -46,6 +46,8 @@ const BOOLEAN_FIELDS = [
   'localIntegrated',
   'pushed',
   'humanActionRequired',
+  'canContinue',
+  'requiresUserConfirmation',
 ];
 const SAFE_DIAGNOSTIC_ID = /^diag_[A-Za-z0-9_-]{16,64}$/;
 const SAFE_SESSION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -86,6 +88,35 @@ function copySafeConversationContext(source, payload, { includeRevision = true }
   ].find((value) => typeof value === 'string' && SAFE_REASON.test(value.trim()));
   if (bindingReason) {
     payload.bindingReason = bindingReason.trim();
+  }
+  for (const field of ['projectId', 'worktreeId']) {
+    const value = safeSessionId(source?.[field]);
+    if (value) payload[field] = value;
+  }
+  if (source?.recoveryAction === 'open_workbench_transfer') payload.recoveryAction = source.recoveryAction;
+  // Project only public locator fields. Do not forward raw bindings, command
+  // requests, authorization codes or additional nested backend properties.
+  const publicText = (value, limit) => typeof value === 'string'
+    && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+  if (source?.owner && typeof source.owner === 'object' && !Array.isArray(source.owner)) {
+    const owner = source.owner;
+    payload.owner = {
+      host: publicText(owner.host, 64),
+      conversationLocator: publicText(owner.conversationLocator, 256),
+      holderType: ['durable_chat', 'previous_mcp_connection'].includes(owner.holderType) ? owner.holderType : null,
+      bindingPersistence: SAFE_BINDING_PERSISTENCE.has(owner.bindingPersistence) ? owner.bindingPersistence : null,
+      boundAt: publicText(owner.boundAt, 64), lastActivityAt: publicText(owner.lastActivityAt, 64),
+    };
+  }
+  if (source?.latestNode && typeof source.latestNode === 'object' && !Array.isArray(source.latestNode)) {
+    const node = source.latestNode;
+    payload.latestNode = {
+      id: publicText(node.id, 512), type: publicText(node.type, 64), predecessorId: publicText(node.predecessorId, 512),
+      actorKind: ['ai', 'user', 'system', 'unattributed'].includes(node.actorKind) ? node.actorKind : null,
+      actorHost: publicText(node.actorHost, 64), actorConversationId: publicText(node.actorConversationId, 256),
+      summary: typeof node.summary === 'string' ? node.summary.slice(0, 500) : null,
+      createdAt: publicText(node.createdAt, 64),
+    };
   }
   return payload;
 }

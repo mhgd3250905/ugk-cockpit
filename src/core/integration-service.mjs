@@ -188,6 +188,7 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   if (!descendant) return { ok: false, code: 'SOURCE_NOT_FAST_FORWARD' };
   }
 
+  options.assertSessionWrite?.(sessionId);
   const claimed = claimSubmission(db, {
     commandId,
     submissionId,
@@ -201,6 +202,7 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   if (deliveryReview) {
     try {
       deliveryReview = await verifyReviewDelivery(refreshed, binding.project, { prepare: true });
+      options.assertSessionWrite?.(sessionId);
       db.prepare('UPDATE submissions SET delivery_json = ? WHERE id = ?').run(
         JSON.stringify({ ...refreshed.delivery, reviewCache: deliveryReview.cache }), submissionId);
     } catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED', claimId: claimed.claimId }; }
@@ -336,6 +338,7 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
     }
   }
 
+  options.assertSessionWrite?.(sessionId);
   const result = recordIntegrationReview(db, {
     commandId,
     claimId,
@@ -445,6 +448,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
   const binding = readMainBinding(db, sessionId, expectedRevision, { recovering: Boolean(attempt) });
   if (!binding.ok) return attempt ? binding : failCommand(db, commandId, binding, options);
   const assertWriteOwner = () => {
+    options.assertSessionWrite?.(sessionId);
     const current = readMainBinding(db, sessionId, expectedRevision, { recovering: true });
     const claim = readIntegrationClaim(db, claimId);
     if (!current.ok || current.context.worktreeId !== binding.context.worktreeId
@@ -611,6 +615,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     }
 
     if (attempt.state === 'pushed') {
+      options.assertSessionWrite?.(sessionId);
       const receipt = recordIntegrationReceipt(db, {
         commandId: `integration_receipt:${commandId}`,
         submissionId,

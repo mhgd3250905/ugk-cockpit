@@ -65,6 +65,7 @@ test('a live MCP handler renews its scoped credential after the HTTP service res
     const responses = [];
     const handlers = createServiceHandlers({
       baseUrl: `http://127.0.0.1:${port}`,
+      conversationIdentity: { host: 'test', id: 'credential-renewal' },
       fetchImpl: async (url, request) => {
         // Isolate credential renewal from an old keep-alive socket being closed
         // at the exact instant of restart; uncertain transport errors stay errors.

@@ -119,6 +119,34 @@ async function fixture(t, { withRemote = true } = {}) {
   };
 }
 
+test('transfer freeze rechecks before stage, commit and push', async (t) => {
+  for (const frozenAt of ['stage', 'commit', 'push']) {
+    const f = await fixture(t);
+    writeFileSync(path.join(f.spacePath, 'freeze.txt'), 'preserved\n');
+    let frozen = false;
+    let stages = 0;
+    let commits = 0;
+    let pushes = 0;
+    const result = await submitDevelopmentSpace(f.db, {
+      commandId: `freeze-${frozenAt}`, sessionId: f.sessionId, expectedRevision: 2, summary: '冻结边界',
+    }, {
+      assertSessionWrite() {
+        if (frozen) throw Object.assign(new Error('frozen'), { code: 'CONVERSATION_BINDING_CONFLICT' });
+      },
+      ensureLocalCommitIdentity: async () => { frozen = frozenAt === 'stage'; return { name: 'Test', email: 'test@example.invalid' }; },
+      stageAllChanges: async () => { stages += 1; frozen = frozenAt === 'commit'; },
+      createSubmissionCommit: async () => { commits += 1; git(f.spacePath, ['add', '.']); git(f.spacePath, ['commit', '-m', `test\n\nUGK-Cockpit-Command: freeze-${frozenAt}`]); },
+      faultInjector(point) { if (point === 'after_commit_before_persist' && frozenAt === 'push') frozen = true; },
+      pushSubmissionBranch: async () => { pushes += 1; },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'CONVERSATION_BINDING_CONFLICT');
+    assert.equal(pushes, 0);
+    if (frozenAt === 'stage') assert.equal(stages, 0);
+    if (frozenAt !== 'push') { assert.equal(commits, 0); assert.equal(git(f.spacePath, ['rev-parse', 'HEAD']), f.baseHead); }
+  }
+});
+
 test('dirty development space is committed, pushed, recorded, and replayed idempotently', async (t) => {
   const f = await fixture(t);
   writeFileSync(path.join(f.spacePath, 'feature.txt'), 'done\n');
@@ -269,4 +297,3 @@ test('COMMIT_IDENTITY_MISSING is preserved by submitDevelopmentSpace without bei
   const attempt = readSubmissionAttempt(f.db, 'submit-identity-missing');
   assert.equal(attempt.lastErrorCode, 'COMMIT_IDENTITY_MISSING');
 });
-
