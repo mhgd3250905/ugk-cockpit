@@ -56,7 +56,7 @@ handle 当前只保存在 bridge 进程内：本轮解决同一 bridge 的短期
 
 ## 审查 finding 关闭证据（2026-09-07）
 
-- P1：HTTP 成功回执中的 `capabilities` 现在独立核对当前数据库中的精确 conversation key、session、worktree、Relay 代际、未撤销 owner 和当前会话状态。历史 receipt 的 `revision` / `acceptedRevision` 不被当作当前业务 revision 门禁；同一 owner 在普通 progress 后仍可重放历史回执，owner 被替换或会话完成后 `writeSession`、`prepareRelay` 为 false。
+- P1：HTTP 成功回执中的 `capabilities` 独立核对当前数据库中的精确 conversation key、session、worktree、未撤销 owner 和当前会话状态。早期实现还比较历史 Relay 代际，后续根因修正已移除此错误的第二授权来源，统一使用当前 owner。历史 receipt 的 `revision` / `acceptedRevision` 不被当作当前业务 revision 门禁；同一 owner 在普通 progress 后仍可重放历史回执，owner 被替换或会话完成后 `writeSession`、`prepareRelay` 为 false。
 - P2：绑定断言失败现在只携带已由数据库确认的 `sessionId`、当前 `revision`、白名单 `bindingReason` 和安全状态；全局 catch 与 stdio 只转发这些字段，不透传异常原文。诊断日志按数据库存在的 session 记录，项目接口仍按项目 assignment session 集合过滤。
 - focused 回归覆盖 `resume` 与 `takeover` 的同 owner 重放、被 B 撤权后的旧回执、完成后的能力降级，以及旧 holder progress 的真实 HTTP→MCP 错误字段、同一 `diagnosticId` 日志和跨项目不可见性；受影响范围 46/46 通过。独立复核对上述两项 finding 精确复查，连续性文件测试 9/9 通过，两项均关闭；主任务核对后接受复查结论。
 
@@ -76,3 +76,15 @@ handle 当前只保存在 bridge 进程内：本轮解决同一 bridge 的短期
 校验现在额外接受“Relay 两字段均为 null、acceptedRevision 为正整数”的接手绑定；不把这些字段当作授权，后续数据库归属检查保持不变。回归覆盖接手后空参查询、重复查询不改变 revision、四种非法组合仍拒绝、旧连接写入仍拒绝以及新连接继续 progress。
 
 修正后的最终门禁：`npm test` 363/363、`npm run test:phase0` 93/93，均退出码 0；`git diff --check` 通过。仅本地验收，尚未部署到正在运行的服务。
+
+## 当前归属事实源修正（2026-09-07）
+
+现场只读证据：最后历史 Relay 是 sequence 6 / acceptedRevision 34，当前唯一未撤销 takeover 绑定无 Relay 来源、acceptedRevision 41。context 在没有发现其他 owner 时仍拿两者比较，误报 `replaced / use_latest_relay`。该现象不证明跨调用换了连接；错误来自混用历史事件与当前授权。此前 162880e 只解决请求形状校验，未覆盖有历史接力的真实场景。
+
+根因修正：提取数据库当前授权判定，由 context、能力报告和实际写入共同调用；已认证身份不再用历史 Relay 代际判定当前权限。历史记录与幂等回执保持不变，仍由事务转移、撤销记录、单一 owner 约束及业务状态/CAS 保护写入。对未迁移无身份客户端保留原有兼容规则，不允许绕过已有 owner。无需 schema 迁移或修补旧数据。
+
+验收新增 host/connection 两种身份下的六次历史 Relay、takeover 后立即查询和 progress、旧 holder 拒写、旧 resume/takeover 回执不重新授权、再次 Relay 撤销 takeover owner，以及真正替换服务进程后读回既有绑定。进程替换和只读恢复前后七张业务表逐行一致。本轮不重启实际服务、不代用户接手，完成后由用户操作。
+
+最终验证：受影响范围 17/17；`npm test` 365/365、`npm run test:phase0` 93/93，均退出码 0；`git diff --check` 通过。对正式数据库仅以只读连接核对 revision 41 的现有 owner，新授权函数返回允许该 owner，无任何业务写入。此检查不冒充原聊天的实际请求。
+
+切换后先在原聊天查询 context，能继续才用最新 revision 补记。当前身份未变化时，历史 takeover 行不需要再次确认；若旧版 bridge 因重连或 token 更新实际变成新身份，仍须按真实持有人转移流程确认，不能以本次修复绕过身份核验。该宿主稳定聊天身份适配与旧客户端升级是独立边界，本轮不宣称已经验证所有宿主连续性。

@@ -14,13 +14,19 @@ MCP 对 relay/resume/takeover 的传输错误原样自动重试一次；仍失�
 
 当前聊天必须先向用户展示该事实。用户选择回到持有人时不做写入；用户明确选择在当前聊天接手时，调用两步 `ugk_work_takeover`：第一步得到持久的 `confirmation_required`，第二步只在用户确认同一对象后使用新的 clientRequestId、原 confirmationRequestId 与同一 revision。服务在一个事务中复核 active 会话、lease、无待接 Relay、原确认属于当前聊天和 revision CAS，再递增 run/assignment revision、记录审计 progress、撤销旧绑定并建立新绑定。确认过期、其他聊天确认或出现新接力都会拒绝。接手成功后，用户若想从新聊天 C 继续，由已接手的 B 再发起普通 Relay；不会由服务静默创造或替换聊天。
 
-被新接力替代的旧聊天仍为 `stale` / `replaced`。若 context 同时显示当前 `owner`，它也可以按上述用户确认流程请求接手；没有 owner 的历史 stale 记录只能使用服务提供的最新接力线索，不能凭旧绑定自动取回。历史 relayGeneration 和 acceptedRevision 属于工作会话历史，不是当前聊天的身份凭据。Skill 要求恢复未完成时先补办恢复，不能在继续开发时遗忘失败请求。
+被新接力替代的旧聊天仍为 `stale` / `replaced`。若 context 同时显示当前 `owner`，它也可以按上述用户确认流程请求接手。已认证绑定自身未通过数据库核验时返回具体原因和 `inspect_binding`，不凭比较失败就宣称另一个聊天接手，也不建议循环接力。仅未迁移的无身份兼容客户端保留历史 bridge snapshot 的接力比对。历史 relayGeneration 和 acceptedRevision 属于工作会话历史，不是当前聊天的身份凭据。Skill 要求恢复未完成时先补办恢复，不能在继续开发时遗忘失败请求。
 
 2026-09-06 验证：会话绑定、接手、stdio 和 Skill 定向回归 31/31 通过，覆盖稳定宿主显示 A 后由 B 跨服务重启确认接手、B 再 Relay 到 C、无稳定聊天 ID 的 connection-only 重启恢复，以及接手事务提交前真实子进程终止后的原持有人保留和幂等重试。`npm run build:web` 通过。启动器已切换 alpha.38，并验证 6 个既有项目及详情；只读核对 schema 24、quick_check `ok`、6 项目/19 运行保留。未重新 init、清理、覆盖或重置任何业务项目记录。
 
 回归覆盖过期确认后真实进程 SIGKILL、进程重建重放、确认跨聊天拒绝、确认期间版本变化/新接力、HTTP 服务重启和两个聊天并发确认，以及响应体丢失后的原样重试。既有 schema 21 历史升级与归属撤销回归继续保留。
 
 工作会话、聊天绑定和 MCP 连接具有不同生命周期。项目、运行、时间线、写入归属和接力记录以 SQLite 为事实源；聊天绑定也由服务数据库持久保存，MCP 进程不再是支持身份的宿主的唯一绑定持有者。
+
+### 当前授权与历史记录分离
+
+已认证调用的 context、capabilities 与实际写入共同使用 `readConversationAuthorization`：精确 session/worktree、当前请求身份对应的绑定未撤销、该身份是此 session 唯一有效 owner、会话状态允许当前操作。Relay 和 takeover 均通过既有事务转移 owner 并撤销旧绑定；业务写入继续执行自己的 lease、revision CAS 及状态校验。历史 Relay 序号、回执 revision 和客户端缓存不再作为第二套当前授权来源。
+
+`relayId` / `relaySequence` 记录绑定的接力来源；takeover 可以没有 Relay 来源而有 `acceptedRevision`。当前有效 owner 不需要匹配最后一条历史 Relay。context 返回数据库里的真实绑定，而不是用历史 Relay 重建一份替代绑定。既有 takeover 行无需迁移、修订回执或再次接手；查询和服务启动不为修复这类历史组合改写业务数据。失效、撤销、不同会话或不同工作副本的绑定仍拒绝写入。
 
 认证主体与连接归属同样分离。匿名 MCP bridge 首次建立 scoped session 时获得 `v1.<nonce>.<hmac>` opaque connection handle；HMAC 使用现有持久服务 token 密钥并采用独立域分隔，服务只持久化不可逆的 connection principal 摘要，不保存 handle 原文。新版 bridge 通过内部 v1 能力标记使用该 handle；未声明能力的旧客户端继续按原 token-level 兼容路径工作。bridge 进程重建或服务重启时提交同一 handle 才能恢复原 connection-only binding；没有 handle 的新 bridge 只能成为新连接，不能声明旧连接。服务 token 更换会明确拒绝旧 handle。既有认证 `principalHash` 语义保持不变，连接摘要只用于连接归属键，不能替代认证或反推出 token。
 
@@ -42,7 +48,7 @@ MCP 对 relay/resume/takeover 的传输错误原样自动重试一次；仍失�
 ## 恢复、迁移与接力
 
 1. 首次 init/accept 成功建立聊天绑定；恢复 Relay 时，接力消费、revision 变更、新绑定和旧绑定撤销在同一事务中完成。恢复请求的幂等意图包含宿主聊天身份，不允许另一个聊天借相同请求 ID 认领。
-2. 同一聊天重建 MCP 或服务重启后，每次查询用宿主身份定位数据库绑定，再核对会话及接力代际。当前业务 revision 从数据库读取。
+2. 同一聊天重建 MCP 或服务重启后，每次查询用宿主身份定位数据库当前绑定，再核对精确会话、工作副本、唯一有效 owner 和业务状态。当前业务 revision 从数据库读取，不与历史接力回执 revision 混用。
 3. 同目录新聊天没有绑定，不能自动认领。旧聊天被新接力替代后，撤销记录保留；重启、查询最新 revision、重放旧 init/resume 都不能刷新旧权限。
 4. 绑定恢复定位精确 session，不能被同目录另一 active/standby 会话替代。写入入口再次核对绑定；带业务会话的写入不会因少传宿主身份退回旧授权方式。工作说明在探测完成后从数据库读取可信归属。
 5. 升级只为绑定添加持有类型和可显示定位列，不改写已有项目、运行、时间线或接力历史。旧会话在没有可靠宿主关联时保留原状态，需要一次明确确认、明确接手或正常 Relay 建立关联。不得从目录或聊天摘要批量推断历史归属。

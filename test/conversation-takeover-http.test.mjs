@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -280,6 +282,110 @@ test('connection-only MCP bindings survive a service restart as a recoverable he
   });
   assert.equal(progressed.revision, accepted.revision + 1);
 });
+
+for (const identityMode of ['host', 'connection']) {
+  test(`${identityMode} ownership after historical relays survives takeover, process replacement, and another relay`, async (t) => {
+    const fixture = await createFixture(t);
+    const connection = (id) => createServiceHandlers({
+      baseUrl: fixture.baseUrl(), workingDirectory: fixture.root,
+      ...(identityMode === 'host' ? { conversationIdentity: { host: 'test', id } } : {}),
+      fetchImpl: (url, options) => fetch(url, {
+        ...options, headers: { ...options.headers, connection: 'close' },
+      }),
+    });
+    const original = connection('original');
+    let holder = original;
+    let current = await holder.ugk_work_init({ initCode: fixture.initCode,
+      clientRequestId: 'history-init', currentTask: 'Historical relay ownership', currentState: 'active' });
+    let lastResume;
+    for (let index = 0; index < 6; index++) {
+      const prepared = await holder.ugk_work_relay({ sessionId: current.sessionId,
+        expectedRevision: current.revision, clientRequestId: `history-relay-${index}`, ...relayFields() });
+      holder = connection(`relay-${index}`);
+      lastResume = { continueCode: prepared.continueCode, clientRequestId: `history-resume-${index}` };
+      current = await holder.ugk_work_resume(lastResume);
+    }
+    const replacement = connection('takeover');
+    const offer = await replacement.ugk_work_takeover({ sessionId: current.sessionId,
+      expectedRevision: current.revision, clientRequestId: 'history-offer' });
+    const confirmation = { sessionId: current.sessionId, expectedRevision: current.revision,
+      clientRequestId: 'history-confirm', confirmationRequestId: offer.confirmationRequestId };
+    const accepted = await replacement.ugk_work_takeover(confirmation);
+    assert.equal(accepted.takeoverAccepted, true);
+    assert.equal(accepted.binding.relayId, null);
+    assert.equal(accepted.capabilities.writeSession, true);
+
+    // These are the already persisted takeover rows produced by older versions.
+    // Recovery must neither rewrite their history nor require another takeover.
+    const snapshot = () => {
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        return JSON.stringify(['projects', 'runs', 'assignments', 'relays', 'commands',
+          'progress_events', 'conversation_bindings'].map((table) =>
+          db.prepare(`SELECT * FROM ${table}`).all()));
+      } finally { db.close(); }
+    };
+    const before = snapshot();
+    const context = await replacement.ugk_work_context({});
+    assert.equal(context.canContinue, true);
+    assert.equal(context.capabilities.writeSession, true);
+    assert.equal(context.revision, accepted.revision);
+    assert.deepEqual(context.binding, accepted.binding);
+    assert.equal(snapshot(), before);
+
+    const port = Number(new URL(fixture.baseUrl()).port);
+    await fixture.stop();
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { createCockpitHttpServer } from './src/service/http-server.mjs';
+      const service = await createCockpitHttpServer(JSON.parse(process.argv[1]));
+      process.stdout.write('ready\\n');
+    `, JSON.stringify({ dbPath: fixture.dbPath, token: TOKEN, port })],
+    { cwd: path.resolve(import.meta.dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Replacement service startup timeout')), 10000);
+        child.once('error', (error) => { clearTimeout(timeout); reject(error); });
+        child.once('exit', () => { clearTimeout(timeout); reject(new Error('Replacement service exited')); });
+        child.stdout.once('data', () => { clearTimeout(timeout); resolve(); });
+      });
+      const restarted = await replacement.ugk_work_context({});
+      assert.equal(restarted.canContinue, true);
+      assert.equal(restarted.revision, accepted.revision);
+      assert.equal(snapshot(), before);
+      const progressed = await replacement.ugk_work_progress({ sessionId: accepted.sessionId,
+        expectedRevision: restarted.revision, clientRequestId: 'history-progress',
+        status: 'working', summary: 'Current owner survives historical relays' });
+      const receipt = await replacement.ugk_work_takeover(confirmation);
+      assert.equal(receipt.revision, accepted.revision);
+      assert.equal(receipt.capabilities.writeSession, true);
+      const staleReceipt = await holder.ugk_work_resume(lastResume);
+      assert.equal(staleReceipt.capabilities.writeSession, false);
+      for (const old of [original, holder]) {
+        assert.equal((await old.ugk_work_context({})).canContinue, false);
+        await assert.rejects(old.ugk_work_progress({ sessionId: accepted.sessionId,
+          expectedRevision: progressed.revision, clientRequestId: 'history-old-progress',
+          status: 'working', summary: 'Must reject revoked holder' }), /CONVERSATION_BINDING_CONFLICT/);
+      }
+      const prepared = await replacement.ugk_work_relay({ sessionId: accepted.sessionId,
+        expectedRevision: progressed.revision, clientRequestId: 'history-next-relay', ...relayFields() });
+      assert.equal((await replacement.ugk_work_context({})).capabilities.writeSession, false);
+      const next = connection('next');
+      const resumed = await next.ugk_work_resume({ continueCode: prepared.continueCode,
+        clientRequestId: 'history-next-resume' });
+      assert.equal((await next.ugk_work_context({})).canContinue, true);
+      assert.equal((await replacement.ugk_work_takeover(confirmation)).capabilities.writeSession, false);
+      await assert.rejects(replacement.ugk_work_progress({ sessionId: accepted.sessionId,
+        expectedRevision: resumed.revision, clientRequestId: 'history-revoked-progress',
+        status: 'working', summary: 'Must reject replaced takeover holder' }), /CONVERSATION_BINDING_CONFLICT/);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, 'exit');
+        child.kill('SIGKILL');
+        await exited;
+      }
+    }
+  });
+}
 
 test('a process kill before takeover transaction commit leaves the old holder intact and the confirmation retryable', async (t) => {
   const fixture = await createFixture(t, '验证接手进程中断');

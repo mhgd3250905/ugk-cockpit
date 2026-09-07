@@ -35,6 +35,24 @@ export function readConversationOwner(db, sessionId) {
   };
 }
 
+// Relay receipts describe history; the unique unrevoked database owner grants
+// current authority. Every authenticated read/write gate uses this same rule.
+// Transfers revoke previous owners atomically in bindConversation.
+export function readConversationAuthorization(db, key, state, allowedStatuses = ['active']) {
+  const owner = state ? readConversationOwner(db, state.sessionId) : null;
+  const binding = key && state
+    ? readConversationBinding(db, key, state.worktreeId, state.sessionId) : null;
+  let reason = null;
+  if (!state) reason = 'session_missing';
+  else if (!key) reason = 'metadata_missing';
+  else if (!allowedStatuses.includes(state.status)) reason = 'session_not_active';
+  else if (!binding) reason = owner && owner.conversationKey !== key ? 'held_elsewhere' : 'binding_missing';
+  else if (binding.revoked) reason = owner && owner.conversationKey !== key ? 'replaced' : 'revoked';
+  else if (owner?.conversationKey !== key) reason = 'held_elsewhere';
+  else if (owner.worktreeId !== state.worktreeId || owner.sessionId !== state.sessionId) reason = 'binding_mismatch';
+  return { authorized: reason === null, reason, binding, owner };
+}
+
 export function bindConversation(db, key, binding, {
   transfer = false,
   owner = null,

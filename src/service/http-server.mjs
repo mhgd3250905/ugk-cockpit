@@ -8,6 +8,7 @@ import {
   bindConversation,
   readConversationBinding,
   readConversationOwner,
+  readConversationAuthorization,
 } from '../core/conversation-bindings.mjs';
 import { conversationIdentity, conversationKey } from '../mcp/conversation-identity.mjs';
 import {
@@ -94,7 +95,7 @@ const SAFE_BINDING_REASONS = new Set([
   'held_elsewhere',
   'session_missing',
   'session_not_active',
-  'generation_mismatch',
+  'binding_mismatch',
 ]);
 const SAFE_STATUS_VALUES = new Set([
   'active',
@@ -1593,26 +1594,15 @@ function validateMcpContextBody(body) {
     requireString(body.bridgeBinding, 'worktreeId');
     const generationFields = ['relayId', 'relaySequence', 'acceptedRevision'];
     const generationPresent = generationFields.some((field) => body.bridgeBinding[field] !== undefined);
-    const generationAllNull = generationFields.every((field) => body.bridgeBinding[field] === null);
-    const generationAllValues = generationFields.every((field) => body.bridgeBinding[field] !== undefined
-      && body.bridgeBinding[field] !== null);
-    // Takeover without a Relay still records its accepted revision.
-    const takeoverWithoutRelay = body.bridgeBinding.relayId === null
-      && body.bridgeBinding.relaySequence === null
-      && Number.isInteger(body.bridgeBinding.acceptedRevision)
-      && body.bridgeBinding.acceptedRevision >= 1;
-    if (generationPresent && !generationAllNull && !generationAllValues && !takeoverWithoutRelay) {
-      const error = new Error('Invalid context bridge generation.');
-      error.code = 'INVALID_REQUEST';
-      throw error;
-    }
-    if (generationAllValues && (
-      typeof body.bridgeBinding.relayId !== 'string'
-      || !body.bridgeBinding.relayId.trim()
-      || !Number.isInteger(body.bridgeBinding.relaySequence)
-      || body.bridgeBinding.relaySequence < 1
-      || !Number.isInteger(body.bridgeBinding.acceptedRevision)
-      || body.bridgeBinding.acceptedRevision < 1)) {
+    // Relay provenance is optional; an acceptance revision also belongs to an
+    // explicit takeover. Neither field is an independent authorization grant.
+    const { relayId, relaySequence, acceptedRevision } = body.bridgeBinding;
+    const noRelay = relayId === null && relaySequence === null;
+    const validRelay = typeof relayId === 'string' && relayId.trim()
+      && Number.isInteger(relaySequence) && relaySequence >= 1;
+    const validAcceptance = (noRelay && acceptedRevision === null)
+      || (Number.isInteger(acceptedRevision) && acceptedRevision >= 1);
+    if (generationPresent && (!(noRelay || validRelay) || !validAcceptance)) {
       const error = new Error('Invalid context bridge generation.');
       error.code = 'INVALID_REQUEST';
       throw error;
@@ -1824,6 +1814,16 @@ function publicBridgeBinding(state) {
   };
 }
 
+function publicStoredBinding(binding) {
+  return {
+    sessionId: binding.sessionId,
+    worktreeId: binding.worktreeId,
+    relayId: binding.relayId,
+    relaySequence: binding.relaySequence,
+    acceptedRevision: binding.acceptedRevision,
+  };
+}
+
 function currentConversationAuthorization(db, binding, result = {}) {
   if (!binding?.key) return null;
   const sessionId = result?.sessionId ?? result?.session_id;
@@ -1836,27 +1836,15 @@ function currentConversationAuthorization(db, binding, result = {}) {
     };
   }
   const current = readExactSessionState(db, sessionId);
-  const currentBinding = current?.worktreeId === worktreeId
-    ? readConversationBinding(db, binding.key, worktreeId, sessionId)
-    : null;
-  const owner = current ? readConversationOwner(db, sessionId) : null;
-  const matches = Boolean(
-    current
-      && currentBinding
-      && !currentBinding.revoked
-      && currentBinding.sessionId === sessionId
-      && currentBinding.worktreeId === worktreeId
-      && owner?.conversationKey === binding.key
-      && bridgeBindingMatches(current, currentBinding),
-  );
-  const writable = matches && current.status === 'active';
+  const authorization = readConversationAuthorization(db, binding.key, current);
+  const writable = authorization.authorized && current.worktreeId === worktreeId;
   return {
     known: true,
     sessionId: current?.sessionId ?? null,
     revision: current?.revision ?? null,
     status: current?.status ?? null,
     generation: current?.generation ?? null,
-    owner: owner?.conversationKey ?? null,
+    owner: authorization.owner?.conversationKey ?? null,
     canContinue: writable,
     writable,
   };
@@ -1897,7 +1885,9 @@ function withBindingReport(result, binding, currentAuthorization = null) {
     : result;
 }
 
-function bridgeBindingMatches(state, binding) {
+// Only pre-migration, unidentified clients use a supplied bridge snapshot.
+// Authenticated owners are checked against the database, never Relay history.
+function legacyBridgeBindingMatches(state, binding) {
   if (!state || !binding || binding.revoked
     || binding.sessionId !== state.sessionId
     || binding.worktreeId !== state.worktreeId) return false;
@@ -2455,10 +2445,9 @@ export async function createCockpitHttpServer({
       };
     }
 
-    if (key) {
-      body = { ...body, bridgeBinding: readConversationBinding(db, key, current.worktreeId, current.sessionId) };
-    }
-    const owner = readConversationOwner(db, current.sessionId);
+    const authorization = readConversationAuthorization(db, key, current);
+    if (key) body = { ...body, bridgeBinding: authorization.binding };
+    const owner = authorization.owner;
     const ownedElsewhere = owner && owner.conversationKey !== key;
     const base = {
       ...publicSessionState(current),
@@ -2481,7 +2470,7 @@ export async function createCockpitHttpServer({
     }
 
     const hasBinding = Boolean(body.bridgeBinding);
-    const matchesBinding = bridgeBindingMatches(current, body.bridgeBinding);
+    const matchesBinding = key ? authorization.authorized : legacyBridgeBindingMatches(current, body.bridgeBinding);
     if (hasBinding && matchesBinding && !ownedElsewhere) {
       return {
         ok: true,
@@ -2489,7 +2478,7 @@ export async function createCockpitHttpServer({
         ...base,
         canContinue: true,
         bindingStatus: 'bound',
-        binding: publicBridgeBinding(current),
+        binding: key ? publicStoredBinding(authorization.binding) : publicBridgeBinding(current),
         message: '已核对当前 bridge 绑定；返回的是平台最新 revision，查询没有修改平台状态。',
       };
     }
@@ -2518,11 +2507,13 @@ export async function createCockpitHttpServer({
         ...safety,
         ...base,
         bindingStatus: 'stale',
-        bindingReason: 'replaced',
-        recoveryAction: 'use_latest_relay',
+        bindingReason: key ? authorization.reason : 'replaced',
+        recoveryAction: key ? 'inspect_binding' : 'use_latest_relay',
         generationScope: 'session_history_not_current_chat',
         requiresUserConfirmation: false,
-        message: '这个聊天已被其他接手聊天替代，不能自动取回归属。请使用最新接力消息。',
+        message: key
+          ? '当前绑定未通过数据库归属核验，不能继续写入。代码未被修改，请保留诊断信息排查，不要反复接手。'
+          : '这个聊天已被其他接手聊天替代，不能自动取回归属。请使用最新接力消息。',
       };
     }
 
@@ -2566,27 +2557,10 @@ export async function createCockpitHttpServer({
     const context = readSessionContext(db, sessionId);
     if (!context?.ok) return; // Existing route reports the precise missing-session error.
     const current = readExactSessionState(db, sessionId);
-    const owner = readConversationOwner(db, sessionId);
+    const authorization = readConversationAuthorization(db, key, current, allowedStatuses);
+    const owner = authorization.owner;
     if (!key && !owner) return; // Existing clients keep working until this session is explicitly migrated.
-    const binding = key ? readConversationBinding(db, key, context.worktreeId, sessionId) : null;
-    let bindingReason = null;
-    if (!key && owner) {
-      bindingReason = 'metadata_missing';
-    } else if (!current) {
-      bindingReason = 'session_missing';
-    } else if (!allowedStatuses.includes(current.status)) {
-      bindingReason = 'session_not_active';
-    } else if (!binding) {
-      bindingReason = owner && owner.conversationKey !== key
-        ? 'held_elsewhere'
-        : 'binding_missing';
-    } else if (binding.revoked) {
-      bindingReason = owner && owner.conversationKey !== key ? 'replaced' : 'revoked';
-    } else if (owner?.conversationKey !== key) {
-      bindingReason = 'held_elsewhere';
-    } else if (!bridgeBindingMatches(current, binding)) {
-      bindingReason = 'generation_mismatch';
-    }
+    const bindingReason = authorization.reason;
     if (bindingReason) {
       throw Object.assign(new Error('Conversation binding is missing or stale.'), {
         code: 'CONVERSATION_BINDING_CONFLICT',
