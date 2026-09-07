@@ -337,8 +337,10 @@ export const TOOLS = [
         },
         acknowledgements: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'Optional list of acknowledgements or receipts'
         }
@@ -385,50 +387,64 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of key decisions made'
         },
         artifactRefs: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'List of suggested skills for next session'
         },
         acknowledgements: {
           type: 'array',
+          maxItems: 8,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 500
           },
           description: 'Optional verified commit:<sha> references or unattributed_changes confirmation'
         }
@@ -539,32 +555,32 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of key decisions'
         },
         artifactRefs: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 8, items: { type: 'string', maxLength: 500 },
           description: 'List of suggested skills for the next conversation'
         }
       },
@@ -648,8 +664,15 @@ const HANDOFF_ARRAY_FIELDS = [
   'suggestedSkills'
 ];
 
+// Matches the progress.details contract and the JSON Schema bounds: relay and
+// handoff payloads carry bounded structured lists, not free-form bulk data.
+const ARRAY_FIELD_MAX_ITEMS = 8;
+const ARRAY_ITEM_MAX_LENGTH = 500;
+
 function isStringArray(val) {
-  return Array.isArray(val) && val.every((item) => typeof item === 'string');
+  return Array.isArray(val)
+    && val.length <= ARRAY_FIELD_MAX_ITEMS
+    && val.every((item) => typeof item === 'string' && item.length <= ARRAY_ITEM_MAX_LENGTH);
 }
 
 function validateAcceptArgs(args) {
@@ -1118,12 +1141,10 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
     };
   }
 
-  // Handle notifications: notifications do not have an `id` property or are notifications/initialized
-  const isNotification = message.id === undefined || message.method === 'notifications/initialized';
-  if (isNotification && message.method === 'notifications/initialized') {
-    return null;
-  }
-  if (isNotification) {
+  // Notifications are exactly the messages without an `id` (JSON-RPC 2.0).
+  // A message carrying an id is a request and must be answered, even when the
+  // method name looks like a notification.
+  if (message.id === undefined) {
     return null;
   }
 
@@ -1371,7 +1392,7 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
   }
 }
 
-export function createMcpServer({ stdin, stdout, stderr, handlers = {} } = {}) {
+export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdown = null } = {}) {
   const inStream = stdin || process.stdin;
   const outStream = stdout || process.stdout;
   const errStream = stderr || process.stderr;
@@ -1456,6 +1477,11 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {} } = {}) {
   return {
     close() {
       rl.close();
+      // Hosts close stdin when the session ends. In-flight service calls must
+      // be aborted so this process cannot linger on a stalled connection.
+      if (typeof onShutdown === 'function') {
+        try { onShutdown(); } catch {}
+      }
     },
     dispatchMessage(msg) {
       return dispatchMessage(msg, { handlers, stderr: errStream });

@@ -151,6 +151,66 @@ const PUBLIC_ERRORS = {
     status: 409, message: '未找到可转交的当前持有人。', impact: '没有修改代码或创建工作会话。',
     requiredAction: '请刷新工作台核对已有工作会话。',
   },
+  LEASE_NOT_HELD: {
+    status: 409, message: '当前会话已不再持有这份代码的写租约。', impact: '代码与归属没有被本次操作修改。',
+    requiredAction: '先查询工作会话确认当前持有人；需要接管时由用户在工作台授权，不要用旧 revision 重试。',
+  },
+  SESSION_MISMATCH: {
+    status: 409, message: '请求的会话与当前绑定不一致。', impact: '没有修改代码或记录。',
+    requiredAction: '核对 sessionId 后重试；不要在多个聊天间混用同一会话编号。',
+  },
+  ASSIGNMENT_NOT_FOUND: {
+    status: 404, message: '没有找到对应的工作任务。', impact: '没有修改代码或记录。',
+    requiredAction: '刷新项目总览确认任务状态；任务可能已被取消或从未创建。',
+  },
+  ASSIGNMENT_NOT_PENDING: {
+    status: 409, message: '该任务已不处于等待接入状态。', impact: '没有创建新的接入指令。',
+    requiredAction: '如需重新生成接入指令，请在工作台使用重新分配动作。',
+  },
+  ASSIGNMENT_NOT_ACTIVE: {
+    status: 409, message: '该任务当前不可执行此操作。', impact: '没有修改代码或记录。',
+    requiredAction: '查询任务状态后按当前阶段选择动作；不要重复接入。',
+  },
+  ASSIGNMENT_ALREADY_ACCEPTED: {
+    status: 409, message: '该任务已被其他会话接入。', impact: '没有产生重复接入；原会话保持不变。',
+    requiredAction: '如需更换执行聊天，由用户在工作台授权转交，不要强行接入。',
+  },
+  ASSIGNMENT_NOT_ACCEPTED: {
+    status: 409, message: '任务还没有被有效接入，不能执行该操作。', impact: '没有修改代码或记录。',
+    requiredAction: '先完成一次性接入指令的接入，再继续后续动作。',
+  },
+  ASSIGNMENT_ALREADY_ACTIVE: {
+    status: 409, message: '该任务已经接入，不能重复接入。', impact: '没有产生重复工作节点，代码没有被修改。',
+    requiredAction: '直接查询当前工作会话并继续安排任务；不要再次发送接入请求。',
+  },
+  SESSION_NOT_ACCEPTED: {
+    status: 409, message: '当前会话尚未通过接入指令建立，不能执行该操作。', impact: '没有修改代码或记录。',
+    requiredAction: '使用项目卡片“交给 AI”生成的一次性接入指令重新接入。',
+  },
+  PROGRESS_REQUEST_CONFLICT: {
+    status: 409, message: '进展记录与平台当前状态冲突。', impact: '代码没有被修改；本次进展没有入账。',
+    requiredAction: '查询最新 revision 后用同一 clientRequestId 重试或放弃本次记录。',
+  },
+  HANDOFF_REQUEST_CONFLICT: {
+    status: 409, message: '交接请求与平台当前状态冲突。', impact: '代码没有被修改；本次交接没有生效。',
+    requiredAction: '查询当前会话状态与 revision，再决定重试或取消交接。',
+  },
+  DISPATCH_CODE_AMBIGUOUS: {
+    status: 409, message: '接入指令不唯一，无法安全解析。', impact: '没有创建工作会话，代码没有被修改。',
+    requiredAction: '请在工作台重新生成一次性接入指令后再接入。',
+  },
+  DISPATCH_GRANT_ID_CONFLICT: {
+    status: 409, message: '接入指令编号冲突，签发没有完成。', impact: '没有产生新的有效接入指令。',
+    requiredAction: '换一个新的 clientRequestId 重新发起任务分配。',
+  },
+  DISPATCH_GRANT_NOT_FOUND: {
+    status: 404, message: '接入指令不存在或已失效。', impact: '没有创建工作会话，代码没有被修改。',
+    requiredAction: '在项目卡片重新生成接入指令；旧指令不能恢复。',
+  },
+  GRANT_TTL_TOO_LONG: {
+    status: 400, message: '接入指令有效期超出允许范围。', impact: '没有签发接入指令。',
+    requiredAction: '使用平台默认有效期，或调短请求的 TTL 后重试。',
+  },
   MCP_CONNECTION_HANDLE_INVALID: {
     status: 401,
     message: '这个 MCP 连接无法安全续接。',
@@ -1259,6 +1319,11 @@ function validateStartBody(body) {
   requireString(body, 'worktreePath');
   requireString(body, 'agentClaim');
   requireString(body, 'goal');
+  if (body.runId !== undefined && typeof body.runId !== 'string') {
+    const error = new Error('Invalid runId');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
 }
 
 function validateFinishBody(body) {
@@ -1986,7 +2051,10 @@ async function readJson(request) {
 }
 
 async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
-  const hardLimit = maxBytes + 128 * 1024;
+  // The JSON path carries base64 (4/3 size inflation), so the transport-level
+  // cap must allow an encoded 5MB image; the decoded buffer is still enforced
+  // against maxBytes below before any storage or processing happens.
+  const hardLimit = maxBytes * 2 + 128 * 1024;
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
@@ -4452,6 +4520,14 @@ export async function createCockpitHttpServer({
 
       sendError(response, 'NOT_FOUND');
     } catch (error) {
+      // A response may already be streaming when an unexpected error lands
+      // here (for example after a partial write). Sending another response
+      // would throw ERR_HTTP_HEADERS_SENT and turn this handler's promise
+      // into an unhandled rejection that kills the whole service process.
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
       const sqliteBusy = (
         error?.code === 'ERR_SQLITE_ERROR'
         && /busy|locked/i.test(error?.message ?? '')
