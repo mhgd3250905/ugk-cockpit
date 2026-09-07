@@ -10,7 +10,9 @@
 
 两处现存技能根目录 `.codex/skills` 与 `.agents/skills` 各六包已先备份至 `.data/backups/skills-pre-schema25-20260907-7b392fd8/{codex,agents}`。旧文件全部匹配仓库历史，无不明定制；使用仓库安装器升级后，24/24 文件 SHA-256 与源版本一致，文件集合无额外或缺失。实际内容变化为 progress 和 relay 技能。
 
-新启动的 stdio 进程公布 takeover 必填字段 `sessionId/clientRequestId/transferCode`，但当前宿主缓存仍显示旧工具定义。文件安装和服务升级不等于已运行 bridge 自动重载：旧聊天需重连 MCP 后再使用新版接手入口，技能在下一轮重新加载；未为此批量停止宿主或其他项目进程。原 ZCode 聊天现场验收尚未执行，不能用独立 stdio 工具列表检查替代。
+部署时新启动的 stdio 进程公布 takeover 必填字段 `sessionId/clientRequestId/transferCode`，但当前宿主缓存仍显示旧工具定义。文件安装和服务升级不等于已运行 bridge 自动重载：旧聊天需重连 MCP 后再使用新版接手入口，技能在下一轮重新加载；未为此批量停止宿主或其他项目进程。
+
+随后用户在本对话提供原 ZCode 聊天的现场结果并确认恢复正常：用户从工作台签发指令，ZCode 消费成功后查询同一手腕工作会话，revision 从 41 经授权/接手推进到 43，`canContinue=true`、`bound/host/durable`，持有人与 takeover 节点均指向该 ZCode 宿主会话。反馈明确未重新 init、未改代码、尚未补记成果。本记录来源是用户转述的原宿主结果，不是主会话另读业务仓库或重新执行转交；后续记录必须使用最新平台 revision，不沿用 41。
 
 ## 启动器数据目录修复（2026-09-06）
 

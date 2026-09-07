@@ -2,13 +2,13 @@
 
 ## 当前实现契约（schema 25，本地验收完成）
 
-本节描述本轮已实现并通过本地门禁的节点追溯与平台授权转交方案。2026-09-07 已经用户授权部署服务并切换两处已安装技能，当前 Codex 原聊天只读恢复通过；原 ZCode 现场验收及旧宿主工具列表重载尚未完成，见 [部署记录](LOCAL_SERVICE_RECOVERY.md)。下文 schema 24 的两步聊天内确认、过期 Relay 确认及 connection-only 写入为历史行为，不能作为当前接手指令。
+本节描述 alpha.39 的节点追溯与平台授权转交方案。2026-09-07 已经用户授权部署服务并切换两处已安装技能，当前 Codex 原聊天只读恢复通过；随后用户反馈原 ZCode 聊天已完成平台授权接手、revision 43、canContinue=true，见 [部署记录](LOCAL_SERVICE_RECOVERY.md)。其他旧宿主仍需重连加载新版工具定义。下文 schema 24 的两步聊天内确认、过期 Relay 确认及 connection-only 写入为历史行为，不能作为当前接手指令。
 
 ### 身份与授权事实源
 
 每次 MCP 请求从宿主元数据取得身份：Codex 的 `_meta.threadId`；ZCode 的 `_meta['com.zcode/request-context'].session_id`，以及该命名空间存在时的镜像 `_meta.session_id`；通用适配的 `_meta['io.ugk.cockpit/conversation'] = { host, id }`。多个来源必须一致，冲突或格式错误直接拒绝。平台与会话 ID 不接受模型普通工具参数注入，不从目录、PID、最新聊天或继承环境猜测。
 
-ZCode 传递机制已从本机安装代码查明并接入；这不等于原 ZCode 聊天已完成现场调用验收。用户曾提供的会话 ID 仅是现场观察，不作为验证通过的证据。
+ZCode 传递机制已从本机安装代码查明并接入；原聊天授权接手及后续 context 可写结果另由用户在本对话提供并确认。该现场结果不扩大为所有 ZCode 重启、分叉、并行场景均已现场验证，后者仍以各自测试证据为准。
 
 普通 scoped MCP 状态写入必须有宿主身份。历史 connection-only owner 保留可读及明确的“此前连接，无法定位聊天”说明，但不能继续新增 AI 工作节点。连接 handle 仍用于认证连接连续性，不替代宿主聊天身份。context、能力展示与实际写入继续以数据库唯一有效 owner、精确工作会话/工作副本及业务状态统一判断；历史 Relay 和回执不能推导当前权限。
 
