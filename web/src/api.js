@@ -99,7 +99,15 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
       return request(path, options, false);
     }
 
-    if (!response.ok) throw Object.assign(new Error(body.message), body);
+    if (!response.ok) {
+      // 错误体可能是 null、标量或缺失 message 的对象；契约字段必须始终保留，
+      // 否则按 code 分支的错误处理会全部退化为无提示失败。
+      const payload = (body && typeof body === 'object') ? body : {};
+      throw Object.assign(
+        new Error(payload.message ?? `请求失败（HTTP ${response.status}）。`),
+        payload,
+      );
+    }
     return body;
   }
 
