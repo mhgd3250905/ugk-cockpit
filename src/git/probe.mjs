@@ -23,6 +23,21 @@ export function digest(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Git remote nicknames may legally start with '-' (valid_remote_nick only
+// rejects empty names, '.', '..' and names containing '/'). A crafted name
+// such as `--repo=<url>` would otherwise be parsed as an option by
+// `git push` and silently redirect the push destination.
+const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export function assertSafeRemoteName(remote) {
+  if (typeof remote !== 'string' || !SAFE_REMOTE_NAME.test(remote)) {
+    const error = new Error(`Remote name '${remote}' is not a safe git remote nickname.`);
+    error.code = 'UNSAFE_REMOTE_NAME';
+    throw error;
+  }
+  return remote;
+}
+
 export function safeGitEnvironment() {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),

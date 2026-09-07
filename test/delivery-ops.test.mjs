@@ -114,6 +114,31 @@ function snapshotRepo(dirPath) {
   return { head, index, status };
 }
 
+test('inspection candidates ingest the exact guarded working-tree bytes', async (t) => {
+  const f = createDeliveryFixture(t);
+  const featureBytes = 'feature\r\nwith cRLF and ünïcode\n';
+  // Kept uncommitted so validateDeliveryFiles accepts it as a working change.
+  writeFileSync(path.join(f.sourcePath, 'feature.txt'), featureBytes);
+
+  const inspection = await inspectDelivery({ ...f, files: ['feature.txt'] });
+  t.after(() => discardDeliveryCache(inspection));
+  assert.equal(inspection.files.length, 1);
+
+  // The candidate tree must contain a blob byte-identical to the guarded read
+  // (hash-object --stdin), not a re-read of the path by git itself.
+  const treeLines = gitSync(inspection.cachePath, ['ls-tree', inspection.candidateTree]).split(/\r?\n/);
+  const featureLine = treeLines.find((line) => /\tfeature\.txt$/.test(line));
+  assert.ok(featureLine, 'candidate tree must contain feature.txt');
+  const blobSha = featureLine.split(/\s+/)[2];
+  const stored = execFileSync('git', ['cat-file', 'blob', blobSha], {
+    cwd: inspection.cachePath,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  assert.equal(stored, featureBytes);
+});
+
 test('remote identity normalizes https and ssh to same repo, and handles local paths', () => {
   const httpsIdentity = normalizeRemoteIdentity('https://github.com/my-org/My-Repo.git');
   const sshIdentity = normalizeRemoteIdentity('git@github.com:my-org/My-Repo.git');

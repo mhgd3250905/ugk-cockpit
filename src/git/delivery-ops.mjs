@@ -54,17 +54,37 @@ export function safeGitEnvironment(extraEnv = {}) {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
 
-export async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, acceptExitCodes = [0], raw = false } = {}) {
-  try {
-    const result = await execFileAsync('git', [...SAFE_GIT_PREFIX, ...await remoteAuthArguments(args), ...args], {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer,
-      windowsHide: true,
-      shell: false,
-      encoding: 'utf8',
-      env: safeGitEnvironment(env),
+function execFileWithInput(file, args, options, input) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(file, args, options, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout, stderr }));
+      } else {
+        resolve({ stdout, stderr });
+      }
     });
+    // git exits early on some failures; consuming stdin errors keeps the
+    // original exit-code error as the reported failure instead of EPIPE.
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  });
+}
+
+export async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, maxBuffer = DEFAULT_MAX_BUFFER, acceptExitCodes = [0], raw = false, stdin = null } = {}) {
+  const gitArgs = [...SAFE_GIT_PREFIX, ...await remoteAuthArguments(args), ...args];
+  const options = {
+    cwd,
+    timeout: timeoutMs,
+    maxBuffer,
+    windowsHide: true,
+    shell: false,
+    encoding: 'utf8',
+    env: safeGitEnvironment(env),
+  };
+  try {
+    const result = stdin === null
+      ? await execFileAsync('git', gitArgs, options)
+      : await execFileWithInput('git', gitArgs, options, stdin);
     return { exitCode: 0, stdout: raw ? result.stdout : result.stdout.trim() };
   } catch (error) {
     const exitCode = typeof error?.code === 'number' ? error.code : error?.status;
@@ -140,8 +160,14 @@ export function validateRemoteUrlSecurity(url) {
         error.code = 'CREDENTIALS_IN_REMOTE_URL';
         throw error;
       }
+      // A hostname starting with '-' would be parsed as an ssh option flag.
+      if (!parsed.hostname || parsed.hostname.startsWith('-')) {
+        const error = new Error(`SSH remote URL has an unsafe hostname: ${trimmed}`);
+        error.code = 'UNSAFE_REMOTE_URL';
+        throw error;
+      }
     } catch (e) {
-      if (e.code === 'CREDENTIALS_IN_REMOTE_URL') throw e;
+      if (e.code === 'CREDENTIALS_IN_REMOTE_URL' || e.code === 'UNSAFE_REMOTE_URL') throw e;
       const error = new Error(`Invalid SSH remote URL: ${trimmed}`);
       error.code = 'UNSAFE_REMOTE_URL';
       throw error;
@@ -158,6 +184,15 @@ export function validateRemoteUrlSecurity(url) {
     if (userPart !== 'git' && !isLocalPath(trimmed)) {
       const error = new Error('Remote URL contains unrecognized credentials.');
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
+      throw error;
+    }
+    // host:path form — the host must not start with '-' (ssh option injection).
+    const hostPort = trimmed.slice(atIndex + 1);
+    const colonIndex = hostPort.indexOf(':');
+    const host = colonIndex === -1 ? '' : hostPort.slice(0, colonIndex);
+    if (!host || host.startsWith('-')) {
+      const error = new Error(`Remote URL has an unsafe host: ${trimmed}`);
+      error.code = 'UNSAFE_REMOTE_URL';
       throw error;
     }
   }
@@ -641,7 +676,17 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
     for (const file of validatedFiles) {
       const fullPath = path.resolve(sourcePath, file);
       if (existsSync(fullPath)) {
-        const hashRes = await runGit(sourcePath, ['hash-object', '-w', '--path', file, fullPath], { env: { GIT_OBJECT_DIRECTORY: path.join(cachePath, 'objects') } });
+        // Content must pass the same guarded read as the fingerprint: a plain
+        // path-based `hash-object` would re-open the file outside path-guard,
+        // letting a swapped link ingest out-of-repo bytes into the pushed tree.
+        const binding = authorizeExistingPath(fullPath, sourcePath);
+        revalidateAuthorizedPath(binding);
+        const content = await readFile(fullPath);
+        revalidateAuthorizedPath(binding);
+        const hashRes = await runGit(sourcePath, ['hash-object', '-w', '--path', file, '--stdin'], {
+          env: { GIT_OBJECT_DIRECTORY: path.join(cachePath, 'objects') },
+          stdin: content,
+        });
         const blobSha = hashRes.stdout;
         const mode = await fileMode(sourcePath, file);
         await runGit(cachePath, ['update-index', '--add', '--cacheinfo', `${mode},${blobSha},${file}`], { env: cacheEnv });
