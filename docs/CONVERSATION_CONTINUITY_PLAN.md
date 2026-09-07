@@ -68,3 +68,11 @@ handle 当前只保存在 bridge 进程内：本轮解决同一 bridge 的短期
 - `git diff --check`：通过。
 
 以上是本地代码验收，不代表已部署或原宿主现场故障已验证消失。后续切换服务须按本机恢复文档核对已有项目和历史，再用原宿主完成接力→progress 的现场验证；浏览器诊断读取与复制还需人工验证。
+
+## 空参 context 后续修正（2026-09-07）
+
+无 Relay 的 takeover 返回 `relayId: null`、`relaySequence: null` 和有效 `acceptedRevision`。无宿主身份的 bridge 会在后续空参 context 内部附带这份绑定，旧服务端校验却只允许三个字段全空或全有值，导致拒绝自身签发的绑定并返回 `INVALID_REQUEST`。该链路已通过真实 HTTP 回归先复现失败，再验证修复通过。
+
+校验现在额外接受“Relay 两字段均为 null、acceptedRevision 为正整数”的接手绑定；不把这些字段当作授权，后续数据库归属检查保持不变。回归覆盖接手后空参查询、重复查询不改变 revision、四种非法组合仍拒绝、旧连接写入仍拒绝以及新连接继续 progress。
+
+修正后的最终门禁：`npm test` 363/363、`npm run test:phase0` 93/93，均退出码 0；`git diff --check` 通过。仅本地验收，尚未部署到正在运行的服务。

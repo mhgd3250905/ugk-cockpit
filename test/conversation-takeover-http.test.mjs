@@ -239,6 +239,38 @@ test('connection-only MCP bindings survive a service restart as a recoverable he
     confirmationRequestId: offer.confirmationRequestId,
   });
   assert.equal(accepted.takeoverAccepted, true);
+  assert.equal(accepted.binding.relayId, null);
+  assert.equal(accepted.binding.relaySequence, null);
+  assert.equal(accepted.binding.acceptedRevision, accepted.revision);
+  const recovered = await afterRestart.ugk_work_context({});
+  assert.equal(recovered.canContinue, true);
+  assert.equal(recovered.sessionId, held.sessionId);
+  assert.equal(recovered.revision, accepted.revision);
+  for (const invalidGeneration of [
+    { relayId: null, relaySequence: null, acceptedRevision: 0 },
+    { relayId: null, relaySequence: null, acceptedRevision: '40' },
+    { relayId: null, relaySequence: 1, acceptedRevision: accepted.revision },
+    { relayId: 'partial-relay', relaySequence: null, acceptedRevision: accepted.revision },
+  ]) {
+    const response = await fetch(`${fixture.baseUrl()}/api/v1/mcp/work/context`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ mcpWorkingDirectory: fixture.root,
+        bridgeBinding: { ...accepted.binding, ...invalidGeneration } }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_REQUEST');
+  }
+  const queriedAgain = await afterRestart.ugk_work_context({});
+  assert.equal(queriedAgain.canContinue, true);
+  assert.equal(queriedAgain.revision, accepted.revision);
+  await assert.rejects(firstConnection.ugk_work_progress({
+    sessionId: held.sessionId,
+    clientRequestId: 'connection-old-holder-progress',
+    expectedRevision: accepted.revision,
+    status: 'working',
+    summary: '旧连接不得重新取得写入权限',
+  }), /CONVERSATION_BINDING_CONFLICT/);
   const progressed = await afterRestart.ugk_work_progress({
     sessionId: held.sessionId,
     clientRequestId: 'connection-takeover-progress',

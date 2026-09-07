@@ -1596,7 +1596,12 @@ function validateMcpContextBody(body) {
     const generationAllNull = generationFields.every((field) => body.bridgeBinding[field] === null);
     const generationAllValues = generationFields.every((field) => body.bridgeBinding[field] !== undefined
       && body.bridgeBinding[field] !== null);
-    if (generationPresent && !generationAllNull && !generationAllValues) {
+    // Takeover without a Relay still records its accepted revision.
+    const takeoverWithoutRelay = body.bridgeBinding.relayId === null
+      && body.bridgeBinding.relaySequence === null
+      && Number.isInteger(body.bridgeBinding.acceptedRevision)
+      && body.bridgeBinding.acceptedRevision >= 1;
+    if (generationPresent && !generationAllNull && !generationAllValues && !takeoverWithoutRelay) {
       const error = new Error('Invalid context bridge generation.');
       error.code = 'INVALID_REQUEST';
       throw error;
