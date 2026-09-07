@@ -144,6 +144,12 @@ button:active:not(:disabled) { transform: translateY(1px); }
 .workspace-context .project-tech-panel summary { font-size: 12px; padding: 10px 0; }
 .workspace-context .project-tech-panel dl { margin-top: 12px; }
 .workspace-context .project-tech-panel dl div { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.session-diagnostics-panel { display: grid; gap: 10px; }
+.session-diagnostics-panel > p { margin: 0; color: var(--wb-faint); line-height: 1.7; }
+.session-diagnostics-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.session-diagnostics-output { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--wb-line); border-radius: 8px; background: var(--wb-canvas); color: var(--wb-muted); font: 10px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.session-diagnostics-error { color: var(--wb-danger, #a33); }
+.session-diagnostics-empty { color: var(--wb-faint); }
 .timeline-section { gap: 18px; }
 .timeline-heading { align-items: center; }
 .timeline-heading h3 { font-size: 14px; font-weight: 600; margin: 0; }

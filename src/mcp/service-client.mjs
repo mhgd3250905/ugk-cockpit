@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomBytes } from 'node:crypto';
 
 const GENERIC_ERROR_FALLBACK = {
   message: '本地操作没有完成。',
@@ -33,6 +34,11 @@ const STRING_FIELDS = [
   'expectedSourceCommit',
   'expectedTargetHead',
   'noteId',
+  'diagnosticId',
+  'reason',
+  'bindingReason',
+  'bindingKind',
+  'bindingPersistence',
 ];
 
 const BOOLEAN_FIELDS = [
@@ -41,8 +47,56 @@ const BOOLEAN_FIELDS = [
   'pushed',
   'humanActionRequired',
 ];
+const SAFE_DIAGNOSTIC_ID = /^diag_[A-Za-z0-9_-]{16,64}$/;
+const SAFE_SESSION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
+const SAFE_REASON = /^[A-Za-z][A-Za-z0-9_.-]{1,79}$/;
+const SAFE_BINDING_KIND = new Set(['host', 'connection', 'legacy']);
+const SAFE_BINDING_PERSISTENCE = new Set(['durable', 'connection_only', 'legacy']);
 
-export function sanitizeIntegrationErrorPayload(body, fallbackCode = 'REQUEST_FAILED') {
+function safeDiagnosticId(value) {
+  return typeof value === 'string' && SAFE_DIAGNOSTIC_ID.test(value) ? value : null;
+}
+
+function safeSessionId(value) {
+  return typeof value === 'string' && SAFE_SESSION_ID.test(value) ? value : null;
+}
+
+function safeRevision(value) {
+  return Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null;
+}
+
+function copySafeConversationContext(source, payload, { includeRevision = true } = {}) {
+  const sessionId = safeSessionId(source?.sessionId)
+    ?? safeSessionId(source?.session_id);
+  if (sessionId) payload.sessionId = sessionId;
+  if (includeRevision) {
+    const revision = [
+      source?.revision,
+      source?.currentRevision,
+      source?.current_revision,
+    ].map(safeRevision).find((value) => value !== null);
+    if (revision !== undefined) payload.revision = revision;
+  }
+  const bindingReason = [
+    source?.bindingReason,
+    source?.binding_reason,
+    source?.reason,
+  ].find((value) => typeof value === 'string' && SAFE_REASON.test(value.trim()));
+  if (bindingReason) {
+    payload.bindingReason = bindingReason.trim();
+  }
+  return payload;
+}
+
+function responseDiagnosticHeader(response) {
+  return typeof response?.headers?.get === 'function'
+    ? response.headers.get('x-ugk-diagnostic-id')
+    : null;
+}
+
+export function sanitizeIntegrationErrorPayload(body, fallbackCode = 'REQUEST_FAILED', defaultDiagnosticId = null) {
   const code = (typeof body?.code === 'string' && body.code.trim())
     ? body.code.trim()
     : fallbackCode;
@@ -55,6 +109,12 @@ export function sanitizeIntegrationErrorPayload(body, fallbackCode = 'REQUEST_FA
     : (typeof body?.publicMessage === 'string' && body.publicMessage.trim() ? body.publicMessage.trim() : null)
       || (isGeneric ? GENERIC_ERROR_FALLBACK.message : 'UGK Cockpit 拒绝了这次状态更新，请刷新页面确认当前任务。');
   payload.message = message;
+
+  const diagnosticId = (typeof body?.diagnosticId === 'string' && body.diagnosticId.trim())
+    ? body.diagnosticId.trim()
+    : defaultDiagnosticId;
+  const safeId = safeDiagnosticId(diagnosticId);
+  if (safeId) payload.diagnosticId = safeId;
 
   const impact = (typeof body?.impact === 'string' && body.impact.trim())
     ? body.impact.trim()
@@ -71,7 +131,22 @@ export function sanitizeIntegrationErrorPayload(body, fallbackCode = 'REQUEST_FA
   }
 
   for (const field of STRING_FIELDS) {
-    if (typeof body?.[field] === 'string' && body[field].trim()) {
+    if (typeof body?.[field] !== 'string' || !body[field].trim()) continue;
+    const value = body[field].trim();
+    const allowed = field === 'diagnosticId'
+      ? SAFE_DIAGNOSTIC_ID.test(value)
+      : field === 'sessionId'
+        ? SAFE_SESSION_ID.test(value)
+      : field === 'reason'
+        ? SAFE_REASON.test(value)
+        : field === 'bindingReason'
+          ? SAFE_REASON.test(value)
+        : field === 'bindingKind'
+          ? SAFE_BINDING_KIND.has(value)
+          : field === 'bindingPersistence'
+            ? SAFE_BINDING_PERSISTENCE.has(value)
+            : true;
+    if (allowed) {
       payload[field] = body[field].trim();
     }
   }
@@ -88,6 +163,8 @@ export function sanitizeIntegrationErrorPayload(body, fallbackCode = 'REQUEST_FA
     }
   }
 
+  copySafeConversationContext(body, payload);
+  if (!payload.reason && payload.bindingReason) payload.reason = payload.bindingReason;
   return payload;
 }
 
@@ -103,7 +180,7 @@ export function createIntegrationError(payload, cause = null) {
   );
 }
 
-export function createIntegrationTransportError(arguments_ = {}, cause = null) {
+export function createIntegrationTransportError(arguments_ = {}, cause = null, diagnosticId = null) {
   const message = '无法确认与 UGK Cockpit 的连接结果。请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。';
   const payload = {
     code: 'SERVICE_UNAVAILABLE',
@@ -111,6 +188,7 @@ export function createIntegrationTransportError(arguments_ = {}, cause = null) {
     impact: '请求中断，无法确认平台是否已执行该操作。',
     required_action: '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。',
     retryable: true,
+    ...(diagnosticId ? { diagnosticId } : {}),
   };
   if (typeof arguments_?.sessionId === 'string' && arguments_.sessionId.trim()) {
     payload.sessionId = arguments_.sessionId.trim();
@@ -124,7 +202,9 @@ export function createIntegrationTransportError(arguments_ = {}, cause = null) {
   if (typeof arguments_?.noteId === 'string' && arguments_.noteId.trim()) {
     payload.noteId = arguments_.noteId.trim();
   }
-  return createIntegrationError(payload, cause);
+  return createIntegrationError(copySafeConversationContext(arguments_, payload, {
+    includeRevision: false,
+  }), cause);
 }
 
 const DEFAULT_SERVICE_URL = 'http://127.0.0.1:41737';
@@ -136,55 +216,106 @@ export function createServiceHandlers({
   fetchImpl = fetch,
   workingDirectory = process.cwd(),
   conversationIdentity = null,
+  connectionHandle = null,
 }) {
   if (token != null && (typeof token !== 'string' || token.length < 32)) {
     throw new Error('UGK Cockpit local API token is unavailable.');
   }
 
   let scopedToken = null;
+  let scopedConnectionHandle = typeof connectionHandle === 'string' && connectionHandle.trim()
+    ? connectionHandle.trim()
+    : null;
+  let bootstrapPromise = null;
   const requests = new AsyncLocalStorage();
-  const identity = () => requests.getStore()?.conversationIdentity ?? conversationIdentity;
+  const identity = () => {
+    const store = requests.getStore();
+    return store && Object.prototype.hasOwnProperty.call(store, 'conversationIdentity')
+      ? store.conversationIdentity
+      : conversationIdentity;
+  };
   // Compatibility for hosts without request identity, before explicit migration.
   // Identified hosts NEVER read/write this cache: their bindings live in SQLite.
   let bridgeBinding = null;
 
-  async function bootstrapScopedToken() {
-    // A service restart can reset the previous keep-alive socket precisely
-    // while a host without its own durable credential asks for a fresh scoped
-    // token.  One short retry handles that transport hand-off without turning
-    // a persistent outage into an unbounded reconnect loop.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let response;
-      try {
-        response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
-          method: 'POST',
-          signal: AbortSignal.timeout(5000),
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
-        });
-      } catch (cause) {
-        if (attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          continue;
+  async function bootstrapScopedToken(diagnosticId = newDiagnosticId()) {
+    if (scopedToken) return scopedToken;
+    if (bootstrapPromise) return bootstrapPromise;
+
+    bootstrapPromise = (async () => {
+      // A service restart can reset the previous keep-alive socket precisely
+      // while a host without its own durable credential asks for a fresh scoped
+      // token.  One short retry handles that transport hand-off without turning
+      // a persistent outage into an unbounded reconnect loop.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let response;
+        try {
+          response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
+            method: 'POST',
+            signal: AbortSignal.timeout(5000),
+            headers: {
+              'content-type': 'application/json',
+              'x-ugk-diagnostic-id': diagnosticId,
+            },
+            body: JSON.stringify({
+              client: 'ugk-cockpit-stdio',
+              connectionHandleVersion: 'v1',
+              ...(scopedConnectionHandle ? { connectionHandle: scopedConnectionHandle } : {}),
+            }),
+          });
+        } catch (cause) {
+          if (attempt === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            continue;
+          }
+          throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+            code: 'SERVICE_UNAVAILABLE',
+            transportFailure: true,
+            publicMessage: '无法连接 UGK Cockpit，暂时无法确认本次任务是否更新。请确认本地服务正在运行。',
+            impact: '请求中断，无法确认平台是否已执行该操作。',
+            required_action: '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。',
+            diagnosticId,
+          });
         }
-        throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
-          transportFailure: true,
-          publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
-        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || typeof body.token !== 'string' || body.token.length < 32) {
+          throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
+            code: body.code ?? `HTTP_${response.status}`,
+            publicMessage: body.message ?? 'UGK Cockpit 无法建立本地 MCP 会话，请重启 Cockpit 后重试。',
+            diagnosticId: safeDiagnosticId(body.diagnosticId)
+              ?? safeDiagnosticId(responseDiagnosticHeader(response))
+              ?? diagnosticId,
+          });
+        }
+        if (scopedConnectionHandle && typeof body.connectionHandle !== 'string') {
+          throw Object.assign(new Error('MCP connection continuity handle was not returned.'), {
+            code: 'MCP_CONNECTION_HANDLE_REQUIRED',
+            publicMessage: 'UGK Cockpit 没有返回可恢复的 MCP 连接身份；没有创建新的连接归属。请重新连接新版 MCP。',
+            impact: '没有创建新的连接归属，代码、工作会话和已有记录都没有被修改。',
+            required_action: '请重新连接新版 UGK Cockpit MCP。',
+            diagnosticId,
+          });
+        }
+        if (typeof body.connectionHandle === 'string' && body.connectionHandle.trim()) {
+          scopedConnectionHandle = body.connectionHandle.trim();
+        }
+        scopedToken = body.token;
+        return scopedToken;
       }
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || typeof body.token !== 'string' || body.token.length < 32) {
-        throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
-          publicMessage: body.message ?? 'UGK Cockpit 无法建立本地 MCP 会话，请重启 Cockpit 后重试。',
-        });
-      }
-      scopedToken = body.token;
-      return scopedToken;
+      throw new Error('Unreachable scoped MCP token bootstrap state.');
+    })();
+    try {
+      return await bootstrapPromise;
+    } finally {
+      bootstrapPromise = null;
     }
-    throw new Error('Unreachable scoped MCP token bootstrap state.');
   }
 
-  async function call(pathname, arguments_) {
+  function newDiagnosticId() {
+    return `diag_${randomBytes(12).toString('hex')}`;
+  }
+
+  async function call(pathname, arguments_, { diagnosticId = newDiagnosticId() } = {}) {
     const isRelay = pathname === '/api/v1/mcp/work/resume' || pathname === '/api/v1/mcp/work/relay';
     const isTakeover = pathname === '/api/v1/mcp/work/takeover';
     const isRecoverableConversationWrite = isRelay || isTakeover;
@@ -195,7 +326,7 @@ export function createServiceHandlers({
     );
     let response = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const bearer = token ?? scopedToken ?? await bootstrapScopedToken();
+      const bearer = token ?? scopedToken ?? await bootstrapScopedToken(diagnosticId);
       try {
         response = await fetchImpl(new URL(pathname, baseUrl), {
           method: 'POST',
@@ -203,17 +334,22 @@ export function createServiceHandlers({
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',
+            'x-ugk-diagnostic-id': diagnosticId,
             ...(identity() ? { 'x-ugk-conversation': Buffer.from(JSON.stringify(identity())).toString('base64url') } : {}),
           },
           body: JSON.stringify(arguments_),
         });
       } catch (cause) {
         if (isStructured) {
-          throw createIntegrationTransportError(arguments_, cause);
+          throw createIntegrationTransportError(arguments_, cause, diagnosticId);
         }
         throw Object.assign(new Error('UGK Cockpit service is unavailable.', { cause }), {
+          code: 'SERVICE_UNAVAILABLE',
           transportFailure: true,
-          publicMessage: '无法连接 UGK Cockpit，本次任务状态没有更新。请确认本地服务正在运行。',
+          publicMessage: '无法连接 UGK Cockpit，暂时无法确认本次任务是否更新。请确认本地服务正在运行。',
+          impact: '请求中断，无法确认平台是否已执行该操作。',
+          required_action: '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。',
+          diagnosticId,
         });
       }
       if (response.status !== 401 || attempt === 1) break;
@@ -230,43 +366,75 @@ export function createServiceHandlers({
       try {
         body = await response.json();
       } catch (cause) {
-        throw createIntegrationTransportError(arguments_, cause);
+        throw createIntegrationTransportError(arguments_, cause, diagnosticId);
       }
       const hasExplicitError = !response.ok
         || body?.ok === false
         || (typeof body?.code === 'string' && body.code.trim().length > 0);
       if (hasExplicitError) {
-        const payload = sanitizeIntegrationErrorPayload(body, `HTTP_${response.status}`);
+        const payload = sanitizeIntegrationErrorPayload(
+          body,
+          `HTTP_${response.status}`,
+          responseDiagnosticHeader(response) ?? diagnosticId,
+        );
         throw createIntegrationError(payload);
       }
       const isValidSuccess = response.ok && body && typeof body === 'object' && !Array.isArray(body) && body.ok === true;
       if (isValidSuccess) {
         return body;
       }
-      throw createIntegrationTransportError(arguments_);
+      throw createIntegrationTransportError(arguments_, null, diagnosticId);
     }
     const body = await response.json().catch((cause) => {
-      if (isRecoverableConversationWrite) {
-        throw Object.assign(new Error('Conversation recovery response was lost.', { cause }), { transportFailure: true });
-      }
-      return {};
+      throw Object.assign(new Error('Conversation response was lost.', { cause }), {
+        code: 'SERVICE_UNAVAILABLE',
+        transportFailure: true,
+        publicMessage: '无法确认与 UGK Cockpit 的连接结果。请使用完全相同的 clientRequestId 和参数重试。',
+        impact: '请求中断，无法确认平台是否已执行该操作。',
+        required_action: '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。',
+        diagnosticId,
+      });
     });
     if (!response.ok) {
-      throw Object.assign(new Error(body.code ?? `HTTP_${response.status}`), {
-        publicMessage: body.message ?? 'UGK Cockpit 拒绝了这次状态更新，请刷新页面确认当前任务。',
+      const responseDiagnosticId = safeDiagnosticId(body?.diagnosticId)
+        ?? safeDiagnosticId(responseDiagnosticHeader(response))
+        ?? diagnosticId;
+      const payload = sanitizeIntegrationErrorPayload(
+        body,
+        `HTTP_${response.status}`,
+        responseDiagnosticId,
+      );
+      const reason = payload.reason ?? payload.bindingReason ?? payload.code;
+      const serviceError = Object.assign(new Error(payload.code), {
+        ...payload,
+        publicMessage: payload.message,
+        reason,
         ...(isRelay ? { relayPayload: {
-          ok: false, code: body.code ?? `HTTP_${response.status}`, retryable: false,
-          message: body.message, impact: body.impact, required_action: body.required_action,
+          ok: false,
+          ...payload,
+          retryable: false,
+          reason,
           clientRequestId: arguments_.clientRequestId,
         } } : isTakeover ? { takeoverPayload: {
-          ok: false, code: body.code ?? `HTTP_${response.status}`, retryable: false,
-          message: body.message, impact: body.impact, required_action: body.required_action,
+          ok: false,
+          ...payload,
+          retryable: false,
+          reason,
           clientRequestId: arguments_.clientRequestId,
         } } : {}),
       });
+      serviceError.message = payload.code;
+      throw serviceError;
     }
     if (isRecoverableConversationWrite && body?.ok !== true) {
-      throw Object.assign(new Error('Conversation recovery outcome is not confirmed.'), { transportFailure: true });
+      throw Object.assign(new Error('Conversation recovery outcome is not confirmed.'), {
+        code: 'SERVICE_UNAVAILABLE',
+        transportFailure: true,
+        publicMessage: '无法确认接力或接手结果，请使用完全相同的 clientRequestId 和参数重试。',
+        impact: '请求中断，无法确认平台是否已执行该操作。',
+        required_action: '请使用完全相同的 clientRequestId 和参数重试，不要创建新的请求编号。',
+        diagnosticId,
+      });
     }
     return body;
   }
@@ -304,9 +472,10 @@ export function createServiceHandlers({
   async function callRelay(pathname, arguments_) {
     // Keep the same immutable intent across connection and response-body loss.
     // The journal on the service, not this retry loop, proves the outcome.
+    const diagnosticId = newDiagnosticId();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const result = await call(pathname, arguments_);
+        const result = await call(pathname, arguments_, { diagnosticId });
         if (pathname.endsWith('/resume') && result.relayAccepted === true) rememberBinding(result);
         return result;
       } catch (error) {
@@ -318,6 +487,7 @@ export function createServiceHandlers({
         throw Object.assign(error, { relayPayload: {
           ok: false, code: 'RELAY_TRANSPORT_UNCERTAIN', status: 'recovery_pending',
           retryable: true, clientRequestId: arguments_.clientRequestId,
+          diagnosticId,
           message: '暂时无法确认接力结果，自动重试尚未成功。',
           impact: '请求可能已被服务保存；不要重新 init 或假定接手成功。',
           required_action: '连接恢复后在当前聊天原样重试本次请求，沿用同一 clientRequestId。',
@@ -329,9 +499,10 @@ export function createServiceHandlers({
   async function callTakeover(arguments_) {
     // The command journal makes this safe to retry with the identical intent
     // if the local service restarts after committing but before responding.
+    const diagnosticId = newDiagnosticId();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        const result = await call('/api/v1/mcp/work/takeover', arguments_);
+        const result = await call('/api/v1/mcp/work/takeover', arguments_, { diagnosticId });
         if (result.takeoverAccepted === true) rememberBinding(result);
         return result;
       } catch (error) {
@@ -343,6 +514,7 @@ export function createServiceHandlers({
         throw Object.assign(error, { takeoverPayload: {
           ok: false, code: 'CONVERSATION_TAKEOVER_TRANSPORT_UNCERTAIN', status: 'recovery_pending',
           retryable: true, clientRequestId: arguments_.clientRequestId,
+          diagnosticId,
           message: '暂时无法确认接手结果，自动重试尚未成功。',
           impact: '接手请求可能已被服务保存；原聊天和代码都没有被自动清理或覆盖。',
           required_action: '连接恢复后在当前聊天原样重试本次请求，沿用同一 clientRequestId。',

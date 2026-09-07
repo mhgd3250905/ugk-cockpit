@@ -1324,7 +1324,8 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         if (STRUCTURED_TOOL_NAMES.has(toolName) || err?.isIntegrationError) {
           const safePayload = sanitizeIntegrationErrorPayload(
             err?.integrationPayload ?? err,
-            err?.code ?? 'REQUEST_FAILED'
+            err?.code ?? 'REQUEST_FAILED',
+            err?.diagnosticId ?? null,
           );
           return {
             jsonrpc: '2.0',
@@ -1333,6 +1334,22 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
               isError: true,
               content: [{ type: 'text', text: JSON.stringify(safePayload) }]
             }
+          };
+        }
+        if (['code', 'reason', 'diagnosticId', 'impact', 'required_action', 'requiredAction']
+          .some((field) => err?.[field] !== undefined)) {
+          const safePayload = sanitizeIntegrationErrorPayload(
+            err,
+            err?.code ?? 'REQUEST_FAILED',
+            err?.diagnosticId ?? null,
+          );
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              isError: true,
+              content: [{ type: 'text', text: JSON.stringify(safePayload) }],
+            },
           };
         }
         const publicMessage = typeof err?.publicMessage === 'string'

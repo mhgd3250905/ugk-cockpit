@@ -611,9 +611,12 @@ function App() {
   const [handoffGoal, setHandoffGoal] = useState('');
   const [dispatch, setDispatch] = useState(null);
   const [projectDetail, setProjectDetail] = useState(null);
+  const [sessionDiagnostics, setSessionDiagnostics] = useState(null);
+  const [sessionDiagnosticsLoading, setSessionDiagnosticsLoading] = useState(false);
   const [editingProject, setEditingProject] = useState(null);
   const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
+  const diagnosticsRequestRef = useRef(0);
   const projectDetailRef = useRef(projectDetail);
   const dashboardRef = useRef(dashboard);
   const activeDetailProjectId = route.kind === 'detail' && !route.invalid
@@ -689,12 +692,18 @@ function App() {
   useEffect(() => {
     if (route.kind !== 'detail') {
       detailRequestRef.current += 1;
+      diagnosticsRequestRef.current += 1;
       setProjectDetail(null);
+      setSessionDiagnostics(null);
+      setSessionDiagnosticsLoading(false);
       return;
     }
 
     if (route.invalid) {
       const requestId = ++detailRequestRef.current;
+      diagnosticsRequestRef.current += 1;
+      setSessionDiagnostics(null);
+      setSessionDiagnosticsLoading(false);
       setProjectDetail({
         seed: { id: '', name: '项目详情', stage: 'development' },
         data: null,
@@ -711,6 +720,9 @@ function App() {
     }
 
     const seed = dashboardRef.current?.projects?.find((item) => item.id === route.projectId) ?? null;
+    diagnosticsRequestRef.current += 1;
+    setSessionDiagnostics(null);
+    setSessionDiagnosticsLoading(false);
     beginProjectDetailLoad(route.projectId, seed);
   }, [route.kind, route.projectId, route.invalid]);
 
@@ -1217,6 +1229,44 @@ function App() {
     }
   }
 
+  async function loadSessionDiagnostics() {
+    const projectId = activeDetailProjectId;
+    if (!projectId) return;
+    const requestId = ++diagnosticsRequestRef.current;
+    setSessionDiagnosticsLoading(true);
+    setSessionDiagnostics((previous) => (
+      previous?.projectId === projectId ? { ...previous, error: null } : null
+    ));
+    try {
+      const data = await api(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/session-diagnostics?limit=30`,
+      );
+      if (
+        diagnosticsRequestRef.current !== requestId
+        || readAppRoute().kind !== 'detail'
+        || readAppRoute().projectId !== projectId
+      ) return;
+      setSessionDiagnostics(data);
+    } catch (error) {
+      if (
+        diagnosticsRequestRef.current !== requestId
+        || readAppRoute().kind !== 'detail'
+        || readAppRoute().projectId !== projectId
+      ) return;
+      setSessionDiagnostics({
+        projectId,
+        entries: [],
+        error: createErrorNotice(error, {
+          message: '近期会话诊断暂时无法读取。',
+          impact: '项目代码和已有工作记录不受影响。',
+          requiredAction: '请确认本机服务仍在运行，然后重试读取。',
+        }),
+      });
+    } finally {
+      if (diagnosticsRequestRef.current === requestId) setSessionDiagnosticsLoading(false);
+    }
+  }
+
   const projects = dashboard?.projects ?? [];
 
   const stats = useMemo(() => {
@@ -1292,6 +1342,9 @@ function App() {
             onAssignSpace={assignDevelopmentSpace}
             onCopyReviewPrompt={copyIntegrationPrompt}
             onNoteStatusChange={refreshOpenProjectDetail}
+            onLoadDiagnostics={loadSessionDiagnostics}
+            diagnostics={sessionDiagnostics?.projectId === activeDetailProjectId ? sessionDiagnostics : null}
+            diagnosticsLoading={sessionDiagnosticsLoading}
             onEdit={(projectToEdit) => setEditingProject(projectToEdit)}
           />
         ) : (
@@ -1523,7 +1576,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange, onEdit }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     id: projectId,
@@ -1618,6 +1671,9 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             onAssignSpace={onAssignSpace}
             onCopyReviewPrompt={onCopyReviewPrompt}
             onNoteStatusChange={onNoteStatusChange}
+            onLoadDiagnostics={onLoadDiagnostics}
+            diagnostics={diagnostics}
+            diagnosticsLoading={diagnosticsLoading}
           />
         ) : (
           <DetailErrorState
@@ -1686,7 +1742,7 @@ function SubmitHelp() {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange }) {
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange, onLoadDiagnostics, diagnostics, diagnosticsLoading }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const git = project.git ?? {};
   const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
@@ -1908,9 +1964,57 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
               {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
             </dl>
           </details>
+          <SessionDiagnosticsPanel
+            projectId={project.id}
+            diagnostics={diagnostics}
+            loading={diagnosticsLoading}
+            onLoad={onLoadDiagnostics}
+          />
         </aside>
       </div>
     </>
+  );
+}
+
+function SessionDiagnosticsPanel({ projectId, diagnostics, loading, onLoad }) {
+  const [copied, setCopied] = useState(false);
+  const entries = Array.isArray(diagnostics?.entries) ? diagnostics.entries : [];
+
+  async function copyDiagnostics() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({ projectId, entries }, null, 2));
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <details className="project-tech-panel session-diagnostics-panel">
+      <summary>近期会话诊断</summary>
+      <p>只读取属于当前项目的已脱敏诊断记录；不会读取任意网页或项目文件。</p>
+      <div className="session-diagnostics-actions">
+        <Button variant="soft" size="sm" onClick={onLoad} disabled={loading}>
+          {loading ? '正在读取…' : '读取近期记录'}
+        </Button>
+        {entries.length > 0 && (
+          <Button variant="soft" size="sm" onClick={copyDiagnostics}>
+            {copied ? '已复制脱敏诊断' : '复制脱敏诊断'}
+          </Button>
+        )}
+      </div>
+      {diagnostics?.error ? (
+        <p className="session-diagnostics-error" role="alert">
+          {diagnostics.error.message} {diagnostics.error.required_action}
+        </p>
+      ) : diagnostics && entries.length === 0 ? (
+        <p className="session-diagnostics-empty">当前没有可显示的近期会话诊断。</p>
+      ) : entries.length > 0 ? (
+        <pre className="session-diagnostics-output">{JSON.stringify(entries, null, 2)}</pre>
+      ) : (
+        <p className="session-diagnostics-empty">展开后读取；日志只保留有限的近期记录。</p>
+      )}
+    </details>
   );
 }
 

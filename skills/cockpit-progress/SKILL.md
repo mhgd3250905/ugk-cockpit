@@ -20,6 +20,8 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 
 如果当前聊天遗失了最近一次成功 MCP 返回的 `sessionId` 或 `revision`，不要直接放弃、猜测或重新 init；在当前项目目录先调用只读 `ugk_work_context`（默认 `{}`）。只有返回 `canContinue: true`、`status: "active"`、有效 `sessionId` 和 `revision` 时，才可按下方格式登记。如果返回 `bindingStatus: "unbound"`，先向用户确认是否继续该候选会话，再把 context 返回的 `sessionId` 填入 `confirmSessionId`、把返回的 `revision` 填入 `expectedRevision`，成对调用 context 确认；确认成功前不要写 progress。`awaiting_resume`、`stale`、`ambiguous`、已结束或无会话时只报告平台登记未完成，不能把目录候选当作当前聊天身份。context 查询本身不改变会话、租约、心跳、revision 或业务记录；不可用时提示重新连接新版 MCP，不要求重新 init。
 
+scoped MCP credential、connection handle、宿主 `_meta` 和 diagnosticId 由 bridge/服务内部处理，不放入 progress 参数，也不要从日志或错误中复制这些值。响应中的 `bindingKind`、`bindingPersistence`、`bindingReason` 与 `capabilities` 是当前事实；不可变接力回执或旧 revision 不能代替当前绑定。
+
 ## 调用
 
 只使用最近一次成功 MCP 调用返回的 `sessionId` 和 `revision`，生成新的非空 `clientRequestId`，调用：
@@ -48,5 +50,6 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 
 - 传输结果不确定时，用同一个 `clientRequestId` 重发完全相同的 payload；不要换 ID、改 revision 或再次执行 Git。
 - 平台登记缺失、跳过或失败时，只报告平台进展未登记，不影响已成功 Git 或后续已授权 Git；不回滚、撤销 commit 或阻塞授权 push。
+- 若错误包含 `diagnosticId`，只在当前会话的故障说明中引用该标识；不要记录 token、handle、请求体、路径或异常原文。传输结果未知时沿用同一 `clientRequestId` 和 payload 重放。
 - MCP 不可用时明确提示安装/启用 `ugk-cockpit` 本地 MCP 后重试，不声称完成。
 - MCP 负责权限、CAS revision、幂等和事务；不要在 payload 中加入 `path`、`projectId` 或 `worktreeId`，也不要在 Skill 内复制状态机。

@@ -74,12 +74,46 @@ import {
   validateBrowserStatusBody,
 } from '../core/submit-notes-contract.mjs';
 import { serveWebAsset as defaultServeWebAsset } from './web-assets.mjs';
+import { createDiagnosticLogger, readRecentSessionDiagnostics } from './diagnostics.mjs';
 import { VERSION } from '../version.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MCP_SESSION_LIMIT = 64;
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../dist/web', import.meta.url));
+const MCP_CONNECTION_HANDLE_DOMAIN = 'ugk-cockpit:mcp-connection:v1';
+const MCP_CONNECTION_HANDLE_PATTERN = /^v1\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/;
+const DIAGNOSTIC_ID_PATTERN = /^diag_[A-Za-z0-9_-]{16,64}$/;
+const SAFE_SESSION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const SAFE_BINDING_REASON_PATTERN = /^[a-z][a-z0-9_.-]{1,79}$/;
+const SAFE_BINDING_REASONS = new Set([
+  'metadata_missing',
+  'binding_missing',
+  'revoked',
+  'replaced',
+  'held_elsewhere',
+  'session_missing',
+  'session_not_active',
+  'generation_mismatch',
+]);
+const SAFE_STATUS_VALUES = new Set([
+  'active',
+  'accepted',
+  'awaiting_resume',
+  'blocked',
+  'completed',
+  'abandoned',
+  'cancelled',
+  'failed',
+  'stale_write_lease',
+  'session_not_found',
+]);
+const SAFE_BINDING_STATUS_VALUES = new Set([
+  'bound',
+  'stale',
+  'unbound',
+  'ambiguous',
+]);
 
 class AtomicHandoffAbort extends Error {
   constructor(result) {
@@ -90,6 +124,18 @@ class AtomicHandoffAbort extends Error {
 }
 
 const PUBLIC_ERRORS = {
+  MCP_CONNECTION_HANDLE_INVALID: {
+    status: 401,
+    message: '这个 MCP 连接无法安全续接。',
+    impact: '没有创建新的连接归属，代码、工作会话和已有记录都没有被修改。',
+    requiredAction: '请重新连接当前 MCP；如果服务凭据已更换，旧连接不能恢复。',
+  },
+  MCP_CONNECTION_HANDLE_REQUIRED: {
+    status: 401,
+    message: '当前 MCP 服务不支持安全的连接续接。',
+    impact: '没有创建新的连接归属，代码、工作会话和已有记录都没有被修改。',
+    requiredAction: '请重新连接新版 UGK Cockpit MCP。',
+  },
   CONVERSATION_BINDING_CONFLICT: {
     status: 409,
     message: '当前聊天没有此工作会话的有效绑定，或已由另一聊天接手。',
@@ -870,6 +916,61 @@ function id(prefix, value) {
   return `${prefix}_${createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
 }
 
+function connectionHandleSignature(nonce, apiToken) {
+  return createHmac('sha256', apiToken)
+    .update(`${MCP_CONNECTION_HANDLE_DOMAIN}\0${nonce}`)
+    .digest('base64url');
+}
+
+function issueConnectionHandle(apiToken) {
+  const nonce = randomBytes(32).toString('base64url');
+  const signature = connectionHandleSignature(nonce, apiToken);
+  return {
+    handle: `v1.${nonce}.${signature}`,
+    connectionPrincipalHash: createHash('sha256')
+      .update(`ugk-cockpit:mcp-connection-principal:v1\0${nonce}`)
+      .digest('hex'),
+  };
+}
+
+function verifyConnectionHandle(handle, apiToken) {
+  if (typeof handle !== 'string') return null;
+  const match = handle.match(MCP_CONNECTION_HANDLE_PATTERN);
+  if (!match) return null;
+  const [, nonce, signature] = match;
+  const actual = Buffer.from(signature);
+  const expected = Buffer.from(connectionHandleSignature(nonce, apiToken));
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  return {
+    connectionPrincipalHash: createHash('sha256')
+      .update(`ugk-cockpit:mcp-connection-principal:v1\0${nonce}`)
+      .digest('hex'),
+  };
+}
+
+function diagnosticOperation(pathname) {
+  const operations = {
+    '/api/v1/mcp/session': 'mcp.session',
+    '/api/v1/mcp/work/context': 'mcp.context',
+    '/api/v1/mcp/work/init': 'mcp.init',
+    '/api/v1/mcp/work/accept': 'mcp.accept',
+    '/api/v1/mcp/work/resume': 'mcp.resume',
+    '/api/v1/mcp/work/takeover': 'mcp.takeover',
+    '/api/v1/mcp/work/relay': 'mcp.relay',
+    '/api/v1/mcp/work/progress': 'mcp.progress',
+    '/api/v1/mcp/work/begin': 'mcp.begin',
+    '/api/v1/mcp/work/finish': 'mcp.finish',
+    '/api/v1/mcp/work/handoff': 'mcp.handoff',
+    '/api/v1/mcp/work/submit-note': 'mcp.submit_note',
+    '/api/v1/mcp/submit-notes/get': 'mcp.submit_note_get',
+    '/api/v1/mcp/submit-notes/update': 'mcp.submit_note_update',
+    '/api/v1/mcp/integration/begin': 'mcp.integration_begin',
+    '/api/v1/mcp/integration/review': 'mcp.integration_review',
+    '/api/v1/mcp/integration/merge': 'mcp.integration_merge',
+  };
+  return operations[pathname] ?? 'request';
+}
+
 function relayContinueCode(apiToken, sessionId, clientRequestId) {
   return createHmac('sha256', apiToken)
     .update(`relay:${sessionId}:${clientRequestId}`)
@@ -986,8 +1087,82 @@ function integrationErrorExtra(body, result = {}) {
   return extra;
 }
 
+function safeSessionId(value) {
+  return typeof value === 'string' && SAFE_SESSION_ID_PATTERN.test(value) ? value : null;
+}
+
+function safeRevision(value) {
+  return Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null;
+}
+
+function normalizeConversationErrorContext(context) {
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return {};
+  const normalized = {};
+  const sessionId = safeSessionId(context.sessionId ?? context.session_id);
+  if (sessionId) normalized.sessionId = sessionId;
+  const revision = [context.revision, context.currentRevision, context.current_revision]
+    .map(safeRevision)
+    .find((value) => value !== null);
+  if (revision !== undefined) normalized.revision = revision;
+  const bindingReason = context.bindingReason ?? context.reason;
+  if (typeof bindingReason === 'string' && SAFE_BINDING_REASONS.has(bindingReason)) {
+    normalized.bindingReason = bindingReason;
+  }
+  if (typeof context.status === 'string' && SAFE_STATUS_VALUES.has(context.status)) {
+    normalized.status = context.status;
+  }
+  if (typeof context.bindingStatus === 'string' && SAFE_BINDING_STATUS_VALUES.has(context.bindingStatus)) {
+    normalized.bindingStatus = context.bindingStatus;
+  }
+  if (typeof context.canContinue === 'boolean') normalized.canContinue = context.canContinue;
+  if (typeof context.requiresUserConfirmation === 'boolean') {
+    normalized.requiresUserConfirmation = context.requiresUserConfirmation;
+  }
+  return normalized;
+}
+
+function diagnosticSessionDetails(response, body) {
+  const candidate = response.__ugkDiagnosticContext?.sessionId
+    ?? body?.sessionId
+    ?? body?.session_id;
+  const sessionId = safeSessionId(candidate);
+  const db = response.__ugkDiagnosticDb;
+  if (!sessionId || !db) return null;
+  try {
+    const state = readExactSessionState(db, sessionId);
+    if (!state || state.sessionId !== sessionId) return null;
+    return { sessionId, revision: state.revision };
+  } catch {
+    return null;
+  }
+}
+
 function sendJson(response, statusCode, body) {
   const payload = JSON.stringify(body);
+  const diagnosticId = response.__ugkDiagnosticId;
+  if (diagnosticId) {
+    response.setHeader('x-ugk-diagnostic-id', diagnosticId);
+  }
+  const diagnosticSession = diagnosticSessionDetails(response, body);
+  try {
+    response.__ugkDiagnosticLogger?.record({
+      ...response.__ugkDiagnosticContext,
+      result: body?.status === 'recovery_pending' || body?.code?.endsWith?.('_UNCERTAIN')
+        ? 'uncertain'
+        : (body?.ok === false || body?.code || statusCode >= 400 ? 'rejected' : 'success'),
+      code: body?.code,
+      sessionId: diagnosticSession?.sessionId,
+      revision: safeRevision(response.__ugkDiagnosticContext?.revision)
+        ?? safeRevision(body?.revision)
+        ?? diagnosticSession?.revision,
+      bindingReason: body?.bindingReason ?? body?.reason,
+    });
+  } catch {
+    // Diagnostic persistence is deliberately best effort and cannot alter the
+    // response or a business result.
+  }
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
@@ -997,8 +1172,21 @@ function sendJson(response, statusCode, body) {
   response.end(payload);
 }
 
-function sendError(response, code, { commandId = null, extra = {} } = {}) {
+function sendError(response, code, { commandId = null, extra = {}, context = null } = {}) {
   const definition = PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.REQUEST_FAILED;
+  const contextFields = normalizeConversationErrorContext(context);
+  if (context?.sessionValidated === true && contextFields.sessionId) {
+    response.__ugkDiagnosticContext = {
+      ...response.__ugkDiagnosticContext,
+      sessionId: contextFields.sessionId,
+      revision: contextFields.revision,
+    };
+  }
+  const contextReason = contextFields.bindingReason;
+  const requestedReason = extra?.reason;
+  const reason = typeof requestedReason === 'string' && SAFE_BINDING_REASON_PATTERN.test(requestedReason)
+    ? requestedReason
+    : contextReason ?? code;
   sendJson(response, definition.status, {
     code: PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED',
     message: definition.message,
@@ -1007,7 +1195,11 @@ function sendError(response, code, { commandId = null, extra = {} } = {}) {
     next_command: null,
     warnings: [],
     command_id: commandId,
+    ...contextFields,
     ...extra,
+    ...(response.__ugkBindingReport ?? {}),
+    reason,
+    ...(response.__ugkDiagnosticId ? { diagnosticId: response.__ugkDiagnosticId } : {}),
   });
 }
 
@@ -1627,6 +1819,79 @@ function publicBridgeBinding(state) {
   };
 }
 
+function currentConversationAuthorization(db, binding, result = {}) {
+  if (!binding?.key) return null;
+  const sessionId = result?.sessionId ?? result?.session_id;
+  const worktreeId = result?.worktreeId ?? result?.worktree_id;
+  if (!safeSessionId(sessionId) || typeof worktreeId !== 'string' || !worktreeId.trim()) {
+    return {
+      known: false,
+      canContinue: false,
+      writable: false,
+    };
+  }
+  const current = readExactSessionState(db, sessionId);
+  const currentBinding = current?.worktreeId === worktreeId
+    ? readConversationBinding(db, binding.key, worktreeId, sessionId)
+    : null;
+  const owner = current ? readConversationOwner(db, sessionId) : null;
+  const matches = Boolean(
+    current
+      && currentBinding
+      && !currentBinding.revoked
+      && currentBinding.sessionId === sessionId
+      && currentBinding.worktreeId === worktreeId
+      && owner?.conversationKey === binding.key
+      && bridgeBindingMatches(current, currentBinding),
+  );
+  const writable = matches && current.status === 'active';
+  return {
+    known: true,
+    sessionId: current?.sessionId ?? null,
+    revision: current?.revision ?? null,
+    status: current?.status ?? null,
+    generation: current?.generation ?? null,
+    owner: owner?.conversationKey ?? null,
+    canContinue: writable,
+    writable,
+  };
+}
+
+function bindingReport(binding, result = {}, currentAuthorization = null) {
+  const bindingKind = binding?.bindingKind ?? 'legacy';
+  const bindingPersistence = bindingKind === 'host'
+    ? 'durable'
+    : bindingKind === 'connection' ? 'connection_only' : 'legacy';
+  const resultCanContinue = Object.prototype.hasOwnProperty.call(result, 'canContinue')
+    ? result.canContinue === true
+    : (result.status === 'active' && result.ok === true && bindingKind !== 'legacy');
+  const canUseCurrentBinding = currentAuthorization
+    ? currentAuthorization.canContinue === true
+    : !binding?.key;
+  const canContinue = resultCanContinue && canUseCurrentBinding;
+  const writable = canContinue
+    && result.status === 'active'
+    && (currentAuthorization ? currentAuthorization.writable === true : !binding?.key);
+  return {
+    bindingKind,
+    bindingPersistence,
+    capabilities: {
+      readContext: true,
+      continueSession: canContinue,
+      writeSession: writable,
+      prepareRelay: writable,
+      resumeRelay: bindingKind !== 'legacy',
+      requestTakeover: bindingKind !== 'legacy',
+    },
+  };
+}
+
+function withBindingReport(result, binding, currentAuthorization = null) {
+  return result && typeof result === 'object'
+    ? { ...result, ...bindingReport(binding, result, currentAuthorization) }
+    : result;
+}
+
 function bridgeBindingMatches(state, binding) {
   if (!state || !binding || binding.revoked
     || binding.sessionId !== state.sessionId
@@ -1778,7 +2043,13 @@ function authenticate(request, apiToken, browserToken, mcpSessions) {
     if (session && session.expiresAt > Date.now()) {
       return {
         kind: 'mcp',
+        // Keep the bearer-derived principal for existing folder/grant callers.
+        // Conversation continuity uses the separately derived connection
+        // principal below, which remains stable when the scoped token rotates.
         principalHash: createHash('sha256').update(`mcp:${candidate}`).digest('hex'),
+        connectionPrincipalHash: session.connectionPrincipalHash
+          ?? createHash('sha256').update(`mcp:${candidate}`).digest('hex'),
+        connectionHandleRecognized: session.connectionHandleRecognized === true,
       };
     }
     if (session) mcpSessions.delete(candidate);
@@ -1860,6 +2131,7 @@ export async function createCockpitHttpServer({
   faultInjector,
   createGitWorktree,
   checkBranchExists,
+  diagnosticLogDirectory = path.join(path.dirname(dbPath), 'logs'),
 }) {
   if (!token || token.length < 32) throw new Error('A local API token of at least 32 characters is required.');
   const db = openCockpitDatabase(dbPath);
@@ -1867,6 +2139,7 @@ export async function createCockpitHttpServer({
   const activeEmptyFolderGrants = emptyFolderGrants ?? new EmptyFolderGrantStore({ db });
   const browserSessionToken = randomBytes(32).toString('base64url');
   const mcpSessions = new Map();
+  const diagnosticLogger = createDiagnosticLogger({ directory: diagnosticLogDirectory });
 
   async function prepareFolderSelection(selectedPath, principalHash) {
     if (!selectedPath) return { ok: true, cancelled: true };
@@ -2252,7 +2525,7 @@ export async function createCockpitHttpServer({
       if (body.confirmSessionId !== current.sessionId || body.expectedRevision !== current.revision) {
         const error = new Error('Context confirmation no longer matches the current session.');
         error.code = 'SESSION_CONTEXT_CONFIRMATION_STALE';
-        error.context = base;
+        error.context = { ...base, sessionValidated: true };
         throw error;
       }
       if (key) withImmediateTransaction(db, () => bindConversation(
@@ -2287,14 +2560,42 @@ export async function createCockpitHttpServer({
     if (!sessionId) return;
     const context = readSessionContext(db, sessionId);
     if (!context?.ok) return; // Existing route reports the precise missing-session error.
-    const owner = db.prepare('SELECT conversation_key FROM conversation_bindings WHERE session_id = ? AND revoked = 0')
-      .get(sessionId);
-    if (!key && !owner) return; // Existing clients keep working until this session is explicitly migrated.
-    const binding = readConversationBinding(db, key, context.worktreeId, sessionId);
     const current = readExactSessionState(db, sessionId);
-    if (!binding || !bridgeBindingMatches(current, binding)
-      || !allowedStatuses.includes(current?.status) || owner?.conversation_key !== key) {
-      throw Object.assign(new Error('Conversation binding is missing or stale.'), { code: 'CONVERSATION_BINDING_CONFLICT' });
+    const owner = readConversationOwner(db, sessionId);
+    if (!key && !owner) return; // Existing clients keep working until this session is explicitly migrated.
+    const binding = key ? readConversationBinding(db, key, context.worktreeId, sessionId) : null;
+    let bindingReason = null;
+    if (!key && owner) {
+      bindingReason = 'metadata_missing';
+    } else if (!current) {
+      bindingReason = 'session_missing';
+    } else if (!allowedStatuses.includes(current.status)) {
+      bindingReason = 'session_not_active';
+    } else if (!binding) {
+      bindingReason = owner && owner.conversationKey !== key
+        ? 'held_elsewhere'
+        : 'binding_missing';
+    } else if (binding.revoked) {
+      bindingReason = owner && owner.conversationKey !== key ? 'replaced' : 'revoked';
+    } else if (owner?.conversationKey !== key) {
+      bindingReason = 'held_elsewhere';
+    } else if (!bridgeBindingMatches(current, binding)) {
+      bindingReason = 'generation_mismatch';
+    }
+    if (bindingReason) {
+      throw Object.assign(new Error('Conversation binding is missing or stale.'), {
+        code: 'CONVERSATION_BINDING_CONFLICT',
+        context: {
+          sessionId: current?.sessionId ?? null,
+          revision: current?.revision ?? context.revision ?? null,
+          status: current?.status ?? context.status ?? null,
+          bindingStatus: 'stale',
+          bindingReason,
+          canContinue: false,
+          requiresUserConfirmation: false,
+          sessionValidated: Boolean(current?.sessionId === sessionId),
+        },
+      });
     }
   }
 
@@ -2314,11 +2615,23 @@ export async function createCockpitHttpServer({
   }
 
   const server = createServer(async (request, response) => {
-    let requestPath = '<unparsed>';
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
-      requestPath = url.pathname;
+      const requestedDiagnosticId = request.headers['x-ugk-diagnostic-id'];
+      const diagnosticId = typeof requestedDiagnosticId === 'string'
+        && DIAGNOSTIC_ID_PATTERN.test(requestedDiagnosticId)
+        ? requestedDiagnosticId
+        : `diag_${randomBytes(12).toString('hex')}`;
+      response.__ugkDiagnosticId = diagnosticId;
+      response.__ugkDiagnosticLogger = diagnosticLogger;
+      response.__ugkDiagnosticDb = db;
+      response.__ugkDiagnosticContext = {
+        operation: diagnosticOperation(url.pathname),
+        diagnosticId,
+        identitySource: 'none',
+        identityRecognized: false,
+      };
       let key = null;
       let identity = null;
       if (request.headers['x-ugk-conversation']) {
@@ -2371,6 +2684,37 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
+        const handleCapable = body.connectionHandleVersion === 'v1' || body.connectionHandle !== undefined;
+        let connection;
+        if (body.connectionHandle !== undefined) {
+          connection = verifyConnectionHandle(body.connectionHandle, token);
+          if (!connection) {
+            response.__ugkDiagnosticContext = {
+              ...response.__ugkDiagnosticContext,
+              identitySource: 'connection_handle',
+              credentialEvent: 'refresh_rejected',
+              bindingReason: 'connection_handle_rejected',
+            };
+            sendError(response, 'MCP_CONNECTION_HANDLE_INVALID', {
+              extra: { reason: 'connection_handle_rejected' },
+            });
+            return;
+          }
+          response.__ugkDiagnosticContext = {
+            ...response.__ugkDiagnosticContext,
+            identitySource: 'connection_handle',
+            identityRecognized: true,
+            credentialEvent: 'resumed',
+          };
+        } else {
+          connection = issueConnectionHandle(token);
+          response.__ugkDiagnosticContext = {
+            ...response.__ugkDiagnosticContext,
+            identitySource: 'anonymous_bridge',
+            credentialEvent: 'issued',
+            anonymousBridgeStart: true,
+          };
+        }
         const now = Date.now();
         for (const [candidate, session] of mcpSessions) {
           if (session.expiresAt <= now) mcpSessions.delete(candidate);
@@ -2380,11 +2724,16 @@ export async function createCockpitHttpServer({
         }
         const scopedToken = randomBytes(32).toString('base64url');
         const expiresAt = now + MCP_SESSION_TTL_MS;
-        mcpSessions.set(scopedToken, { expiresAt });
+        mcpSessions.set(scopedToken, {
+          expiresAt,
+          connectionPrincipalHash: handleCapable ? connection.connectionPrincipalHash : null,
+          connectionHandleRecognized: handleCapable,
+        });
         sendJson(response, 201, {
           ok: true,
           token: scopedToken,
           expiresAt: new Date(expiresAt).toISOString(),
+          connectionHandle: connection.handle ?? body.connectionHandle,
         });
         return;
       }
@@ -2402,13 +2751,37 @@ export async function createCockpitHttpServer({
         }
         : authentication.kind === 'mcp'
           ? {
-            key: conversationKey({ host: 'ugk-mcp-connection', id: authentication.principalHash }),
+            key: conversationKey({
+              host: 'ugk-mcp-connection',
+              id: authentication.connectionHandleRecognized
+                ? authentication.connectionPrincipalHash
+                : authentication.principalHash,
+            }),
             bindingKind: 'connection',
             host: null,
             locator: null,
           }
           : null;
+      if (url.pathname.startsWith('/api/v1/mcp/')) {
+        response.__ugkBindingReport = bindingReport(conversationBinding);
+      }
+      response.__ugkDiagnosticContext = {
+        ...response.__ugkDiagnosticContext,
+        identitySource: identity
+          ? 'host_metadata'
+          : authentication.kind === 'mcp'
+            ? (authentication.connectionHandleRecognized ? 'connection_handle' : 'legacy_token')
+            : authentication.kind === 'bearer' ? 'legacy_token' : 'none',
+        identityRecognized: Boolean(
+          identity || (authentication.kind === 'mcp' && authentication.connectionHandleRecognized),
+        ),
+      };
       key = conversationBinding?.key ?? key;
+      const reportCurrentBinding = (result) => withBindingReport(
+        result,
+        conversationBinding,
+        currentConversationAuthorization(db, conversationBinding, result),
+      );
       if (
         authentication.kind === 'browser'
         && request.method !== 'GET'
@@ -2616,6 +2989,33 @@ export async function createCockpitHttpServer({
             },
           });
         }
+        return;
+      }
+
+      const projectDiagnosticsMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/session-diagnostics$/);
+      if (request.method === 'GET' && projectDiagnosticsMatch) {
+        const projectId = decodeURIComponent(projectDiagnosticsMatch[1]);
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '30', 10) || 30));
+        const sessionIds = db.prepare(`
+          SELECT DISTINCT session_id
+          FROM assignments
+          WHERE project_id = ? AND session_id IS NOT NULL
+          ORDER BY updated_at DESC, id DESC
+        `).all(projectId).map((row) => row.session_id);
+        sendJson(response, 200, {
+          ok: true,
+          projectId,
+          entries: readRecentSessionDiagnostics({
+            directory: diagnosticLogDirectory,
+            sessionIds,
+            limit,
+          }),
+        });
         return;
       }
 
@@ -3146,18 +3546,19 @@ export async function createCockpitHttpServer({
         const body = await readJson(request);
         validateMcpContextBody(body);
         try {
-          sendJson(response, 200, await readMcpWorkContext(body, key, conversationBinding));
+          sendJson(response, 200, reportCurrentBinding(
+            await readMcpWorkContext(body, key, conversationBinding),
+          ));
         } catch (error) {
           if (error?.code === 'SESSION_CONTEXT_CONFIRMATION_STALE') {
             sendError(response, error.code, {
               extra: {
-                session_id: error.context?.sessionId ?? null,
-                revision: error.context?.revision ?? null,
                 status: error.context?.status ?? null,
                 bindingStatus: error.context?.bindingStatus ?? null,
                 canContinue: false,
                 requiresUserConfirmation: true,
               },
+              context: error.context,
             });
             return;
           }
@@ -3187,7 +3588,7 @@ export async function createCockpitHttpServer({
         }
         const latestHandoff = readLatestHandoff(db, accepted.projectId);
         if (accepted.scope?.mode === 'standby') {
-          sendJson(response, 200, rememberConversation(key, {
+          sendJson(response, 200, reportCurrentBinding(rememberConversation(key, {
             ok: true,
             assignmentId: accepted.assignmentId,
             sessionId: accepted.sessionId,
@@ -3201,7 +3602,7 @@ export async function createCockpitHttpServer({
             message: latestHandoff
               ? '已读取最后一次交接；当前没有写入权限，请向用户复述现状并等待安排。'
               : '这个项目还没有交接手册；当前没有写入权限，请告知用户并等待安排。',
-          }, conversationBinding));
+          }, conversationBinding)));
           return;
         }
         const started = startWriteRun(db, {
@@ -3222,7 +3623,7 @@ export async function createCockpitHttpServer({
           return;
         }
         const current = readSessionContext(db, accepted.sessionId);
-        sendJson(response, 200, rememberConversation(key, {
+        sendJson(response, 200, reportCurrentBinding(rememberConversation(key, {
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
@@ -3234,7 +3635,7 @@ export async function createCockpitHttpServer({
           leaseGeneration: started.leaseGeneration,
           acceptedAt: accepted.acceptedAt,
           latestHandoff,
-        }, conversationBinding));
+        }, conversationBinding)));
         return;
       }
 
@@ -3355,7 +3756,7 @@ export async function createCockpitHttpServer({
           sendError(response, initialized.code, { extra: { session_id: accepted.sessionId } });
           return;
         }
-        sendJson(response, 200, rememberConversation(key, {
+        sendJson(response, 200, reportCurrentBinding(rememberConversation(key, {
           ok: true,
           assignmentId: accepted.assignmentId,
           sessionId: accepted.sessionId,
@@ -3369,7 +3770,7 @@ export async function createCockpitHttpServer({
           preexistingChangesPreserved: Boolean(observation.after?.hasChanges),
           latestHandoff,
           message: '当前项目已接入 Cockpit；已有改动已作为接入基线保留。',
-        }, conversationBinding));
+        }, conversationBinding)));
         return;
       }
 
@@ -3406,7 +3807,7 @@ export async function createCockpitHttpServer({
           // Only its digest is persisted by the core relay implementation.
           continueCode: relayContinueCode(token, body.sessionId, body.clientRequestId),
         }, { faultInjector });
-        if (result.ok) sendJson(response, 200, result);
+        if (result.ok) sendJson(response, 200, reportCurrentBinding(result));
         else sendError(response, result.code, {
           extra: {
             session_id: body.sessionId,
@@ -3430,7 +3831,7 @@ export async function createCockpitHttpServer({
           repositoryIdentity: working.observation.repositoryIdentity,
           worktreeIdentity: working.observation.worktreeIdentity,
         }, { faultInjector, conversationBinding });
-        if (result.ok) sendJson(response, 200, result);
+        if (result.ok) sendJson(response, 200, reportCurrentBinding(result));
         else sendError(response, result.code, {
           extra: {
             session_id: result.sessionId ?? null,
@@ -3465,7 +3866,7 @@ export async function createCockpitHttpServer({
           conversationKey: key,
           binding: conversationBinding,
         });
-        if (result.ok) sendJson(response, 200, result);
+        if (result.ok) sendJson(response, 200, reportCurrentBinding(result));
         else sendError(response, result.code, {
           extra: {
             session_id: result.sessionId ?? body.sessionId,
@@ -3934,10 +4335,9 @@ export async function createCockpitHttpServer({
       const code = error instanceof SyntaxError
         ? 'INVALID_REQUEST'
         : (sqliteBusy ? 'DATABASE_BUSY' : error?.code);
-      if (!PUBLIC_ERRORS[code]) {
-        process.stderr.write(`[ugk-service] unclassified request failure: ${request.method} ${requestPath}; ${error?.name ?? 'Error'}: ${error?.message ?? String(error)}\n`);
-      }
-      sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED');
+      sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED', {
+        context: error?.context,
+      });
     }
   });
 
