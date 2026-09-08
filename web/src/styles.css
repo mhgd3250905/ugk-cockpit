@@ -882,6 +882,15 @@ details[open] > summary::before {
   max-width: 760px;
 }
 
+.workspace-recovery-list {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-recovery-notice {
+  margin: 0;
+}
+
 /* ==========================================================================
    空状态 / 加载态
    ========================================================================== */

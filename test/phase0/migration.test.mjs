@@ -470,7 +470,8 @@ test('version 12 database upgrades through current schema with repository identi
 
   // Test development_spaces insertion & check constraint
   upgraded.prepare(`
-    INSERT INTO worktrees VALUES ('wt-space-1', 'E:\\repo1-space', 'repo-identity-1', 0, '2026-01-01T00:00:00.000Z', 'fp-space');
+    INSERT INTO worktrees (id, canonical_path, repository_identity, lease_generation, created_at, identity_fingerprint)
+    VALUES ('wt-space-1', 'E:\\repo1-space', 'repo-identity-1', 0, '2026-01-01T00:00:00.000Z', 'fp-space');
   `).run();
   upgraded.prepare(`
     INSERT INTO development_spaces (

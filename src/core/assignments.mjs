@@ -11,6 +11,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { checkWorkspaceWriteAdmission } from './workspace-lifecycle.mjs';
 
 /**
  * The assignment API is deliberately transport agnostic.  An HTTP/MCP
@@ -457,6 +458,23 @@ function createPendingAssignment(db, request = {}, options = {}) {
     const command = readCommand(db, commandId);
     const replay = terminalResult(command);
     if (replay) return replay;
+
+    // Pending dispatch is still an admission to the workspace: allowing it
+    // to enter while a lifecycle Git effect is in flight would let a later
+    // accept race with the lifecycle reservation. Keep the command received
+    // for an uncertain fence so the caller can retry the same request.
+    const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
+      worktreeId: targetWorktree.worktree_id,
+      repositoryIdentity: targetWorktree.repository_identity,
+      enforceObservation: false,
+    });
+    if (!lifecycleAdmission.ok) {
+      if (lifecycleAdmission.retryable === false
+        || lifecycleAdmission.outcome === 'confirmed_failure') {
+        return failCommand(db, commandId, lifecycleAdmission);
+      }
+      return lifecycleAdmission;
+    }
 
     const existing = db.prepare('SELECT * FROM assignments WHERE id = ?').get(assignmentId);
     if (existing) {
@@ -943,6 +961,17 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
         sessionId,
         worktreeId: assignment.worktree_id,
       });
+    }
+    const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
+      worktreeId: assignment.worktree_id,
+      repositoryIdentity: grant.repository_identity,
+      enforceObservation: false,
+    });
+    if (!lifecycleAdmission.ok) {
+      if (lifecycleAdmission.retryable === false || lifecycleAdmission.outcome === 'confirmed_failure') {
+        return failCommand(db, commandId, lifecycleAdmission);
+      }
+      return lifecycleAdmission;
     }
     const initialRevision = run?.revision ?? 1;
     db.prepare(`
@@ -1443,6 +1472,20 @@ export function beginAssignmentWork(db, request = {}, options = {}) {
         sessionId,
         status: assignment.status,
       });
+    }
+    const assignmentWorktree = db.prepare(`
+      SELECT repository_identity FROM worktrees WHERE id = ?
+    `).get(assignment.worktree_id);
+    const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
+      worktreeId: assignment.worktree_id,
+      repositoryIdentity: assignmentWorktree?.repository_identity,
+      enforceObservation: false,
+    });
+    if (!lifecycleAdmission.ok) {
+      if (lifecycleAdmission.retryable === false || lifecycleAdmission.outcome === 'confirmed_failure') {
+        return failCommand(db, commandId, lifecycleAdmission);
+      }
+      return lifecycleAdmission;
     }
     db.prepare(`
       UPDATE assignments SET status = 'active', task_id = ?, updated_at = ?

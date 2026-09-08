@@ -9,6 +9,10 @@ import { withImmediateTransaction } from './database.mjs';
 
 export const DEFAULT_CLAIM_TTL_MS = 5 * 60 * 1000;
 export const DEFAULT_LOCK_TTL_MS = 60 * 1000;
+// A workspace lifecycle lock is released only when its durable reservation is
+// finalized or explicitly abandoned. Keep the existing lock schema while
+// making this value practically non-expiring for crash recovery.
+export const PERSISTENT_LOCK_EXPIRY = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
 
 export const VALID_SUBMISSION_STATUSES = new Set([
   'pending',
@@ -1379,6 +1383,7 @@ export function acquireRepositoryLock(db, request = {}, options = {}) {
     operation,
     ttlMs = DEFAULT_LOCK_TTL_MS,
   } = request;
+  const persistent = request.persistent === true;
 
   if (!isNonEmptyString(repositoryIdentity)) {
     return { ok: false, code: 'INVALID_REQUEST', message: 'repositoryIdentity is required.' };
@@ -1395,7 +1400,7 @@ export function acquireRepositoryLock(db, request = {}, options = {}) {
 
   const nowMs = nowMillis(options);
   const timestamp = iso(nowMs);
-  const expiresAt = nowMs + ttlMs;
+  const expiresAt = persistent ? PERSISTENT_LOCK_EXPIRY : nowMs + ttlMs;
   const lockId = request.lockId ?? request.id ?? lockIdFor(repositoryIdentity, holder, timestamp);
 
   const frozenRequest = {
@@ -1405,6 +1410,7 @@ export function acquireRepositoryLock(db, request = {}, options = {}) {
     holder,
     operation,
     ttlMs,
+    ...(persistent ? { persistent: true } : {}),
   };
 
   if (commandId) {
@@ -1424,6 +1430,53 @@ export function acquireRepositoryLock(db, request = {}, options = {}) {
       if (command.state === 'committed' || command.state === 'failed') {
         return parseCommandResponse(command);
       }
+    }
+
+    // A legacy v26 lifecycle command may have already touched Git while its
+    // journal row stayed non-terminal. Do not let another repository lock
+    // bypass that uncertainty. The lifecycle executor is explicitly allowed
+    // to resume its own command by passing lifecycleCommandId.
+    const ownsLifecycleReservation = db.prepare(`
+      SELECT 1 AS owned
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'workspace_lifecycle_reservations'
+        AND EXISTS (
+          SELECT 1 FROM workspace_lifecycle_reservations
+          WHERE repository_identity = ? AND command_id = ?
+        )
+    `).get(repositoryIdentity, request.lifecycleCommandId ?? '')?.owned;
+    const legacy = ownsLifecycleReservation ? null : db.prepare(`
+      SELECT commands.id, commands.kind, commands.state
+      FROM commands
+      JOIN development_spaces
+        ON development_spaces.id = json_extract(commands.request_json, '$.spaceId')
+       AND development_spaces.project_id = json_extract(commands.request_json, '$.projectId')
+      JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+      WHERE commands.kind IN ('workspace.reuse', 'workspace.remove')
+        AND commands.state IN ('received', 'observing', 'uncertain')
+        AND worktrees.repository_identity = ?
+        AND commands.id <> COALESCE(?, '')
+        AND NOT EXISTS (
+          SELECT 1 FROM workspace_lifecycle_reservations reservations
+          WHERE reservations.command_id = commands.id
+        )
+      ORDER BY commands.created_at ASC, commands.id ASC
+      LIMIT 1
+    `).get(repositoryIdentity, request.lifecycleCommandId ?? null);
+    if (legacy) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_LOCKED',
+        repositoryIdentity,
+        holder: `workspace-lifecycle:${legacy.id}`,
+        operation: legacy.kind,
+        expiresAt: null,
+        expiresAtIso: null,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+        pendingCommandId: legacy.id,
+      };
     }
 
     const current = db.prepare('SELECT * FROM repository_locks WHERE repository_identity = ?').get(repositoryIdentity);

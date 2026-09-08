@@ -45,6 +45,17 @@ import {
 } from './avatar-color.mjs';
 import { copyNoteText } from './copy-note-text.mjs';
 import { completeAssignmentCopy } from './assignment-copy-flow.mjs';
+import {
+  classifyWorkspaceActionError,
+  createWorkspaceActionRecord,
+  getWorkspaceActionStorage,
+  markWorkspaceActionPending,
+  markWorkspaceActionUnknown,
+  readWorkspaceActionRecordsWithStatus,
+  removeWorkspaceActionRecord,
+  upsertWorkspaceActionRecord,
+  WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
+} from './workspace-action-recovery.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
 import { WorkContext } from './work-context.jsx';
 import { ManualRecordAction } from './manual-record-action.jsx';
@@ -343,6 +354,8 @@ const api = createApiClient({
   randomUUID: () => crypto.randomUUID(),
   origin: window.location.origin,
 });
+const workspaceActionStorage = getWorkspaceActionStorage();
+const initialWorkspaceActionState = readWorkspaceActionRecordsWithStatus(workspaceActionStorage);
 
 const AVATAR_COLOR_CACHE_LIMIT = 128;
 const avatarColorCache = new Map();
@@ -625,6 +638,10 @@ function createDialogCloseGuard(busy, onClose) {
   };
 }
 
+function workspaceActionPath(record) {
+  return `/api/v1/projects/${encodeURIComponent(record.projectId)}/spaces/${encodeURIComponent(record.spaceId)}/${record.kind}`;
+}
+
 function App() {
   const route = useAppRoute();
   const [dashboard, setDashboard] = useState(null);
@@ -641,6 +658,12 @@ function App() {
   const [sessionDiagnosticsLoading, setSessionDiagnosticsLoading] = useState(false);
   const [editingProject, setEditingProject] = useState(null);
   const [spaceAction, setSpaceAction] = useState(null);
+  const [pendingWorkspaceActions, setPendingWorkspaceActions] = useState(
+    initialWorkspaceActionState.records,
+  );
+  const [workspaceActionStorageError, setWorkspaceActionStorageError] = useState(
+    initialWorkspaceActionState.error,
+  );
   const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
   const diagnosticsRequestRef = useRef(0);
@@ -657,6 +680,17 @@ function App() {
   useEffect(() => {
     dashboardRef.current = dashboard;
   }, [dashboard]);
+
+  useEffect(() => {
+    const onStorage = (event) => {
+      if (event.key !== null && event.key !== WORKSPACE_ACTION_RECOVERY_STORAGE_KEY) return;
+      const next = readWorkspaceActionRecordsWithStatus(workspaceActionStorage);
+      setPendingWorkspaceActions(next.records);
+      setWorkspaceActionStorageError(next.error);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   function isCurrentDetailRequest(requestId, projectId) {
     const currentRoute = readAppRoute();
@@ -1158,6 +1192,141 @@ function App() {
     setBusy(false);
   }
 
+  function setWorkspaceActionRecords(records) {
+    setPendingWorkspaceActions(Array.isArray(records) ? records : []);
+    setWorkspaceActionStorageError(null);
+  }
+
+  function setWorkspaceActionState({ records, error = null }) {
+    setPendingWorkspaceActions(Array.isArray(records) ? records : []);
+    setWorkspaceActionStorageError(error);
+  }
+
+  function readWorkspaceActionState() {
+    const next = readWorkspaceActionRecordsWithStatus(workspaceActionStorage);
+    setWorkspaceActionState(next);
+    return next;
+  }
+
+  function isExactWorkspaceActionRecord(left, right) {
+    return Boolean(left && right)
+      && left.id === right.id
+      && left.commandId === right.commandId
+      && JSON.stringify(left.request) === JSON.stringify(right.request);
+  }
+
+  function findWorkspaceActionForSpace(records, projectId, spaceId) {
+    return (Array.isArray(records) ? records : []).find((item) => (
+      item.projectId === projectId && item.spaceId === spaceId
+    )) ?? null;
+  }
+
+  function setWorkspaceActionNotice(requestId, projectId, actionNotice) {
+    if (!isCurrentDetailRequest(requestId, projectId)) return;
+    setProjectDetail((previous) => previous ? {
+      ...previous,
+      ...(previous.requestId === requestId && previous.seed.id === projectId ? { actionNotice } : {}),
+    } : previous);
+  }
+
+  function workspaceActionName(record) {
+    return record.kind === 'reuse' ? '重新开始' : '删除空间';
+  }
+
+  function workspaceActionFailureNotice(record, error, outcome, storageError = null) {
+    const name = record.spaceName || '这个开发空间';
+    if (outcome === 'unknown') {
+      return {
+        error: true,
+        message: `${name}的${workspaceActionName(record)}结果未知。`,
+        detail: `服务没有确认这次操作是否完成；原请求已保留。请在开发空间区域点击“恢复并核对”，系统会继续使用同一个请求号和参数。${storageError ? ' 恢复材料暂时无法更新，请先恢复本站点存储后再试。' : ''}`,
+      };
+    }
+    return {
+      error: true,
+      message: `${name}没有${workspaceActionName(record)}。`,
+      detail: `${error?.required_action || error?.message || '服务已明确拒绝这次请求，请刷新当前项目后再试。'}${storageError ? ' 恢复材料暂时未能清理，仍会保留同一请求供核对。' : ''}`,
+    };
+  }
+
+  function persistPendingWorkspaceAction(record) {
+    const records = upsertWorkspaceActionRecord(record, workspaceActionStorage);
+    setWorkspaceActionRecords(records);
+    return records;
+  }
+
+  function persistWorkspaceActionFailure(record, error, outcome) {
+    let storageError = null;
+    let records;
+    try {
+      records = outcome === 'unknown'
+        ? markWorkspaceActionUnknown(record, error, workspaceActionStorage)
+        : removeWorkspaceActionRecord(record, workspaceActionStorage);
+    } catch (persistError) {
+      storageError = persistError;
+      const current = readWorkspaceActionState();
+      records = current.records;
+      if (persistError?.code === 'WORKSPACE_ACTION_RECOVERY_CONFLICT') {
+        storageError = null;
+      } else if (current.error) {
+        storageError = current.error;
+      }
+    }
+    if (storageError) {
+      setPendingWorkspaceActions(Array.isArray(records) ? records : []);
+      setWorkspaceActionStorageError(storageError);
+    } else {
+      setWorkspaceActionRecords(records);
+    }
+    return storageError;
+  }
+
+  async function submitPersistedWorkspaceAction(record, { requestId, successNotice }) {
+    try {
+      await api(workspaceActionPath(record), {
+        method: 'POST',
+        body: JSON.stringify(record.request),
+      });
+    } catch (error) {
+      const outcome = classifyWorkspaceActionError(error);
+      const storageError = persistWorkspaceActionFailure(record, error, outcome);
+      if (isCurrentDetailRequest(requestId, record.projectId)) {
+        setSpaceAction(null);
+        setWorkspaceActionNotice(
+          requestId,
+          record.projectId,
+          workspaceActionFailureNotice(record, error, outcome, storageError),
+        );
+      }
+      return { ok: false, outcome };
+    }
+
+    let storageError = null;
+    try {
+      setWorkspaceActionRecords(removeWorkspaceActionRecord(record, workspaceActionStorage));
+    } catch (error) {
+      const current = readWorkspaceActionState();
+      storageError = current.error || error;
+    }
+
+    if (isCurrentDetailRequest(requestId, record.projectId)) {
+      setSpaceAction(null);
+      try {
+        await refreshOpenProjectDetail({
+          ...successNotice,
+          detail: `${successNotice.detail}${storageError ? ' 操作已确认，但浏览器暂时无法清理恢复材料；页面会继续显示同一请求供再次核对。' : ''}`,
+        });
+      } catch {
+        setWorkspaceActionNotice(requestId, record.projectId, {
+          error: false,
+          message: successNotice.message,
+          detail: `${successNotice.detail} 操作已经确认，但项目详情暂时没有刷新。${storageError ? '恢复材料仍保留，请先恢复本站点存储后再重新核对。' : '请稍后重新读取详情。'}`,
+        });
+      }
+    }
+    return { ok: true };
+  }
+
   async function confirmSpaceAction() {
     const action = spaceAction;
     const current = projectDetailRef.current;
@@ -1165,53 +1334,152 @@ function App() {
     const projectId = project?.id;
     const requestId = current?.requestId;
     if (!action || !projectId || !isCurrentDetailRequest(requestId, projectId)) return;
+
     setBusy(true);
+    let record = null;
     try {
-      if (action.kind === 'reuse') {
-        const refreshed = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/refresh`, {
-          method: 'POST',
-          body: JSON.stringify({ commandId: crypto.randomUUID() }),
+      // A modal can stay open while another tab completes or starts an
+      // operation. Read the durable store before refreshing or minting any
+      // new command so this confirmation cannot race a newer request.
+      const stored = readWorkspaceActionState();
+      if (stored.error) throw stored.error;
+      const existing = findWorkspaceActionForSpace(
+        stored.records,
+        projectId,
+        action.space.spaceId,
+      );
+      if (existing) {
+        setSpaceAction(null);
+        setWorkspaceActionNotice(requestId, projectId, {
+          error: true,
+          message: `${action.space.name || '这个开发空间'}已有待核对的开发空间操作。`,
+          detail: '没有发送新的开发空间操作。请在开发空间区域点击“恢复并核对”，系统会继续使用原请求号和参数。',
         });
-        await api(`/api/v1/projects/${encodeURIComponent(projectId)}/spaces/${encodeURIComponent(action.space.spaceId)}/reuse`, {
-          method: 'POST',
-          body: JSON.stringify({
-            commandId: crypto.randomUUID(),
-            expectedRevision: action.space.revision,
-            expectedBaseHead: refreshed.git.head,
-          }),
-        });
-      } else {
-        await api(`/api/v1/projects/${encodeURIComponent(projectId)}/spaces/${encodeURIComponent(action.space.spaceId)}/remove`, {
-          method: 'POST',
-          body: JSON.stringify({
-            commandId: crypto.randomUUID(),
-            expectedRevision: action.space.revision,
-          }),
-        });
+        return;
       }
-      if (!isCurrentDetailRequest(requestId, projectId)) return;
-      setSpaceAction(null);
-      await refreshOpenProjectDetail({
-        message: action.kind === 'reuse'
-          ? `${action.space.name} 已准备好新的开发工作。`
-          : `${action.space.name} 已从本机移除。`,
-        detail: action.kind === 'reuse'
-          ? '新的工作从主项目当前本地提交开始；之前的工作线仍保留，方便需要时找回。'
-          : '本地工作副本已释放；此前的工作线和项目记录仍保留，方便需要时找回。',
+
+      // The command id is allocated once for the whole user-confirmed action.
+      // Reuse still refreshes the main observation first, then freezes the
+      // exact body that will be sent before the workspace mutation starts.
+      const commandId = crypto.randomUUID();
+      const request = action.kind === 'reuse'
+        ? await (async () => {
+            const refreshed = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/refresh`, {
+              method: 'POST',
+              body: JSON.stringify({ commandId: crypto.randomUUID() }),
+            });
+            return {
+              commandId,
+              expectedRevision: action.space.revision,
+              expectedBaseHead: refreshed.git.head,
+            };
+          })()
+        : {
+            commandId,
+            expectedRevision: action.space.revision,
+          };
+
+      record = createWorkspaceActionRecord({
+        kind: action.kind,
+        projectId,
+        spaceId: action.space.spaceId,
+        spaceName: action.space.name,
+        request,
+      });
+      // Persist before the first workspace POST. A page or service restart
+      // after this point can always recover the exact idempotent request.
+      persistPendingWorkspaceAction(record);
+      await submitPersistedWorkspaceAction(record, {
+        requestId,
+        successNotice: {
+          message: action.kind === 'reuse'
+            ? `${action.space.name} 已准备好新的开发工作。`
+            : `${action.space.name} 已从本机移除。`,
+          detail: action.kind === 'reuse'
+            ? '新的工作从主项目当前本地提交开始；之前的工作线仍保留，方便需要时找回。'
+            : '本地工作副本已释放；此前的工作线和项目记录仍保留，方便需要时找回。',
+        },
       });
     } catch (error) {
       if (!isCurrentDetailRequest(requestId, projectId)) return;
       setSpaceAction(null);
-      setProjectDetail((previous) => previous ? {
-        ...previous,
-        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
-          actionNotice: {
-            error: true,
-            message: error.message || '开发空间操作没有完成。',
-            detail: error.required_action || '请刷新当前项目后重试。',
-          },
-        } : {}),
-      } : previous);
+      const conflict = error?.code === 'WORKSPACE_ACTION_RECOVERY_CONFLICT';
+      if (!conflict && error?.code?.startsWith('WORKSPACE_ACTION_RECOVERY_')) {
+        const currentState = readWorkspaceActionState();
+        if (!currentState.error) setWorkspaceActionStorageError(error);
+      }
+      setWorkspaceActionNotice(requestId, projectId, {
+        error: true,
+        message: conflict
+          ? `${action.space.name || '这个开发空间'}已有待核对的开发空间操作。`
+          : record
+          ? '无法保存开发空间操作的恢复材料。'
+          : '还没有确认开发空间操作。',
+        detail: conflict
+          ? '没有发送新的开发空间操作。请在开发空间区域点击“恢复并核对”，系统会继续使用原请求号和参数。'
+          : record
+          ? '没有发送删除或重新开始请求；原有代码和工作记录没有被修改。请确认浏览器允许保存本站点数据后重试。'
+          : (error?.required_action || error?.message || '主项目状态没有刷新完成；没有发送开发空间操作，请刷新后重试。'),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recoverWorkspaceAction(record) {
+    const current = projectDetailRef.current;
+    const projectId = current?.data?.project?.id;
+    const requestId = current?.requestId;
+    if (!record || !projectId || record.projectId !== projectId || !isCurrentDetailRequest(requestId, projectId)) return;
+    setBusy(true);
+    try {
+      // Use the current stored record. A stale button from another tab must
+      // never revive or overwrite a different command for this space.
+      const stored = readWorkspaceActionState();
+      if (stored.error) throw stored.error;
+      const exact = stored.records.find((item) => isExactWorkspaceActionRecord(item, record));
+      if (!exact) {
+        setWorkspaceActionNotice(requestId, projectId, {
+          error: true,
+          message: `${record.spaceName || '这个开发空间'}的恢复材料已在其他页面发生变化。`,
+          detail: '没有发送新的开发空间操作。请刷新当前项目后，以开发空间区域显示的最新恢复材料为准。',
+        });
+        return;
+      }
+      const marked = markWorkspaceActionPending(exact, workspaceActionStorage);
+      if (!marked.some((item) => isExactWorkspaceActionRecord(item, exact))) {
+        setWorkspaceActionRecords(marked);
+        setWorkspaceActionNotice(requestId, projectId, {
+          error: true,
+          message: `${exact.spaceName || '这个开发空间'}的恢复材料已在其他页面处理。`,
+          detail: '没有发送新的开发空间操作。请刷新当前项目后，以开发空间区域显示的最新状态为准。',
+        });
+        return;
+      }
+      setWorkspaceActionRecords(marked);
+      await submitPersistedWorkspaceAction(exact, {
+        requestId,
+        successNotice: {
+          message: `${exact.spaceName || '开发空间'} 的${workspaceActionName(exact)}已确认。`,
+          detail: '系统使用了原来的请求号和参数完成核对；页面会重新读取当前开发空间状态。',
+        },
+      });
+    } catch (error) {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
+      const conflict = error?.code === 'WORKSPACE_ACTION_RECOVERY_CONFLICT';
+      if (!conflict && error?.code?.startsWith('WORKSPACE_ACTION_RECOVERY_')) {
+        const currentState = readWorkspaceActionState();
+        if (!currentState.error) setWorkspaceActionStorageError(error);
+      }
+      setWorkspaceActionNotice(requestId, projectId, {
+        error: true,
+        message: conflict
+          ? `${record.spaceName || '这个开发空间'}已有更新的开发空间操作。`
+          : '还没有重新核对开发空间操作。',
+        detail: conflict
+          ? '没有发送新的开发空间操作；页面会保留最新请求，请以开发空间区域显示的恢复材料为准。'
+          : error?.message || '没有发送新的开发空间操作；原恢复材料仍保留，请稍后重试。',
+      });
     } finally {
       setBusy(false);
     }
@@ -1443,6 +1711,9 @@ function App() {
             onAssignSpace={assignDevelopmentSpace}
             onReuseSpace={(space) => setSpaceAction({ kind: 'reuse', space })}
             onRemoveSpace={(space) => setSpaceAction({ kind: 'remove', space })}
+            pendingWorkspaceActions={pendingWorkspaceActions}
+            workspaceActionStorageError={workspaceActionStorageError}
+            onRecoverWorkspaceAction={recoverWorkspaceAction}
             onCopyReviewPrompt={copyIntegrationPrompt}
             onNoteStatusChange={refreshOpenProjectDetail}
             onRecordsChanged={refreshManualRecords}
@@ -1705,7 +1976,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions, workspaceActionStorageError, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     id: projectId,
@@ -1802,6 +2073,9 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             onAssignSpace={onAssignSpace}
             onReuseSpace={onReuseSpace}
             onRemoveSpace={onRemoveSpace}
+            pendingWorkspaceActions={pendingWorkspaceActions}
+            workspaceActionStorageError={workspaceActionStorageError}
+            onRecoverWorkspaceAction={onRecoverWorkspaceAction}
             onCopyReviewPrompt={onCopyReviewPrompt}
             onNoteStatusChange={onNoteStatusChange}
             onRecordsChanged={onRecordsChanged}
@@ -1876,8 +2150,9 @@ function SubmitHelp() {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading }) {
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions = [], workspaceActionStorageError = null, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
+  const projectPendingWorkspaceActions = pendingWorkspaceActions.filter((item) => item.projectId === project.id);
   const [activeTab, setActiveTab] = useState('timeline');
   const tabRefs = useRef([]);
   const [focusedLaneKey, setFocusedLaneKey] = useState(null);
@@ -1926,6 +2201,16 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
           <div className="notice-body">
             <AlertTitle>{actionNotice.message}</AlertTitle>
             {actionNotice.detail && <AlertDescription>{actionNotice.detail}</AlertDescription>}
+          </div>
+        </Alert>
+      )}
+
+      {workspaceActionStorageError && (
+        <Alert variant="error" className="detail-action-notice" role="alert">
+          <AlertIcon />
+          <div className="notice-body">
+            <AlertTitle>开发空间操作恢复材料暂时无法读取。</AlertTitle>
+            <AlertDescription>没有发送新的开发空间操作。请先恢复本站点存储权限，再刷新当前项目。</AlertDescription>
           </div>
         </Alert>
       )}
@@ -2071,35 +2356,62 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                     : '新建开发空间'}
                 </Button>
               </div>
+              {projectPendingWorkspaceActions.length > 0 && (
+                <div className="workspace-recovery-list" aria-label="待核对的开发空间操作">
+                  {projectPendingWorkspaceActions.map((record) => (
+                    <Alert variant="info" className="workspace-recovery-notice" role="status" key={record.id}>
+                      <AlertIcon />
+                      <div className="notice-body">
+                        <AlertTitle>{record.spaceName || '这个开发空间'}的{record.kind === 'reuse' ? '重新开始' : '删除空间'}待核对</AlertTitle>
+                        <AlertDescription>上次请求的结果没有确认。恢复时会继续使用同一个请求号和参数，不会生成新的开发空间操作。</AlertDescription>
+                      </div>
+                      <Button
+                        variant="soft"
+                        size="sm"
+                        className="notice-btn"
+                        onClick={() => onRecoverWorkspaceAction?.(record)}
+                        disabled={busy || Boolean(workspaceActionStorageError)}
+                      >
+                        恢复并核对
+                      </Button>
+                    </Alert>
+                  ))}
+                </div>
+              )}
               {developmentSpaces.length === 0 ? (
                 <p className="workspace-empty">还没有开发空间。需要并行做功能时再创建即可。</p>
               ) : (
                 <div className="workspace-list">
-                  {developmentSpaces.map((space) => (
-                    <article className="workspace-card" key={space.spaceId}>
-                      <div>
-                        <strong>{space.name}</strong>
-                        <span>{space.statusReason === 'removed_by_user' ? '本地副本已删除，工作记录已保留' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '可以继续开发'}</span>
-                      </div>
-                      <div className="workspace-card-actions">
-                        {space.status === 'ready' && (
-                          <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
-                            复制接入消息
-                          </Button>
-                        )}
-                        {['ready', 'cleanup_ready', 'paused', 'attention'].includes(space.status) && (
-                          <>
-                            <Button variant="soft" size="sm" onClick={() => onReuseSpace(space)} disabled={busy}>
-                              重新开始
+                  {developmentSpaces.map((space) => {
+                    const pendingAction = projectPendingWorkspaceActions.find((item) => item.spaceId === space.spaceId);
+                    return (
+                      <article className="workspace-card" key={space.spaceId}>
+                        <div>
+                          <strong>{space.name}</strong>
+                          <span>{space.statusReason === 'removed_by_user' ? '本地副本已删除，工作记录已保留' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '可以继续开发'}</span>
+                        </div>
+                        <div className="workspace-card-actions">
+                          {pendingAction ? (
+                            <span className="read-only-action">操作待核对</span>
+                          ) : space.status === 'ready' && (
+                            <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                              复制接入消息
                             </Button>
-                            <Button variant="soft" size="sm" className="workspace-remove-button" onClick={() => onRemoveSpace(space)} disabled={busy}>
-                              删除空间
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </article>
-                  ))}
+                          )}
+                          {!pendingAction && ['ready', 'cleanup_ready', 'paused', 'attention'].includes(space.status) && (
+                            <>
+                              <Button variant="soft" size="sm" onClick={() => onReuseSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                                重新开始
+                              </Button>
+                              <Button variant="soft" size="sm" className="workspace-remove-button" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                                删除空间
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
               )}
             </section>

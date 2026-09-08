@@ -7,6 +7,7 @@ import {
   requestDigest,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { checkWorkspaceWriteAdmission } from './workspace-lifecycle.mjs';
 
 function now() {
   return new Date().toISOString();
@@ -114,6 +115,18 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
         runId,
       });
     }
+
+    const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
+      worktreeId,
+      repositoryIdentity,
+      baseline,
+    });
+    if (!lifecycleAdmission.ok) {
+      if (lifecycleAdmission.retryable === false || lifecycleAdmission.outcome === 'confirmed_failure') {
+        return failCommand(db, commandId, 'received', lifecycleAdmission);
+      }
+      return lifecycleAdmission;
+    }
     db.prepare(`
       INSERT OR IGNORE INTO worktrees (
         id, canonical_path, repository_identity, identity_fingerprint, created_at
@@ -147,8 +160,8 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
       INSERT INTO snapshots (
         id, run_id, phase, head, branch, index_fingerprint,
         worktree_fingerprint, repository_identity, worktree_identity,
-        head_relation, coherence, observed_at
-      ) VALUES (?, ?, 'baseline', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        head_relation, coherence, observed_at, lifecycle_epoch
+      ) VALUES (?, ?, 'baseline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       snapshotId,
       runId,
@@ -161,6 +174,7 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
       baseline.headRelation ?? 'same',
       baseline.coherence ?? 'unknown',
       baseline.observedAt ?? createdAt,
+      worktree.lifecycle_epoch ?? 0,
     );
     faultInjector?.('start.after_snapshot_insert');
 
@@ -356,8 +370,8 @@ export function finalizeFinish(db, request, options = {}) {
       INSERT INTO snapshots (
         id, run_id, phase, head, branch, index_fingerprint,
         worktree_fingerprint, repository_identity, worktree_identity,
-        head_relation, coherence, observed_at
-      ) VALUES (?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        head_relation, coherence, observed_at, lifecycle_epoch
+      ) VALUES (?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       snapshotId,
       runId,
@@ -370,6 +384,7 @@ export function finalizeFinish(db, request, options = {}) {
       finalSnapshot.headRelation ?? 'unknown',
       finalSnapshot.coherence ?? 'unknown',
       finalSnapshot.observedAt ?? finishedAt,
+      worktree.lifecycle_epoch ?? 0,
     );
     faultInjector?.('finish.after_snapshot_insert');
 
@@ -527,6 +542,21 @@ export function takeoverWriteRun(db, request) {
         WHERE id = ? AND state = 'received'
       `).run(canonicalJson(response), now(), commandId);
       return response;
+    }
+
+    const takeoverWorktree = db.prepare(`
+      SELECT repository_identity FROM worktrees WHERE id = ?
+    `).get(worktreeId);
+    const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
+      worktreeId,
+      repositoryIdentity: takeoverWorktree?.repository_identity,
+      baseline,
+    });
+    if (!lifecycleAdmission.ok) {
+      if (lifecycleAdmission.retryable === false || lifecycleAdmission.outcome === 'confirmed_failure') {
+        return failCommand(db, commandId, 'received', lifecycleAdmission);
+      }
+      return lifecycleAdmission;
     }
 
     const lease = db.prepare('SELECT * FROM write_leases WHERE worktree_id = ?').get(worktreeId);

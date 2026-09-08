@@ -18,6 +18,15 @@ import {
   acquireRepositoryLock,
   releaseRepositoryLock,
 } from './integrations.mjs';
+import {
+  completeWorkspaceLifecycleInTransaction,
+  markWorkspaceLifecycleEffectUnknown,
+  revalidateWorkspaceLifecycle,
+  readWorkspaceLifecycleReservation,
+  releaseWorkspaceLifecycle,
+  releaseWorkspaceLifecycleExecutor,
+  reserveWorkspaceLifecycle,
+} from './workspace-lifecycle.mjs';
 import { EmptyFolderGrantStore } from './folder-grants.mjs';
 import {
   revalidateEmptyDirectory,
@@ -703,6 +712,71 @@ function validateSpaceLifecycleRequest(request, { expectedBaseHead = false } = {
   return { ok: true };
 }
 
+function failWorkspaceCommand(db, commandId, response) {
+  return failCommand(db, commandId, {
+    ...response,
+    outcome: response.outcome ?? 'confirmed_failure',
+    state: response.state ?? 'failed',
+    retryable: response.retryable ?? false,
+  });
+}
+
+function unknownWorkspaceResult(response = {}) {
+  return {
+    ok: false,
+    code: response.code ?? 'WORKSPACE_RECOVERY_UNCERTAIN',
+    ...response,
+    outcome: 'unknown',
+    state: 'received',
+    retryable: true,
+  };
+}
+
+function lifecycleRequest(project, space, request, operation, ownerToken = null) {
+  return {
+    commandId: request.commandId,
+    projectId: request.projectId,
+    spaceId: request.spaceId,
+    worktreeId: space.worktreeId,
+    repositoryIdentity: project.repository_identity,
+    operation,
+    expectedRevision: request.expectedRevision,
+    allowedStatuses: [...REUSABLE_SPACE_STATUSES],
+    ...(ownerToken ? { ownerToken } : {}),
+  };
+}
+
+function applyPreEffectLifecycleResult(db, commandId, result) {
+  if (result.ok) return result;
+  // Results produced before any Git effect are definitive unless the caller
+  // explicitly marked the observation as unknown/retryable. Leaving a fresh
+  // command received after a known dirty or invalid workspace would create a
+  // journal fence after the reservation is released and block later actions.
+  if (result.outcome === 'unknown' || result.retryable === true) return result;
+  return failWorkspaceCommand(db, commandId, result);
+}
+
+function failIfBlockedByOtherLifecycle(db, commandId, repositoryIdentity, result, { fresh = false } = {}) {
+  if (!fresh) return null;
+  const reservation = readWorkspaceLifecycleReservation(db, repositoryIdentity);
+  const blocker = reservation && reservation.commandId !== commandId
+    ? reservation.commandId
+    : (result.pendingCommandId && result.pendingCommandId !== commandId
+      ? result.pendingCommandId
+      : (result.code === 'WORKSPACE_LIFECYCLE_IN_PROGRESS'
+        && result.commandId !== commandId
+        ? result.commandId
+        : null));
+  if (!blocker) return null;
+  return failWorkspaceCommand(db, commandId, {
+    ...result,
+    blockedByCommandId: blocker,
+    outcome: 'confirmed_failure',
+    state: 'failed',
+    retryable: false,
+  });
+}
+
 function finalizeWorkspaceReuse(db, {
   commandId,
   projectId,
@@ -711,6 +785,7 @@ function finalizeWorkspaceReuse(db, {
   branch,
   baseCommit,
   observation,
+  reservation,
   options,
 }) {
   const timestamp = iso(nowMillis(options));
@@ -718,18 +793,48 @@ function finalizeWorkspaceReuse(db, {
     const command = readCommand(db, commandId);
     if (command.state === 'committed' || command.state === 'failed') return parseCommandResponse(command);
 
+    const currentReservation = db.prepare(`
+      SELECT command_id, owner_token, worktree_id, epoch
+      FROM workspace_lifecycle_reservations
+      WHERE repository_identity = ?
+    `).get(reservation.repositoryIdentity);
+    if (!currentReservation
+      || currentReservation.command_id !== commandId
+      || currentReservation.owner_token !== reservation.ownerToken
+      || currentReservation.worktree_id !== reservation.worktreeId) {
+      return {
+        ok: false,
+        code: 'WORKSPACE_LIFECYCLE_RESERVATION_LOST',
+        commandId,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
+    }
+
     const current = db.prepare('SELECT * FROM development_spaces WHERE id = ?').get(spaceId);
     if (!current || current.project_id !== projectId) {
-      return failCommand(db, commandId, { ok: false, code: 'SPACE_NOT_FOUND', spaceId });
+      return {
+        ok: false,
+        code: 'SPACE_NOT_FOUND',
+        spaceId,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
     }
     if (current.revision !== expectedRevision) {
-      return failCommand(db, commandId, {
+      return {
         ok: false,
         code: 'SPACE_REVISION_CONFLICT',
         spaceId,
         expectedRevision,
         currentRevision: current.revision,
-      });
+        currentStatus: current.status,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
     }
 
     const revision = current.revision + 1;
@@ -767,7 +872,15 @@ function finalizeWorkspaceReuse(db, {
         observedAt: observation.observedAt ?? null,
       },
     };
-    return commitCommand(db, commandId, response, timestamp);
+    const committed = commitCommand(db, commandId, response, timestamp);
+    const released = completeWorkspaceLifecycleInTransaction(db, {
+      ...reservation,
+      commandId,
+      repositoryIdentity: reservation.repositoryIdentity,
+      worktreeId: current.worktree_id,
+    }, timestamp);
+    if (!released.ok) return released;
+    return committed;
   });
 }
 
@@ -776,6 +889,7 @@ function finalizeWorkspaceRemoval(db, {
   projectId,
   spaceId,
   expectedRevision,
+  reservation,
   options,
 }) {
   const timestamp = iso(nowMillis(options));
@@ -783,18 +897,48 @@ function finalizeWorkspaceRemoval(db, {
     const command = readCommand(db, commandId);
     if (command.state === 'committed' || command.state === 'failed') return parseCommandResponse(command);
 
+    const currentReservation = db.prepare(`
+      SELECT command_id, owner_token, worktree_id
+      FROM workspace_lifecycle_reservations
+      WHERE repository_identity = ?
+    `).get(reservation.repositoryIdentity);
+    if (!currentReservation
+      || currentReservation.command_id !== commandId
+      || currentReservation.owner_token !== reservation.ownerToken
+      || currentReservation.worktree_id !== reservation.worktreeId) {
+      return {
+        ok: false,
+        code: 'WORKSPACE_LIFECYCLE_RESERVATION_LOST',
+        commandId,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
+    }
+
     const current = db.prepare('SELECT * FROM development_spaces WHERE id = ?').get(spaceId);
     if (!current || current.project_id !== projectId) {
-      return failCommand(db, commandId, { ok: false, code: 'SPACE_NOT_FOUND', spaceId });
+      return {
+        ok: false,
+        code: 'SPACE_NOT_FOUND',
+        spaceId,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
     }
     if (current.revision !== expectedRevision) {
-      return failCommand(db, commandId, {
+      return {
         ok: false,
         code: 'SPACE_REVISION_CONFLICT',
         spaceId,
         expectedRevision,
         currentRevision: current.revision,
-      });
+        currentStatus: current.status,
+        outcome: 'unknown',
+        state: 'received',
+        retryable: true,
+      };
     }
 
     const revision = current.revision + 1;
@@ -815,7 +959,15 @@ function finalizeWorkspaceRemoval(db, {
       revision,
       space,
     };
-    return commitCommand(db, commandId, response, timestamp);
+    const committed = commitCommand(db, commandId, response, timestamp);
+    const released = completeWorkspaceLifecycleInTransaction(db, {
+      ...reservation,
+      commandId,
+      repositoryIdentity: reservation.repositoryIdentity,
+      worktreeId: current.worktree_id,
+    }, timestamp);
+    if (!released.ok) return released;
+    return committed;
   });
 }
 
@@ -840,28 +992,42 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
   if (begun.command.state === 'committed' || begun.command.state === 'failed') {
     return parseCommandResponse(begun.command);
   }
+  const unresolvedReplay = begun.fresh === false;
 
   const project = readProjectContext(db, request.projectId);
   const space = readDevelopmentSpace(db, request.spaceId);
-  if (!project) return failCommand(db, request.commandId, { ok: false, code: 'PROJECT_NOT_FOUND', projectId: request.projectId });
+  if (!project) {
+    const result = { ok: false, code: 'PROJECT_NOT_FOUND', projectId: request.projectId };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
+  }
+  if (project.archived_at) {
+    const result = {
+      ok: false, code: 'PROJECT_ARCHIVED', projectId: request.projectId, archivedAt: project.archived_at,
+    };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
+  }
   if (!space || space.projectId !== request.projectId) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_NOT_FOUND', spaceId: request.spaceId });
+    const result = { ok: false, code: 'SPACE_NOT_FOUND', spaceId: request.spaceId };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   if (!REUSABLE_SPACE_STATUSES.has(space.status)) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_NOT_REUSABLE', spaceId: space.spaceId, status: space.status });
+    const result = { ok: false, code: 'SPACE_NOT_REUSABLE', spaceId: space.spaceId, status: space.status };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   if (space.revision !== request.expectedRevision) {
-    return failCommand(db, request.commandId, {
+    const result = {
       ok: false,
       code: 'SPACE_REVISION_CONFLICT',
       spaceId: space.spaceId,
       expectedRevision: request.expectedRevision,
       currentRevision: space.revision,
-    });
+    };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   const activeWork = readActiveWorkspaceWork(db, space.worktreeId);
   if (activeWork) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork });
+    const result = { ok: false, code: 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
 
   const lockHolder = request.commandId;
@@ -870,49 +1036,122 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
     holder: lockHolder,
     operation: 'reuse_workspace',
     ttlMs: options.lockTtlMs ?? 60_000,
+    persistent: true,
+    lifecycleCommandId: request.commandId,
   }, options);
-  if (!lock.ok) return { ok: false, code: 'REPOSITORY_LOCKED', repositoryIdentity: project.repository_identity };
+  if (!lock.ok) {
+    const blocked = failIfBlockedByOtherLifecycle(
+      db,
+      request.commandId,
+      project.repository_identity,
+      {
+        ...lock,
+        code: lock.code ?? 'REPOSITORY_LOCKED',
+        repositoryIdentity: project.repository_identity,
+      },
+      { fresh: begun.fresh },
+    );
+    if (blocked) return blocked;
+    return {
+      ...lock,
+      code: lock.code ?? 'REPOSITORY_LOCKED',
+      repositoryIdentity: project.repository_identity,
+      outcome: 'unknown',
+      state: 'received',
+      retryable: true,
+    };
+  }
 
+  let reservation = null;
+  let preserveReservation = false;
+  let preserveRepositoryLock = false;
+  let finalized = false;
   try {
-    const probe = options.probe ?? probeGitWorktree;
-    let workspaceObservation;
-    try {
-      workspaceObservation = await probe(space.canonicalPath);
-    } catch (error) {
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
+    const reservationBase = lifecycleRequest(project, space, request, 'reuse');
+    const reserved = reserveWorkspaceLifecycle(db, reservationBase, options);
+    if (!reserved.ok) {
+      const blocked = failIfBlockedByOtherLifecycle(
+        db,
+        request.commandId,
+        project.repository_identity,
+        reserved,
+        { fresh: begun.fresh },
+      );
+      if (blocked) return blocked;
+      // Preserve a lock only when this invocation renewed the same command's
+      // existing lock while another executor still owns its reservation. A
+      // migrated reservation can exist without a repository lock; in that
+      // case this call may have acquired a fresh lock and must release it so
+      // the original command can recover.
+      preserveRepositoryLock = reserved.code === 'WORKSPACE_LIFECYCLE_IN_PROGRESS'
+        && lock.renewed === true
+        && lock.holder === lockHolder;
+      return applyPreEffectLifecycleResult(db, request.commandId, reserved);
     }
-    const workspaceValidation = validateWorkspaceObservation(space, project, workspaceObservation);
-    if (!workspaceValidation.ok) return failCommand(db, request.commandId, { ok: false, ...workspaceValidation, spaceId: space.spaceId });
+    reservation = { ...reservationBase, ownerToken: reserved.ownerToken, ownerPid: reserved.ownerPid };
+    preserveReservation = reserved.reclaimed === true;
 
-    const alreadySwitched = branchMatches(workspaceObservation.after.branch, nextBranch)
-      && workspaceObservation.after.head === request.expectedBaseHead
-      && !workspaceObservation.after.hasChanges;
-    if (alreadySwitched) {
-      return finalizeWorkspaceReuse(db, {
+    const failOrUnknown = (result) => preserveReservation
+      ? unknownWorkspaceResult(result)
+      : applyPreEffectLifecycleResult(db, request.commandId, result);
+
+    const finish = (observation, afterEffect = false) => {
+      const valid = revalidateWorkspaceLifecycle(db, reservation, options);
+      if (!valid.ok) {
+        return afterEffect || preserveReservation
+          ? unknownWorkspaceResult({ ...valid, spaceId: space.spaceId })
+          : failOrUnknown(valid);
+      }
+      const result = finalizeWorkspaceReuse(db, {
         commandId: request.commandId,
         projectId: request.projectId,
         spaceId: request.spaceId,
         expectedRevision: request.expectedRevision,
         branch: nextBranch,
         baseCommit: request.expectedBaseHead,
-        observation: workspaceObservation,
+        observation,
+        reservation,
         options,
       });
+      if (result.ok) {
+        finalized = true;
+        preserveReservation = false;
+      } else if (result.outcome === 'unknown' || result.retryable === true) {
+        preserveReservation = true;
+      }
+      return result;
+    };
+
+    const probe = options.probe ?? probeGitWorktree;
+    let workspaceObservation;
+    try {
+      workspaceObservation = await probe(space.canonicalPath);
+    } catch (error) {
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
+    }
+    const workspaceValidation = validateWorkspaceObservation(space, project, workspaceObservation);
+    if (!workspaceValidation.ok) return failOrUnknown({ ok: false, ...workspaceValidation, spaceId: space.spaceId });
+
+    const alreadySwitched = branchMatches(workspaceObservation.after.branch, nextBranch)
+      && workspaceObservation.after.head === request.expectedBaseHead
+      && !workspaceObservation.after.hasChanges;
+    if (alreadySwitched) {
+      return finish(workspaceObservation, preserveReservation);
     }
     if (workspaceObservation.after.hasChanges) {
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
     }
 
     let primaryObservation;
     try {
       primaryObservation = await probe(project.canonical_path);
     } catch (error) {
-      return failCommand(db, request.commandId, { ok: false, code: 'PROBE_FAILED', message: error.message });
+      return failOrUnknown({ ok: false, code: 'PROBE_FAILED', message: error.message });
     }
     const primaryValidation = validatePrimaryObservation(project, primaryObservation);
-    if (!primaryValidation.ok) return failCommand(db, request.commandId, { ok: false, ...primaryValidation });
+    if (!primaryValidation.ok) return failOrUnknown({ ok: false, ...primaryValidation });
     if (primaryObservation.after.head !== request.expectedBaseHead) {
-      return failCommand(db, request.commandId, {
+      return failOrUnknown({
         ok: false,
         code: 'BASE_HEAD_STALE',
         expectedBaseHead: request.expectedBaseHead,
@@ -922,8 +1161,11 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
 
     const branchExists = await (options.checkBranchExists ?? checkBranchExists)(project.canonical_path, nextBranch);
     if (branchExists) {
-      return failCommand(db, request.commandId, { ok: false, code: 'BRANCH_ALREADY_EXISTS', branch: nextBranch });
+      return failOrUnknown({ ok: false, code: 'BRANCH_ALREADY_EXISTS', branch: nextBranch });
     }
+
+    const preEffect = revalidateWorkspaceLifecycle(db, reservation, options);
+    if (!preEffect.ok) return failOrUnknown(preEffect);
 
     try {
       await (options.switchGitWorktreeToNewBranch ?? switchGitWorktreeToNewBranch)(space.canonicalPath, {
@@ -936,41 +1178,55 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
       let afterError = null;
       try { afterError = await probe(space.canonicalPath); } catch {}
       if (afterError && branchMatches(afterError.after.branch, nextBranch) && afterError.after.head === request.expectedBaseHead && !afterError.after.hasChanges) {
-        return finalizeWorkspaceReuse(db, {
-          commandId: request.commandId,
-          projectId: request.projectId,
-          spaceId: request.spaceId,
-          expectedRevision: request.expectedRevision,
-          branch: nextBranch,
-          baseCommit: request.expectedBaseHead,
-          observation: afterError,
-          options,
+        const marked = markWorkspaceLifecycleEffectUnknown(db, reservation, options);
+        if (!marked.ok) {
+          preserveReservation = true;
+          return unknownWorkspaceResult(marked);
+        }
+        preserveReservation = true;
+        return finish(afterError, true);
+      }
+      if (!afterError) {
+        preserveReservation = true;
+        return unknownWorkspaceResult({
+          code: 'WORKSPACE_SWITCH_FAILED', spaceId: space.spaceId, message: error.message,
         });
       }
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_SWITCH_FAILED', spaceId: space.spaceId, message: error.message });
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_SWITCH_FAILED', spaceId: space.spaceId, message: error.message });
     }
 
-    const after = await probe(space.canonicalPath);
+    const marked = markWorkspaceLifecycleEffectUnknown(db, reservation, options);
+    if (!marked.ok) {
+      preserveReservation = true;
+      return unknownWorkspaceResult(marked);
+    }
+    preserveReservation = true;
+    options.faultInjector?.('workspace.reuse.after_git_before_finalize');
+
+    let after;
+    try {
+      after = await probe(space.canonicalPath);
+    } catch (error) {
+      return unknownWorkspaceResult({ code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
+    }
     const afterValidation = validateWorkspaceObservation(space, project, after);
     if (!afterValidation.ok || !branchMatches(after.after.branch, nextBranch) || after.after.head !== request.expectedBaseHead || after.after.hasChanges) {
-      return { ok: false, code: 'WORKSPACE_RECOVERY_UNCERTAIN', spaceId: space.spaceId, retryable: true };
+      return unknownWorkspaceResult({ ok: false, code: 'WORKSPACE_RECOVERY_UNCERTAIN', spaceId: space.spaceId });
     }
-    return finalizeWorkspaceReuse(db, {
-      commandId: request.commandId,
-      projectId: request.projectId,
-      spaceId: request.spaceId,
-      expectedRevision: request.expectedRevision,
-      branch: nextBranch,
-      baseCommit: request.expectedBaseHead,
-      observation: after,
-      options,
-    });
+    return finish(after, true);
   } finally {
-    releaseRepositoryLock(db, {
-      repositoryIdentity: project.repository_identity,
-      holder: lockHolder,
-      lockId: lock.lockId,
-    }, options);
+    if (reservation && !finalized && preserveReservation) {
+      releaseWorkspaceLifecycleExecutor(db, reservation, options);
+    } else if (reservation && !finalized) {
+      releaseWorkspaceLifecycle(db, reservation, options);
+    }
+    if (!preserveReservation && !preserveRepositoryLock) {
+      releaseRepositoryLock(db, {
+        repositoryIdentity: project.repository_identity,
+        holder: lockHolder,
+        lockId: lock.lockId,
+      }, options);
+    }
   }
 }
 
@@ -992,28 +1248,42 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
   if (begun.command.state === 'committed' || begun.command.state === 'failed') {
     return parseCommandResponse(begun.command);
   }
+  const unresolvedReplay = begun.fresh === false;
 
   const project = readProjectContext(db, request.projectId);
   const space = readDevelopmentSpace(db, request.spaceId);
-  if (!project) return failCommand(db, request.commandId, { ok: false, code: 'PROJECT_NOT_FOUND', projectId: request.projectId });
+  if (!project) {
+    const result = { ok: false, code: 'PROJECT_NOT_FOUND', projectId: request.projectId };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
+  }
+  if (project.archived_at) {
+    const result = {
+      ok: false, code: 'PROJECT_ARCHIVED', projectId: request.projectId, archivedAt: project.archived_at,
+    };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
+  }
   if (!space || space.projectId !== request.projectId) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_NOT_FOUND', spaceId: request.spaceId });
+    const result = { ok: false, code: 'SPACE_NOT_FOUND', spaceId: request.spaceId };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   if (!REUSABLE_SPACE_STATUSES.has(space.status)) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_NOT_REMOVABLE', spaceId: space.spaceId, status: space.status });
+    const result = { ok: false, code: 'SPACE_NOT_REMOVABLE', spaceId: space.spaceId, status: space.status };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   if (space.revision !== request.expectedRevision) {
-    return failCommand(db, request.commandId, {
+    const result = {
       ok: false,
       code: 'SPACE_REVISION_CONFLICT',
       spaceId: space.spaceId,
       expectedRevision: request.expectedRevision,
       currentRevision: space.revision,
-    });
+    };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
   const activeWork = readActiveWorkspaceWork(db, space.worktreeId);
   if (activeWork) {
-    return failCommand(db, request.commandId, { ok: false, code: 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork });
+    const result = { ok: false, code: 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
+    return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
 
   const lockHolder = request.commandId;
@@ -1022,27 +1292,103 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     holder: lockHolder,
     operation: 'remove_workspace',
     ttlMs: options.lockTtlMs ?? 60_000,
+    persistent: true,
+    lifecycleCommandId: request.commandId,
   }, options);
-  if (!lock.ok) return { ok: false, code: 'REPOSITORY_LOCKED', repositoryIdentity: project.repository_identity };
+  if (!lock.ok) {
+    const blocked = failIfBlockedByOtherLifecycle(
+      db,
+      request.commandId,
+      project.repository_identity,
+      {
+        ...lock,
+        code: lock.code ?? 'REPOSITORY_LOCKED',
+        repositoryIdentity: project.repository_identity,
+      },
+      { fresh: begun.fresh },
+    );
+    if (blocked) return blocked;
+    return {
+      ...lock,
+      code: lock.code ?? 'REPOSITORY_LOCKED',
+      repositoryIdentity: project.repository_identity,
+      outcome: 'unknown',
+      state: 'received',
+      retryable: true,
+    };
+  }
 
+  let reservation = null;
+  let preserveReservation = false;
+  let preserveRepositoryLock = false;
+  let finalized = false;
   try {
-    const listWorktrees = options.listGitWorktrees ?? listGitWorktrees;
-    const listed = await listWorktrees(project.canonical_path);
-    const registered = listed.find((entry) => samePath(entry.worktree, space.canonicalPath));
-    if (!registered) {
-      if (begun.fresh) {
-        return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_RECOVERY_UNCERTAIN', spaceId: space.spaceId });
+    const reservationBase = lifecycleRequest(project, space, request, 'remove');
+    const reserved = reserveWorkspaceLifecycle(db, reservationBase, options);
+    if (!reserved.ok) {
+      const blocked = failIfBlockedByOtherLifecycle(
+        db,
+        request.commandId,
+        project.repository_identity,
+        reserved,
+        { fresh: begun.fresh },
+      );
+      if (blocked) return blocked;
+      preserveRepositoryLock = reserved.code === 'WORKSPACE_LIFECYCLE_IN_PROGRESS'
+        && lock.renewed === true
+        && lock.holder === lockHolder;
+      return applyPreEffectLifecycleResult(db, request.commandId, reserved);
+    }
+    reservation = { ...reservationBase, ownerToken: reserved.ownerToken, ownerPid: reserved.ownerPid };
+    preserveReservation = reserved.reclaimed === true;
+
+    const failOrUnknown = (result) => preserveReservation
+      ? unknownWorkspaceResult(result)
+      : applyPreEffectLifecycleResult(db, request.commandId, result);
+
+    const finish = (afterEffect = false) => {
+      const valid = revalidateWorkspaceLifecycle(db, reservation, options);
+      if (!valid.ok) {
+        return afterEffect || preserveReservation
+          ? unknownWorkspaceResult({ ...valid, spaceId: space.spaceId })
+          : failOrUnknown(valid);
       }
-      return finalizeWorkspaceRemoval(db, {
+      const result = finalizeWorkspaceRemoval(db, {
         commandId: request.commandId,
         projectId: request.projectId,
         spaceId: request.spaceId,
         expectedRevision: request.expectedRevision,
+        reservation,
         options,
       });
+      if (result.ok) {
+        finalized = true;
+        preserveReservation = false;
+      } else if (result.outcome === 'unknown' || result.retryable === true) {
+        preserveReservation = true;
+      }
+      return result;
+    };
+
+    const listWorktrees = options.listGitWorktrees ?? listGitWorktrees;
+    let listed;
+    try {
+      listed = await listWorktrees(project.canonical_path);
+    } catch (error) {
+      return preserveReservation
+        ? unknownWorkspaceResult({ code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message })
+        : failOrUnknown({ code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
+    }
+    const registered = listed.find((entry) => samePath(entry.worktree, space.canonicalPath));
+    if (!registered) {
+      if (begun.fresh) {
+        preserveReservation = true;
+        return unknownWorkspaceResult({ code: 'WORKSPACE_RECOVERY_UNCERTAIN', spaceId: space.spaceId });
+      }
+      return finish(preserveReservation);
     }
     if (!branchMatches(registered.branch, space.branch)) {
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_IDENTITY_MISMATCH', spaceId: space.spaceId });
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_IDENTITY_MISMATCH', spaceId: space.spaceId });
     }
 
     const probe = options.probe ?? probeGitWorktree;
@@ -1050,13 +1396,16 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     try {
       workspaceObservation = await probe(space.canonicalPath);
     } catch (error) {
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_PROBE_FAILED', spaceId: space.spaceId, message: error.message });
     }
     const workspaceValidation = validateWorkspaceObservation(space, project, workspaceObservation);
-    if (!workspaceValidation.ok) return failCommand(db, request.commandId, { ok: false, ...workspaceValidation, spaceId: space.spaceId });
+    if (!workspaceValidation.ok) return failOrUnknown({ ok: false, ...workspaceValidation, spaceId: space.spaceId });
     if (workspaceObservation.after.hasChanges) {
-      return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
+      return failOrUnknown({ ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
     }
+
+    const preEffect = revalidateWorkspaceLifecycle(db, reservation, options);
+    if (!preEffect.ok) return failOrUnknown(preEffect);
 
     try {
       await (options.removeGitWorktree ?? removeGitWorktree)(project.canonical_path, {
@@ -1065,28 +1414,53 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
         maxBuffer: options.maxBuffer ?? 2 * 1024 * 1024,
       });
     } catch (error) {
-      const remaining = await listWorktrees(project.canonical_path);
-      if (remaining.some((entry) => samePath(entry.worktree, space.canonicalPath))) {
-        return failCommand(db, request.commandId, { ok: false, code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId, message: error.message });
+      let remaining;
+      try { remaining = await listWorktrees(project.canonical_path); } catch {
+        preserveReservation = true;
+        return unknownWorkspaceResult({ code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId, message: error.message });
       }
+      if (remaining.some((entry) => samePath(entry.worktree, space.canonicalPath))) {
+        return failOrUnknown({ ok: false, code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId, message: error.message });
+      }
+      const marked = markWorkspaceLifecycleEffectUnknown(db, reservation, options);
+      if (!marked.ok) {
+        preserveReservation = true;
+        return unknownWorkspaceResult(marked);
+      }
+      preserveReservation = true;
+      return finish(true);
     }
 
-    const after = await listWorktrees(project.canonical_path);
-    if (after.some((entry) => samePath(entry.worktree, space.canonicalPath))) {
-      return { ok: false, code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId, retryable: true };
+    const marked = markWorkspaceLifecycleEffectUnknown(db, reservation, options);
+    if (!marked.ok) {
+      preserveReservation = true;
+      return unknownWorkspaceResult(marked);
     }
-    return finalizeWorkspaceRemoval(db, {
-      commandId: request.commandId,
-      projectId: request.projectId,
-      spaceId: request.spaceId,
-      expectedRevision: request.expectedRevision,
-      options,
-    });
+    preserveReservation = true;
+    options.faultInjector?.('workspace.remove.after_git_before_finalize');
+
+    let after;
+    try {
+      after = await listWorktrees(project.canonical_path);
+    } catch (error) {
+      return unknownWorkspaceResult({ code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId, message: error.message });
+    }
+    if (after.some((entry) => samePath(entry.worktree, space.canonicalPath))) {
+      return unknownWorkspaceResult({ code: 'WORKSPACE_REMOVE_FAILED', spaceId: space.spaceId });
+    }
+    return finish(true);
   } finally {
-    releaseRepositoryLock(db, {
-      repositoryIdentity: project.repository_identity,
-      holder: lockHolder,
-      lockId: lock.lockId,
-    }, options);
+    if (reservation && !finalized && preserveReservation) {
+      releaseWorkspaceLifecycleExecutor(db, reservation, options);
+    } else if (reservation && !finalized) {
+      releaseWorkspaceLifecycle(db, reservation, options);
+    }
+    if (!preserveReservation && !preserveRepositoryLock) {
+      releaseRepositoryLock(db, {
+        repositoryIdentity: project.repository_identity,
+        holder: lockHolder,
+        lockId: lock.lockId,
+      }, options);
+    }
   }
 }

@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 26;
+export const SUPPORTED_SCHEMA_VERSION = 27;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -930,6 +930,158 @@ END;
           SELECT RAISE(ABORT, 'work_line_events is append-only');
         END;
       `);
+    },
+  },
+  {
+    version: 27,
+    name: 'durable-workspace-lifecycle-reservations',
+    apply(db) {
+      const tableExists = (name) => Boolean(db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      ).get(name));
+      const columns = (table) => new Set(
+        db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name),
+      );
+
+      if (tableExists('worktrees')) {
+        const worktreeColumns = columns('worktrees');
+        if (!worktreeColumns.has('lifecycle_epoch')) {
+          db.exec(`
+            ALTER TABLE worktrees
+            ADD COLUMN lifecycle_epoch INTEGER NOT NULL DEFAULT 0
+            CHECK (lifecycle_epoch >= 0);
+          `);
+        }
+        if (!worktreeColumns.has('lifecycle_started_at')) {
+          db.exec('ALTER TABLE worktrees ADD COLUMN lifecycle_started_at TEXT;');
+        }
+        if (!worktreeColumns.has('lifecycle_completed_at')) {
+          db.exec('ALTER TABLE worktrees ADD COLUMN lifecycle_completed_at TEXT;');
+        }
+      }
+
+      if (tableExists('snapshots')) {
+        const snapshotColumns = columns('snapshots');
+        if (!snapshotColumns.has('lifecycle_epoch')) {
+          db.exec(`
+            ALTER TABLE snapshots
+            ADD COLUMN lifecycle_epoch INTEGER NOT NULL DEFAULT 0
+            CHECK (lifecycle_epoch >= 0);
+          `);
+        }
+      }
+
+      if (tableExists('commands') && tableExists('projects')
+        && tableExists('worktrees') && tableExists('development_spaces')) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS workspace_lifecycle_reservations (
+            repository_identity TEXT PRIMARY KEY,
+            worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            space_id TEXT NOT NULL REFERENCES development_spaces(id),
+            command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),
+            operation TEXT NOT NULL CHECK (operation IN ('reuse', 'remove')),
+            state TEXT NOT NULL CHECK (state IN ('executing', 'unknown')),
+            epoch INTEGER NOT NULL CHECK (epoch >= 1),
+            expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
+            expected_status TEXT NOT NULL,
+            owner_pid INTEGER NOT NULL CHECK (owner_pid >= 0),
+            owner_token TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            effect_observed_at TEXT,
+            last_error_code TEXT
+          ) STRICT;
+
+          CREATE INDEX IF NOT EXISTS idx_workspace_lifecycle_reservations_worktree
+            ON workspace_lifecycle_reservations(worktree_id);
+          CREATE INDEX IF NOT EXISTS idx_workspace_lifecycle_reservations_command
+            ON workspace_lifecycle_reservations(command_id);
+        `);
+
+        // A v26 database could have reached Git after journaling a lifecycle
+        // command but before its receipt was committed. Preserve that
+        // uncertainty during the upgrade. If more than one unresolved command
+        // points at the same repository, leave the journal entries as a
+        // conservative fence instead of guessing which effect belongs to the
+        // durable reservation.
+        const pending = db.prepare(`
+          SELECT id, kind, state, request_json, created_at
+          FROM commands
+          WHERE kind IN ('workspace.reuse', 'workspace.remove')
+            AND state IN ('received', 'observing', 'uncertain')
+          ORDER BY created_at ASC, id ASC
+        `).all();
+        const groups = new Map();
+        for (const command of pending) {
+          let request;
+          try { request = JSON.parse(command.request_json); } catch { continue; }
+          const projectId = request?.projectId ?? request?.project_id;
+          const spaceId = request?.spaceId ?? request?.space_id;
+          if (!projectId || !spaceId) continue;
+          const target = db.prepare(`
+            SELECT development_spaces.worktree_id, worktrees.repository_identity,
+                   development_spaces.status, development_spaces.revision
+            FROM development_spaces
+            JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+            WHERE development_spaces.id = ? AND development_spaces.project_id = ?
+          `).get(spaceId, projectId);
+          if (!target) continue;
+          const entry = {
+            command,
+            request,
+            projectId,
+            spaceId,
+            worktreeId: target.worktree_id,
+            repositoryIdentity: target.repository_identity,
+            status: target.status,
+            revision: target.revision,
+          };
+          const list = groups.get(target.repository_identity) ?? [];
+          list.push(entry);
+          groups.set(target.repository_identity, list);
+        }
+
+        for (const [repositoryIdentity, entries] of groups) {
+          if (entries.length !== 1) continue;
+          const entry = entries[0];
+          const worktree = db.prepare(`
+            SELECT lifecycle_epoch FROM worktrees WHERE id = ?
+          `).get(entry.worktreeId);
+          if (!worktree) continue;
+          const epoch = Math.max(1, Number(worktree.lifecycle_epoch ?? 0));
+          if (Number(worktree.lifecycle_epoch ?? 0) < epoch) {
+            db.prepare(`
+              UPDATE worktrees
+              SET lifecycle_epoch = ?, lifecycle_started_at = COALESCE(lifecycle_started_at, ?),
+                  lifecycle_completed_at = NULL
+              WHERE id = ?
+            `).run(epoch, entry.command.created_at, entry.worktreeId);
+          }
+          db.prepare(`
+            INSERT OR IGNORE INTO workspace_lifecycle_reservations (
+              repository_identity, worktree_id, project_id, space_id, command_id,
+              operation, state, epoch, expected_revision, expected_status,
+              owner_pid, owner_token, started_at, updated_at, last_error_code
+            ) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?, 0, ?, ?, ?, 'LEGACY_UNCERTAIN')
+          `).run(
+            repositoryIdentity,
+            entry.worktreeId,
+            entry.projectId,
+            entry.spaceId,
+            entry.command.id,
+            entry.command.kind === 'workspace.reuse' ? 'reuse' : 'remove',
+            epoch,
+            Number.isInteger(entry.request.expectedRevision)
+              ? entry.request.expectedRevision
+              : entry.revision,
+            entry.status,
+            `legacy:${entry.command.id}`,
+            entry.command.created_at,
+            entry.command.created_at,
+          );
+        }
+      }
     },
   },
 ];

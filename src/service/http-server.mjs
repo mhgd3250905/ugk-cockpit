@@ -132,6 +132,13 @@ class AtomicHandoffAbort extends Error {
   }
 }
 
+const WORKSPACE_PENDING_ERROR = {
+  status: 409,
+  message: '开发空间操作尚未确认完成。',
+  impact: '代码可能已发生变化；相关操作和历史记录仍保留，暂不开放新的 AI 工作。',
+  requiredAction: '请在开发空间区域使用“恢复并核对”，沿原请求继续核对，不要新建删除或重新开始请求。',
+};
+
 const PUBLIC_ERRORS = {
   CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED: {
     status: 409, message: '需要项目所有者在工作台授权转交。',
@@ -733,6 +740,34 @@ const PUBLIC_ERRORS = {
     message: '暂时无法移除这个开发空间的本地文件夹。',
     impact: 'Cockpit 没有把该空间标记为已删除。',
     requiredAction: '请关闭可能正在使用该文件夹的程序后重试。',
+  },
+  WORKSPACE_RECOVERY_UNCERTAIN: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_LIFECYCLE_IN_PROGRESS: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_LIFECYCLE_AMBIGUOUS: {
+    ...WORKSPACE_PENDING_ERROR,
+    message: '这个项目存在多项尚未确认的开发空间操作。',
+    requiredAction: '请核对原操作请求和代码现状，保留恢复材料；不要创建新的删除或重新开始请求。',
+  },
+  WORKSPACE_LIFECYCLE_CONFLICT: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_LIFECYCLE_RESERVATION_LOST: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_LIFECYCLE_RESERVATION_MISSING: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_OBSERVATION_STALE: {
+    status: 409,
+    message: '开发空间已发生变化，这次读取的代码状态已经过时。',
+    impact: '这次请求没有取得新的代码写入权限。',
+    requiredAction: '请重新读取当前开发空间后再接入工作。',
+  },
+  SPACE_ARCHIVED: {
+    status: 409,
+    message: '这个开发空间已经归档。',
+    impact: '这次请求没有取得新的代码写入权限。',
+    requiredAction: '请在项目中选择可用的开发空间。',
+  },
+  PROJECT_ARCHIVED: {
+    status: 409,
+    message: '这个项目已经归档。',
+    impact: '这次请求没有启动新的开发空间操作。',
+    requiredAction: '请先在项目列表恢复项目，再核对原操作状态。',
   },
   SPACE_ID_CONFLICT: {
     status: 409,
@@ -2302,6 +2337,7 @@ function toSnapshot(probe) {
     headRelation: probe.headRelation,
     coherence: probe.coherence,
     observedAt: probe.observedAt,
+    ...(Number.isInteger(probe.lifecycleEpoch) ? { lifecycleEpoch: probe.lifecycleEpoch } : {}),
   };
 }
 
@@ -2450,10 +2486,12 @@ export async function createCockpitHttpServer({
     }
 
     const binding = authorizeExistingPath(expectedCanonicalPath, authorizedRoot);
-    const observation = await probe(
+    const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE id = ?')
+      .get(targetWorktreeId)?.lifecycle_epoch ?? 0;
+    const observation = { ...await probe(
       binding.candidateReal,
       expected?.baselineHead ? { expectedBaselineHead: expected.baselineHead } : undefined,
-    );
+    ), lifecycleEpoch };
     revalidateAuthorizedPath(binding);
     authorizeObservation(observation, [authorizedRoot, project.authorized_root]);
     if (
@@ -3299,19 +3337,35 @@ export async function createCockpitHttpServer({
               spaceId,
               expectedRevision: body.expectedRevision,
               expectedBaseHead: body.expectedBaseHead,
-            }, { probe, checkBranchExists })
+            }, { probe, checkBranchExists, faultInjector })
           : await removeDevelopmentWorkspace(db, {
               commandId: body.commandId,
               projectId,
               spaceId,
               expectedRevision: body.expectedRevision,
-            }, { probe });
+            }, { probe, faultInjector });
         if (result.ok) {
           sendJson(response, 200, result);
         } else {
+          const command = readCommand(db, body.commandId);
+          // An error response alone does not establish whether Git changed.
+          // Only a terminal failed journal entry confirms failure; all other
+          // outcomes retain the exact request for recovery.
+          const confirmedFailure = command?.state === 'failed'
+            && result.outcome !== 'unknown' && result.retryable !== true;
+          const outcome = confirmedFailure ? 'confirmed_failure' : 'unknown';
           sendError(response, result.code, {
             commandId: body.commandId,
-            extra: { space_id: spaceId },
+            extra: {
+              space_id: spaceId,
+              outcome,
+              state: command?.state ?? 'received',
+              retryable: !confirmedFailure,
+              ...(!confirmedFailure ? {
+                impact: WORKSPACE_PENDING_ERROR.impact,
+                required_action: WORKSPACE_PENDING_ERROR.requiredAction,
+              } : {}),
+            },
           });
         }
         return;
@@ -4595,7 +4649,9 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        const observation = await probe(binding.candidateReal);
+        const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE canonical_path = ?')
+          .get(binding.candidateReal)?.lifecycle_epoch ?? 0;
+        const observation = { ...await probe(binding.candidateReal), lifecycleEpoch };
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, authorizedRoots);
         const result = startWriteRun(db, {
