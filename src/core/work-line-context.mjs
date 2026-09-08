@@ -1,6 +1,7 @@
 const ACTIVE_ASSIGNMENT_STATES = new Set(['pending', 'accepted', 'active']);
 
 const EVIDENCE_PRIORITY = new Map([
+  ['workspace_reuse', 5],
   ['project_observation', 4],
   ['snapshot', 3],
   ['progress_event', 2],
@@ -28,8 +29,8 @@ function timeValue(value) {
 }
 
 function compareNewest(a, b) {
-  const aTime = timeValue(a?.observedAt ?? a?.activityAt ?? a?.createdAt);
-  const bTime = timeValue(b?.observedAt ?? b?.activityAt ?? b?.createdAt);
+  const aTime = timeValue(a?.effectiveAt ?? a?.observedAt ?? a?.activityAt ?? a?.createdAt);
+  const bTime = timeValue(b?.effectiveAt ?? b?.observedAt ?? b?.activityAt ?? b?.createdAt);
   if (aTime !== bTime) return bTime - aTime;
 
   const aPriority = EVIDENCE_PRIORITY.get(a?.source) ?? 0;
@@ -123,6 +124,22 @@ function candidateActivity(candidate) {
   );
 }
 
+function candidateStartedAt(candidate) {
+  return candidate?.run?.created_at
+    ?? candidate?.assignment?.accepted_at
+    ?? candidate?.assignment?.created_at
+    ?? null;
+}
+
+function candidateStartedAfter(candidate, boundaryAt) {
+  if (!boundaryAt) return true;
+  const boundaryTime = timeValue(boundaryAt);
+  const startedTime = timeValue(candidateStartedAt(candidate));
+  return startedTime !== Number.NEGATIVE_INFINITY
+    && boundaryTime !== Number.NEGATIVE_INFINITY
+    && startedTime >= boundaryTime;
+}
+
 function candidateIsCurrent(candidate) {
   return candidate.run?.lifecycle === 'active' || assignmentIsCurrent(candidate.assignment);
 }
@@ -163,15 +180,18 @@ function sessionCandidate(assignment, run = null) {
   };
 }
 
-function readLatestSession(lane, assignments, runsById) {
+function readLatestSession(lane, assignments, runsById, reuseBoundaryAt = null) {
   const candidates = [];
+  const addCandidate = (candidate) => {
+    if (candidateStartedAfter(candidate, reuseBoundaryAt)) candidates.push(candidate);
+  };
   for (const assignment of assignments.filter((row) => row.worktree_id === lane.worktreeId)) {
     const run = assignment.session_id
       ? runsById.get(assignment.session_id)?.worktree_id === assignment.worktree_id
         ? runsById.get(assignment.session_id)
         : null
       : null;
-    candidates.push(sessionCandidate(assignment, run));
+    addCandidate(sessionCandidate(assignment, run));
   }
 
   for (const run of runsById.values()) {
@@ -179,7 +199,7 @@ function readLatestSession(lane, assignments, runsById) {
     const hasExactAssignment = assignments.some((assignment) => (
       assignment.session_id === run.id && assignment.worktree_id === run.worktree_id
     ));
-    if (!hasExactAssignment) candidates.push(sessionCandidate(null, run));
+    if (!hasExactAssignment) addCandidate(sessionCandidate(null, run));
   }
 
   candidates.sort(compareSessionCandidates);
@@ -242,12 +262,110 @@ function eventEvidence(row, source) {
   };
 }
 
-function addEvidence(evidenceByLane, lane, evidence) {
+function evidenceIsAfterBoundary(evidence, boundaryAt) {
+  if (!boundaryAt) return true;
+  const evidenceTime = timeValue(evidence?.effectiveAt ?? evidence?.observedAt ?? evidence?.activityAt ?? evidence?.createdAt);
+  const boundaryTime = timeValue(boundaryAt);
+  return evidenceTime !== Number.NEGATIVE_INFINITY
+    && boundaryTime !== Number.NEGATIVE_INFINITY
+    && evidenceTime >= boundaryTime;
+}
+
+function addEvidence(evidenceByLane, lane, evidence, boundaryAt = null) {
   if (!lane || !evidence) return;
+  if (!evidenceIsAfterBoundary(evidence, boundaryAt)) return;
   const existing = evidenceByLane.get(lane.laneKey);
   if (!existing || compareNewest(evidence, existing) < 0) {
     evidenceByLane.set(lane.laneKey, evidence);
   }
+}
+
+function parseObject(encoded) {
+  if (typeof encoded !== 'string' || encoded.length === 0) return null;
+  try {
+    const value = JSON.parse(encoded);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasResponseGitEvidence(git) {
+  return Boolean(
+    nullableText(git?.head)
+      || nullableText(git?.branch)
+      || typeof git?.hasChanges === 'boolean'
+      || nullableText(git?.coherence)
+      || nullableText(git?.observedAt),
+  );
+}
+
+function workspaceReuseEvidence(row, response, boundaryAt) {
+  const git = response?.git;
+  if (!git || typeof git !== 'object' || Array.isArray(git) || !hasResponseGitEvidence(git)) return null;
+  return {
+    source: 'workspace_reuse',
+    recordId: row.id,
+    phase: null,
+    sessionId: null,
+    observedAt: nullableText(git.observedAt),
+    // The committed space update is the operation's durable ordering point.
+    // Git fields themselves are copied only when the receipt explicitly has
+    // them; no field is inferred from the branch or space metadata.
+    effectiveAt: boundaryAt,
+    createdAt: boundaryAt,
+    head: nullableText(git.head),
+    branch: nullableText(git.branch),
+    hasChanges: typeof git.hasChanges === 'boolean' ? git.hasChanges : null,
+    coherence: nullableText(git.coherence) ?? 'unknown',
+  };
+}
+
+function compareBoundaries(a, b) {
+  const aTime = timeValue(a?.boundaryAt);
+  const bTime = timeValue(b?.boundaryAt);
+  if (aTime !== bTime) return bTime - aTime;
+  return String(b?.commandId ?? '').localeCompare(String(a?.commandId ?? ''));
+}
+
+function readWorkspaceReuseMarkers(db, projectId, lanes) {
+  const markers = new Map();
+  const rows = db.prepare(`
+    SELECT id, response_json, created_at, updated_at
+    FROM commands
+    WHERE kind = 'workspace.reuse' AND state = 'committed'
+  `).all();
+
+  for (const row of rows) {
+    const response = parseObject(row.response_json);
+    if (!response || response.ok !== true || response.projectId !== projectId) continue;
+    if (typeof response.spaceId !== 'string' || response.spaceId.length === 0) continue;
+
+    const responseSpace = response.space;
+    if (!responseSpace || typeof responseSpace !== 'object' || Array.isArray(responseSpace)) continue;
+    const responseWorktreeId = nullableText(responseSpace.worktreeId);
+    const responseSpaceIds = [responseSpace.id, responseSpace.spaceId]
+      .filter((value) => value !== undefined && value !== null);
+    if (!responseWorktreeId || responseSpaceIds.some((value) => value !== response.spaceId)) continue;
+
+    const lane = lanes.find((candidate) => (
+      candidate.role === 'development_space'
+        && candidate.spaceId === response.spaceId
+        && candidate.worktreeId === responseWorktreeId
+    ));
+    const boundaryAt = nullableText(responseSpace.updatedAt);
+    if (!lane || !boundaryAt || timeValue(boundaryAt) === Number.NEGATIVE_INFINITY) continue;
+
+    const marker = {
+      laneKey: lane.laneKey,
+      commandId: row.id,
+      boundaryAt,
+      evidence: workspaceReuseEvidence(row, response, boundaryAt),
+    };
+    const existing = markers.get(lane.laneKey);
+    if (!existing || compareBoundaries(marker, existing) < 0) markers.set(lane.laneKey, marker);
+  }
+  return markers;
 }
 
 function mapSession(candidate) {
@@ -405,6 +523,7 @@ export function readWorkLineContexts(db, projectId) {
   }
 
   const worktreeIds = lanes.map((lane) => lane.worktreeId).filter(Boolean);
+  const reuseMarkers = readWorkspaceReuseMarkers(db, projectId, lanes);
   const runs = worktreeIds.length === 0
     ? []
     : db.prepare(`
@@ -421,7 +540,13 @@ export function readWorkLineContexts(db, projectId) {
     JOIN runs ON runs.id = snapshots.run_id
     WHERE runs.worktree_id IN (${worktreeIds.length ? worktreeIds.map(() => '?').join(', ') : "''"})
   `).all(...worktreeIds)) {
-    addEvidence(evidenceByLane, byWorktree.get(row.worktree_id), snapshotEvidence(row));
+    const lane = byWorktree.get(row.worktree_id);
+    addEvidence(
+      evidenceByLane,
+      lane,
+      snapshotEvidence(row),
+      reuseMarkers.get(lane?.laneKey)?.boundaryAt ?? null,
+    );
   }
 
   const latestProjectObservation = db.prepare(`
@@ -439,6 +564,10 @@ export function readWorkLineContexts(db, projectId) {
     );
   }
 
+  for (const marker of reuseMarkers.values()) {
+    addEvidence(evidenceByLane, lanes.find((lane) => lane.laneKey === marker.laneKey), marker.evidence, marker.boundaryAt);
+  }
+
   for (const row of db.prepare(`
     SELECT progress_events.*, assignments.worktree_id,
            assignments.project_id, assignments.session_id AS assignment_session_id
@@ -448,7 +577,13 @@ export function readWorkLineContexts(db, projectId) {
       AND progress_events.session_id = assignments.session_id
   `).all(projectId)) {
     if (!hasGitEvidence(row)) continue;
-    addEvidence(evidenceByLane, byWorktree.get(row.worktree_id), eventEvidence(row, 'progress_event'));
+    const lane = byWorktree.get(row.worktree_id);
+    addEvidence(
+      evidenceByLane,
+      lane,
+      eventEvidence(row, 'progress_event'),
+      reuseMarkers.get(lane?.laneKey)?.boundaryAt ?? null,
+    );
   }
 
   for (const row of db.prepare(`
@@ -463,7 +598,13 @@ export function readWorkLineContexts(db, projectId) {
       AND assignments.session_id = relays.session_id
   `).all(projectId)) {
     if (!hasGitEvidence(row)) continue;
-    addEvidence(evidenceByLane, byWorktree.get(row.worktree_id), eventEvidence(row, 'relay'));
+    const lane = byWorktree.get(row.worktree_id);
+    addEvidence(
+      evidenceByLane,
+      lane,
+      eventEvidence(row, 'relay'),
+      reuseMarkers.get(lane?.laneKey)?.boundaryAt ?? null,
+    );
   }
 
   return lanes.map((lane) => {
@@ -471,6 +612,7 @@ export function readWorkLineContexts(db, projectId) {
       lane,
       assignments,
       new Map([...runsById].filter(([, run]) => run.worktree_id === lane.worktreeId)),
+      reuseMarkers.get(lane.laneKey)?.boundaryAt ?? null,
     );
     const session = mapSession(candidate);
     const evidence = evidenceByLane.get(lane.laneKey) ?? null;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -18,10 +18,16 @@ import {
 import { readProjectDetail } from '../src/core/timeline.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 const TOKEN = 'phase-zero-test-token-that-is-long-enough';
 
 function createFixture(t, { registerHook = true } = {}) {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-edit-'));
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-edit-'));
   const repoRoot = path.join(container, 'repository');
   mkdirSync(repoRoot, { recursive: true });
 
@@ -637,7 +643,7 @@ test('Modals contract: ConfirmFolderModal, HandoffModal, EditProjectModal preven
 });
 
 test('Fail-closed: replacing avatarStorageRoot or ancestor with junction/symlink blocks staging and avatar access', async (t) => {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-avatar-junc-'));
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-avatar-junc-'));
   const targetOutside = path.join(container, 'outside');
   mkdirSync(targetOutside, { recursive: true });
   writeFileSync(path.join(targetOutside, 'secret.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));

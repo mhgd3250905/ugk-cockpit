@@ -710,6 +710,7 @@ function finalizeWorkspaceReuse(db, {
   expectedRevision,
   branch,
   baseCommit,
+  observation,
   options,
 }) {
   const timestamp = iso(nowMillis(options));
@@ -758,6 +759,13 @@ function finalizeWorkspaceReuse(db, {
       baseCommit,
       revision,
       space,
+      git: {
+        head: observation.after.head,
+        branch: observation.after.branch,
+        hasChanges: observation.after.hasChanges ?? null,
+        coherence: observation.coherence,
+        observedAt: observation.observedAt ?? null,
+      },
     };
     return commitCommand(db, commandId, response, timestamp);
   });
@@ -887,6 +895,7 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
         expectedRevision: request.expectedRevision,
         branch: nextBranch,
         baseCommit: request.expectedBaseHead,
+        observation: workspaceObservation,
         options,
       });
     }
@@ -934,6 +943,7 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
           expectedRevision: request.expectedRevision,
           branch: nextBranch,
           baseCommit: request.expectedBaseHead,
+          observation: afterError,
           options,
         });
       }
@@ -952,6 +962,7 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
       expectedRevision: request.expectedRevision,
       branch: nextBranch,
       baseCommit: request.expectedBaseHead,
+      observation: after,
       options,
     });
   } finally {

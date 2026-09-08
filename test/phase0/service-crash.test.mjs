@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,8 +10,18 @@ import { openCockpitDatabase } from '../../src/core/database.mjs';
 const workerPath = fileURLToPath(new URL('../../scripts/service-worker.mjs', import.meta.url));
 const token = 'phase-zero-service-crash-token-123456789';
 
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；路径授权按产品契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在故障注入前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
+// 子进程的就绪、退出与请求都必须有界：任何一步卡住时让测试失败并回收
+// worker，而不是让泄漏的管道把整个测试套件永久挂起。
+const READY_TIMEOUT_MS = 30_000;
+
 function createFixture(t) {
-  const container = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-service-crash-'));
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-service-crash-'));
   t.after(() => rmSync(container, { recursive: true, force: true }));
   const repository = path.join(container, 'repository');
   mkdirSync(repository);
@@ -29,7 +39,7 @@ function createFixture(t) {
   return { container, repository, dbPath: path.join(container, 'cockpit.db') };
 }
 
-function launchService(fixture, faultPoint = null) {
+function launchService(t, fixture, faultPoint = null) {
   const encoded = Buffer.from(JSON.stringify({
     dbPath: fixture.dbPath,
     token,
@@ -39,6 +49,9 @@ function launchService(fixture, faultPoint = null) {
   const child = spawn(process.execPath, [workerPath, encoded], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => {
+    try { child.kill(); } catch {}
   });
   const ready = new Promise((resolve, reject) => {
     let stderr = '';
@@ -55,17 +68,33 @@ function launchService(fixture, faultPoint = null) {
     child.once('close', (code) => {
       if (code !== 91) reject(new Error(`service exited before ready (${code}): ${stderr}`));
     });
+    setTimeout(() => {
+      reject(new Error(`service did not become ready in time: ${stderr}`));
+    }, READY_TIMEOUT_MS).unref();
   });
-  return { child, ready };
+  // 'close' 必须在 spawn 后立即订阅：macOS 上故障退出的子进程回收极快，
+  // 事件可能在测试体随后才挂监听器之前就已发出并丢失，导致等待永远超时。
+  const exited = new Promise((resolve) => child.once('close', resolve));
+  return { child, ready, exited };
 }
 
-function waitForExit(child) {
-  return new Promise((resolve) => child.once('close', resolve));
+function waitForExit(service) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { service.child.kill(); } catch {}
+      reject(new Error('service child did not exit in time'));
+    }, READY_TIMEOUT_MS);
+    timer.unref();
+    service.exited.then((code) => {
+      clearTimeout(timer);
+      resolve(code);
+    }, reject);
+  });
 }
 
-async function stopService(child) {
-  const exited = waitForExit(child);
-  child.kill();
+async function stopService(service) {
+  const exited = waitForExit(service);
+  service.child.kill();
   await exited;
 }
 
@@ -77,6 +106,7 @@ function api(port, pathname, body) {
       'content-type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(READY_TIMEOUT_MS),
   });
 }
 
@@ -90,17 +120,17 @@ test('service kill/restart replays start and finish without phantom completion',
     goal: 'service crash recovery',
   };
 
-  let service = launchService(fixture, 'start.after_lease_insert');
+  let service = launchService(t, fixture, 'start.after_lease_insert');
   let ready = await service.ready;
   await assert.rejects(api(ready.port, '/api/v1/runs/start', startBody));
-  assert.equal(await waitForExit(service.child), 91);
+  assert.equal(await waitForExit(service), 91);
 
-  service = launchService(fixture);
+  service = launchService(t, fixture);
   ready = await service.ready;
   const startResponse = await api(ready.port, '/api/v1/runs/start', startBody);
   assert.ok([200, 201].includes(startResponse.status));
   const started = await startResponse.json();
-  await stopService(service.child);
+  await stopService(service);
 
   const finishBody = {
     commandId: 'service-crash-finish',
@@ -109,16 +139,16 @@ test('service kill/restart replays start and finish without phantom completion',
     outcome: 'completed',
     summary: 'finish after restart',
   };
-  service = launchService(fixture, 'finish.after_receipt_insert');
+  service = launchService(t, fixture, 'finish.after_receipt_insert');
   ready = await service.ready;
   await assert.rejects(api(
     ready.port,
     '/api/v1/runs/service-crash-run/finish',
     finishBody,
   ));
-  assert.equal(await waitForExit(service.child), 91);
+  assert.equal(await waitForExit(service), 91);
 
-  service = launchService(fixture);
+  service = launchService(t, fixture);
   ready = await service.ready;
   const finishResponse = await api(
     ready.port,
@@ -127,7 +157,7 @@ test('service kill/restart replays start and finish without phantom completion',
   );
   assert.equal(finishResponse.status, 200);
   assert.equal((await finishResponse.json()).status, 'completed');
-  await stopService(service.child);
+  await stopService(service);
 
   const db = openCockpitDatabase(fixture.dbPath, { migrate: false });
   assert.equal(db.prepare('SELECT count(*) AS count FROM handoff_receipts').get().count, 1);

@@ -337,8 +337,10 @@ export const TOOLS = [
         },
         acknowledgements: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'Optional list of acknowledgements or receipts'
         }
@@ -385,50 +387,64 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of key decisions made'
         },
         artifactRefs: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'List of suggested skills for next session'
         },
         acknowledgements: {
           type: 'array',
+          maxItems: 100,
           items: {
-            type: 'string'
+              type: 'string',
+              maxLength: 4000
           },
           description: 'Optional verified commit:<sha> references or unattributed_changes confirmation'
         }
@@ -539,32 +555,32 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of key decisions'
         },
         artifactRefs: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
-          items: { type: 'string' },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of suggested skills for the next conversation'
         }
       },
@@ -586,8 +602,31 @@ export const TOOLS = [
     }
   },
   {
+    name: 'ugk_work_takeover',
+    description: 'Consume a one-time transferCode explicitly issued by the user in the Cockpit workbench. Chat confirmation alone cannot authorize takeover. The host must provide a stable conversation identity. Never initialize or clear the workspace to recover.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The active sessionId returned by the context query'
+        },
+        clientRequestId: {
+          type: 'string',
+          description: 'A new idempotency key for this request'
+        },
+        transferCode: {
+          type: 'string',
+          description: 'The one-time authorization from the workbench; never invent or reuse another chat’s authorization'
+        }
+      },
+      required: ['sessionId', 'clientRequestId', 'transferCode'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'ugk_work_resume',
-    description: 'Only when the user explicitly requests resuming with a continueCode. An expired code can return confirmation_required: ask the user before retrying with confirmationRequestId and expectedRevision from that response and a new clientRequestId. Never infer confirmation.',
+    description: 'Only when the user explicitly requests resuming with a continueCode. An expired code requires a new authorization in the Cockpit workbench, never chat-only confirmation. Historical uncertain requests may be replayed unchanged; do not invent confirmation fields.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -625,8 +664,19 @@ const HANDOFF_ARRAY_FIELDS = [
   'suggestedSkills'
 ];
 
+// Relay and handoff list fields follow the core persistence contract
+// (MAX_LIST_ITEMS / MAX_ITEM_LENGTH in src/core/relays.mjs and handoffs.mjs).
+// The MCP gate must stay exactly as wide: a persisted request whose reply was
+// lost has to replay verbatim through validation into the idempotency layer —
+// any narrower bound would make an old 101+-item or long-item payload
+// permanently unrecoverable, and trimming it would break the frozen digest.
+const ARRAY_FIELD_MAX_ITEMS = 100;
+const ARRAY_ITEM_MAX_LENGTH = 4_000;
+
 function isStringArray(val) {
-  return Array.isArray(val) && val.every((item) => typeof item === 'string');
+  return Array.isArray(val)
+    && val.length <= ARRAY_FIELD_MAX_ITEMS
+    && val.every((item) => typeof item === 'string' && item.length <= ARRAY_ITEM_MAX_LENGTH);
 }
 
 function validateAcceptArgs(args) {
@@ -965,6 +1015,27 @@ function validateRelayArgs(args) {
   return null;
 }
 
+function validateTakeoverArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return 'Arguments must be an object';
+  }
+  const allowedKeys = ['sessionId', 'clientRequestId', 'transferCode'];
+  for (const key of Object.keys(args)) {
+    if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
+    if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
+  }
+  if (typeof args.sessionId !== 'string' || args.sessionId.trim() === '') {
+    return 'Missing or invalid required field: sessionId (must be non-empty string)';
+  }
+  if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
+    return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (typeof args.transferCode !== 'string' || !args.transferCode.trim()) {
+    return 'Platform authorization required: obtain transferCode from the Cockpit workbench; chat confirmation cannot authorize takeover';
+  }
+  return null;
+}
+
 function validateResumeArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
@@ -1074,12 +1145,10 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
     };
   }
 
-  // Handle notifications: notifications do not have an `id` property or are notifications/initialized
-  const isNotification = message.id === undefined || message.method === 'notifications/initialized';
-  if (isNotification && message.method === 'notifications/initialized') {
-    return null;
-  }
-  if (isNotification) {
+  // Notifications are exactly the messages without an `id` (JSON-RPC 2.0).
+  // A message carrying an id is a request and must be answered, even when the
+  // method name looks like a notification.
+  if (message.id === undefined) {
     return null;
   }
 
@@ -1183,6 +1252,8 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         validationError = validateInitArgs(toolArgs);
       } else if (toolName === 'ugk_work_relay') {
         validationError = validateRelayArgs(toolArgs);
+      } else if (toolName === 'ugk_work_takeover') {
+        validationError = validateTakeoverArgs(toolArgs);
       } else if (toolName === 'ugk_work_resume') {
         validationError = validateResumeArgs(toolArgs);
       } else {
@@ -1257,9 +1328,9 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
           result: formattedResult
         };
       } catch (err) {
-        if (err?.relayPayload) {
+        if (err?.relayPayload || err?.takeoverPayload) {
           return { jsonrpc: '2.0', id, result: {
-            isError: true, content: [{ type: 'text', text: JSON.stringify(err.relayPayload) }],
+            isError: true, content: [{ type: 'text', text: JSON.stringify(err.relayPayload ?? err.takeoverPayload) }],
           } };
         }
         if (stderr?.write) {
@@ -1270,7 +1341,8 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
         if (STRUCTURED_TOOL_NAMES.has(toolName) || err?.isIntegrationError) {
           const safePayload = sanitizeIntegrationErrorPayload(
             err?.integrationPayload ?? err,
-            err?.code ?? 'REQUEST_FAILED'
+            err?.code ?? 'REQUEST_FAILED',
+            err?.diagnosticId ?? null,
           );
           return {
             jsonrpc: '2.0',
@@ -1279,6 +1351,22 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
               isError: true,
               content: [{ type: 'text', text: JSON.stringify(safePayload) }]
             }
+          };
+        }
+        if (['code', 'reason', 'diagnosticId', 'impact', 'required_action', 'requiredAction']
+          .some((field) => err?.[field] !== undefined)) {
+          const safePayload = sanitizeIntegrationErrorPayload(
+            err,
+            err?.code ?? 'REQUEST_FAILED',
+            err?.diagnosticId ?? null,
+          );
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              isError: true,
+              content: [{ type: 'text', text: JSON.stringify(safePayload) }],
+            },
           };
         }
         const publicMessage = typeof err?.publicMessage === 'string'
@@ -1308,7 +1396,7 @@ export async function dispatchMessage(message, { handlers = {}, stderr = null } 
   }
 }
 
-export function createMcpServer({ stdin, stdout, stderr, handlers = {} } = {}) {
+export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdown = null } = {}) {
   const inStream = stdin || process.stdin;
   const outStream = stdout || process.stdout;
   const errStream = stderr || process.stderr;
@@ -1393,6 +1481,11 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {} } = {}) {
   return {
     close() {
       rl.close();
+      // Hosts close stdin when the session ends. In-flight service calls must
+      // be aborted so this process cannot linger on a stalled connection.
+      if (typeof onShutdown === 'function') {
+        try { onShutdown(); } catch {}
+      }
     },
     dispatchMessage(msg) {
       return dispatchMessage(msg, { handlers, stderr: errStream });

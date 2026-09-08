@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody } from '@appica/ui-react/dialog';
 import './work-context.css';
 
@@ -10,6 +10,8 @@ function fileStatus(git) {
 
 export function WorkContext({ context, label, formatTime, overview }) {
   const [open, setOpen] = useState(false);
+  const titleRef = useRef(null);
+  const triggerRef = useRef(null);
   const git = context?.git;
   const fields = [
     ['AI 工作会话', context?.currentAgent || '尚未记录'],
@@ -23,8 +25,8 @@ export function WorkContext({ context, label, formatTime, overview }) {
 
   return (
     <>
-      <button type="button" className="work-context-summary" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-label={`查看${label}的完整工作信息`}>
-        <span className="work-context-label">{label}<span>查看完整信息 ›</span></span>
+      <button ref={triggerRef} type="button" className="work-context-summary" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-label={`查看${label}的完整工作信息`}>
+        <span className="work-context-label"><span className="work-context-name">{label}</span><span className="work-context-more">查看完整信息 ›</span></span>
         {overview && <span className="work-context-facts">{overview.lineCount} 条分支工作线 · {overview.closedCount} 条已手动结束</span>}
         <span className="work-context-goal"><strong>{overview ? '主项目工作' : '当前工作'}</strong>{context?.currentGoal || '尚未记录工作目标'}</span>
         <span className="work-context-facts">
@@ -35,9 +37,9 @@ export function WorkContext({ context, label, formatTime, overview }) {
         </span>
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="ugk-dialog work-context-dialog" closeButton>
+        <DialogContent className="ugk-dialog work-context-dialog" closeButton closeLabel="关闭" initialFocus={titleRef} finalFocus={triggerRef}>
           <DialogHeader>
-            <DialogTitle>{label} · 工作信息</DialogTitle>
+            <DialogTitle ref={titleRef} tabIndex={-1}>{label} · 工作信息</DialogTitle>
             <DialogDescription>{overview ? '以下为主项目最近的工作与代码记录。查看分支信息，请选择对应工作线。' : '工作与代码状态来自这条工作线最近的记录。'}</DialogDescription>
           </DialogHeader>
           <DialogBody>

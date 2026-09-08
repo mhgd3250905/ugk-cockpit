@@ -176,6 +176,36 @@ function insertRelay(db, {
   );
 }
 
+function insertCommittedWorkspaceReuse(db, {
+  id,
+  responseProjectId = projectId,
+  spaceId,
+  worktreeId,
+  updatedAt,
+  git,
+}) {
+  const response = {
+    ok: true,
+    commandId: id,
+    projectId: responseProjectId,
+    spaceId,
+    space: {
+      id: spaceId,
+      spaceId,
+      worktreeId,
+      updatedAt,
+    },
+  };
+  if (git !== undefined) response.git = git;
+
+  db.prepare(`
+    INSERT INTO commands (
+      id, kind, request_digest, request_json, state, response_json,
+      run_id, receipt_id, created_at, updated_at
+    ) VALUES (?, 'workspace.reuse', ?, '{}', 'committed', ?, NULL, NULL, ?, ?)
+  `).run(id, `digest-${id}`, JSON.stringify(response), updatedAt, updatedAt);
+}
+
 function fixture(t) {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-work-line-context-'));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -479,6 +509,128 @@ test('keeps an empty registered space explicit instead of borrowing another line
   });
   assert.equal(context.lastObservedAt, null);
   assert.equal(context.currentAgent === 'main-agent', false);
+
+  db.close();
+});
+
+test('reuse resets current context at the committed space update and isolates mismatched receipts', (t) => {
+  const db = fixture(t);
+
+  db.prepare(`
+    UPDATE assignments
+    SET status = 'completed', last_heartbeat_at = NULL, updated_at = ?
+    WHERE id = 'assignment-a'
+  `).run(at(18));
+  db.prepare(`
+    UPDATE runs
+    SET lifecycle = 'completed', last_heartbeat_at = NULL, finished_at = ?
+    WHERE id = 'session-a'
+  `).run(at(18));
+
+  // A legacy reuse receipt can establish the new-session boundary without
+  // inventing Git facts that the receipt did not store.
+  insertCommittedWorkspaceReuse(db, {
+    id: 'reuse-a-legacy',
+    spaceId: 'space-context-a',
+    worktreeId: spaceAWorktreeId,
+    updatedAt: at(20),
+  });
+
+  let spaceA = readWorkLineContexts(db, projectId)
+    .find((context) => context.laneKey === 'space:space-context-a');
+  assert.equal(spaceA.currentAgent, null);
+  assert.equal(spaceA.currentGoal, null);
+  assert.equal(spaceA.session, null);
+  assert.equal(spaceA.git.source, 'unknown');
+  assert.equal(spaceA.git.head, null);
+  assert.equal(spaceA.git.branch, null);
+
+  insertCommittedWorkspaceReuse(db, {
+    id: 'reuse-a-current',
+    spaceId: 'space-context-a',
+    worktreeId: spaceAWorktreeId,
+    updatedAt: at(21),
+    git: {
+      head: 'reuse-a-head',
+      branch: 'feature/reused-a',
+      hasChanges: false,
+      coherence: 'coherent',
+      observedAt: at(21),
+    },
+  });
+
+  spaceA = readWorkLineContexts(db, projectId)
+    .find((context) => context.laneKey === 'space:space-context-a');
+  assert.equal(spaceA.currentAgent, null);
+  assert.equal(spaceA.currentGoal, null);
+  assert.equal(spaceA.session, null);
+  assert.equal(spaceA.git.source, 'workspace_reuse');
+  assert.equal(spaceA.git.sourceRecordId, 'reuse-a-current');
+  assert.equal(spaceA.git.head, 'reuse-a-head');
+  assert.equal(spaceA.git.branch, 'feature/reused-a');
+  assert.equal(spaceA.git.hasChanges, false);
+
+  insertAssignment(db, {
+    id: 'assignment-a-new',
+    worktreeId: spaceAWorktreeId,
+    agentId: 'space-a-new-agent',
+    taskId: 'Space A new goal',
+    sessionId: 'session-a-new',
+    revision: 1,
+    createdAt: at(22),
+    updatedAt: at(23),
+  });
+  insertRun(db, {
+    id: 'session-a-new',
+    worktreeId: spaceAWorktreeId,
+    agentClaim: 'space-a-new-agent',
+    goal: 'Space A new goal',
+    createdAt: at(22),
+    lastHeartbeatAt: at(23),
+  });
+  insertProgress(db, {
+    id: 'progress-a-new',
+    assignmentId: 'assignment-a-new',
+    sessionId: 'session-a-new',
+    revision: 2,
+    head: 'a-new-head',
+    branch: 'feature/reused-a',
+    observedAt: at(23),
+  });
+
+  // The response names Space B but carries Space A's worktree. It must not
+  // create a boundary or Git evidence for either line.
+  insertCommittedWorkspaceReuse(db, {
+    id: 'reuse-cross-line',
+    spaceId: 'space-context-b',
+    worktreeId: spaceAWorktreeId,
+    updatedAt: at(24),
+    git: {
+      head: 'cross-line-head',
+      branch: 'feature/cross-line',
+      hasChanges: false,
+      coherence: 'coherent',
+      observedAt: at(24),
+    },
+  });
+
+  spaceA = readWorkLineContexts(db, projectId)
+    .find((context) => context.laneKey === 'space:space-context-a');
+  assert.equal(spaceA.currentAgent, 'space-a-new-agent');
+  assert.equal(spaceA.currentGoal, 'Space A new goal');
+  assert.equal(spaceA.sessionId, 'session-a-new');
+  assert.equal(spaceA.git.source, 'progress_event');
+  assert.equal(spaceA.git.head, 'a-new-head');
+  assert.equal(spaceA.git.branch, 'feature/reused-a');
+
+  const spaceB = readWorkLineContexts(db, projectId)
+    .find((context) => context.laneKey === 'space:space-context-b');
+  assert.equal(spaceB.currentAgent, null);
+  assert.equal(spaceB.currentGoal, null);
+  assert.equal(spaceB.session, null);
+  assert.equal(spaceB.git.source, 'unknown');
+  assert.equal(spaceB.git.head, null);
+  assert.equal(spaceB.git.branch, null);
 
   db.close();
 });

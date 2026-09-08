@@ -1115,6 +1115,22 @@ export function appendProgressEvent(db, request = {}, options = {}) {
         assignmentId,
       });
     }
+    // Adoption is a one-time transition: a second 'adopted' event would
+    // duplicate the init entry in the project timeline read model.
+    if (status === 'adopted') {
+      const adopted = db.prepare(`
+        SELECT id FROM progress_events
+        WHERE assignment_id = ? AND status = 'adopted' LIMIT 1
+      `).get(assignmentId);
+      if (adopted) {
+        return failCommand(db, commandId, {
+          ok: false,
+          code: 'ASSIGNMENT_ALREADY_ACTIVE',
+          assignmentId,
+          sessionId,
+        });
+      }
+    }
     if (assignment.session_id !== sessionId) {
       return failCommand(db, commandId, {
         ok: false,

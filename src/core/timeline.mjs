@@ -151,7 +151,11 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            s.coherence AS snapshot_coherence, s.observed_at AS snapshot_observed_at
     FROM handoffs h
     LEFT JOIN assignments a ON a.id = h.assignment_id
-    LEFT JOIN snapshots s ON (s.run_id = h.session_id OR s.run_id = h.run_id) AND s.phase = 'final'
+    LEFT JOIN snapshots s ON s.id = (
+      SELECT s2.id FROM snapshots s2
+      WHERE s2.phase = 'final' AND s2.run_id = COALESCE(h.run_id, h.session_id)
+      ORDER BY s2.observed_at DESC, s2.id DESC LIMIT 1
+    )
     WHERE h.project_id = ?
   `).all(projectId);
 
@@ -197,7 +201,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            r.agent_claim
     FROM relays rel
     LEFT JOIN assignments a ON a.id = rel.assignment_id
-    LEFT JOIN runs r ON r.id = rel.session_id OR r.id = rel.run_id
+    LEFT JOIN runs r ON r.id = COALESCE(rel.run_id, rel.session_id)
     WHERE rel.project_id = ?
   `).all(projectId);
 
@@ -223,8 +227,16 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
            s.coherence AS baseline_coherence, s.observed_at AS baseline_observed_at,
            r.agent_claim, r.goal, r.created_at AS run_created_at
     FROM assignments a
-    LEFT JOIN progress_events pe ON pe.assignment_id = a.id AND pe.status = 'adopted'
-    LEFT JOIN snapshots s ON (s.run_id = a.session_id OR s.run_id = a.id) AND s.phase = 'baseline'
+    LEFT JOIN progress_events pe ON pe.id = (
+      SELECT pe2.id FROM progress_events pe2
+      WHERE pe2.assignment_id = a.id AND pe2.status = 'adopted'
+      ORDER BY pe2.revision DESC, pe2.created_at DESC, pe2.id DESC LIMIT 1
+    )
+    LEFT JOIN snapshots s ON s.id = (
+      SELECT s2.id FROM snapshots s2
+      WHERE s2.phase = 'baseline' AND s2.run_id = COALESCE(a.session_id, a.id)
+      ORDER BY s2.observed_at DESC, s2.id DESC LIMIT 1
+    )
     LEFT JOIN runs r ON r.id = a.session_id
     WHERE a.project_id = ? AND (a.status != 'pending' OR a.session_id IS NOT NULL OR pe.id IS NOT NULL)
   `).all(projectId);

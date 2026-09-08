@@ -85,14 +85,29 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
     } catch (error) {
       throw connectionError(error);
     }
-    const body = await response.json();
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      // 非 JSON 响应（代理错误页、崩溃中的服务）按连接故障处理，
+      // 不让裸解析错误绕过统一的错误契约。
+      throw connectionError(error);
+    }
 
     if (isRead && mayRenewReadSession && response.status === 401 && body.code === 'AUTH_REQUIRED') {
       await ensureSession();
       return request(path, options, false);
     }
 
-    if (!response.ok) throw Object.assign(new Error(body.message), body);
+    if (!response.ok) {
+      // 错误体可能是 null、标量或缺失 message 的对象；契约字段必须始终保留，
+      // 否则按 code 分支的错误处理会全部退化为无提示失败。
+      const payload = (body && typeof body === 'object') ? body : {};
+      throw Object.assign(
+        new Error(payload.message ?? `请求失败（HTTP ${response.status}）。`),
+        payload,
+      );
+    }
     return body;
   }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,13 @@ import { registerProject } from '../src/core/projects.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { createServiceHandlers } from '../src/mcp/service-client.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
+
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
 
 const TOKEN = 'session-context-http-test-token-that-is-long-enough';
 
@@ -35,7 +42,7 @@ function relayFields() {
 }
 
 test('MCP work context recovers latest revision without changing platform state and fences relay generations', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-session-context-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-session-context-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# context fixture\n');
   execFileSync('git', ['add', 'README.md'], { cwd: root });
@@ -209,7 +216,7 @@ test('MCP work context recovers latest revision without changing platform state 
 });
 
 test('context confirmation rejects a stale revision without binding or DB writes', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-session-context-stale-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-session-context-stale-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# stale context fixture\n');
   execFileSync('git', ['add', 'README.md'], { cwd: root });

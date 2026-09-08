@@ -43,9 +43,9 @@ export function ManualRecordAction({ project, workLine, api, onSaved, disabled }
   return (
     <>
       <Button variant="soft" size="sm" disabled={disabled || saving} onClick={() => { setPending({ project, workLine }); setError(null); setOpen(true); }}>{label}</Button>
-      {error && !open && <p role="alert">{error}</p>}
+      {error && !open && <p className="manual-record-notice" role="alert">{error}</p>}
       <Dialog open={open} onOpenChange={(value) => { if (!saving) setOpen(value); }} disablePointerDismissal>
-        <DialogContent className="ugk-dialog" closeButton>
+        <DialogContent className="ugk-dialog manual-record-dialog" closeButton closeLabel="关闭">
           <DialogHeader>
             <DialogTitle>{label} · {isWorkLine ? targetLine.label : targetProject.name}</DialogTitle>
             <DialogDescription>{description}</DialogDescription>

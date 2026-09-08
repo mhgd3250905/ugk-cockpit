@@ -31,7 +31,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
     ['cockpit-init', ['ugk_work_init']],
     ['cockpit-progress', ['ugk_work_progress']],
     ['cockpit-submit', ['ugk_work_submit_note']],
-    ['cockpit-relay', ['ugk_work_relay', 'ugk_work_resume']],
+    ['cockpit-relay', ['ugk_work_relay', 'ugk_work_takeover', 'ugk_work_resume']],
     ['cockpit-closeout', ['ugk_work_progress']],
     ['cockpit-handoff', ['ugk_work_handoff']],
   ]);
@@ -224,7 +224,11 @@ test('cockpit-relay defines two explicit modes and precise success reporting cri
     'utf8',
   );
   assert.match(instructions, /ugk_work_relay/);
+  assert.match(instructions, /ugk_work_takeover/);
   assert.match(instructions, /ugk_work_resume/);
+  assert.match(instructions, /held_by_another_chat/);
+  assert.match(instructions, /previous_mcp_connection/);
+  assert.match(instructions, /CONVERSATION_TAKEOVER_TRANSPORT_UNCERTAIN/);
   assert.match(instructions, /relayPrepared:\s*true/);
   assert.match(instructions, /awaiting_resume/);
   assert.match(instructions, /continueMessage/);
@@ -254,14 +258,14 @@ test('cockpit-relay defines two explicit modes and precise success reporting cri
   }
   assert.doesNotMatch(instructions, /"reason"|"nextTask"/);
 
-  // Initial resume remains minimal; expired recovery requires explicit confirmation.
+  // Initial resume remains minimal; expired recovery requires workbench authorization.
   const resumeSection = instructions.split(/## 模式二：恢复接力/)[1] || '';
   assert.match(resumeSection, /"continueCode"/);
   assert.match(resumeSection, /"clientRequestId"/);
   assert.doesNotMatch(resumeSection, /"currentTask"|"currentState"|"expectedRevision"/);
   assert.match(resumeSection, /confirmation_required/);
-  assert.match(resumeSection, /只有用户明确同意后/);
-  assert.match(resumeSection, /confirmationRequestId.*expectedRevision/);
+  assert.match(resumeSection, /工作台.*授权转交/);
+  assert.match(resumeSection, /不继续旧的聊天内确认流程/);
   assert.match(resumeSection, /RELAY_TRANSPORT_UNCERTAIN/);
   assert.match(resumeSection, /再次工作前先补办恢复/);
 

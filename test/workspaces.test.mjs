@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -35,6 +35,13 @@ import {
 } from '../src/git/probe.mjs';
 import { acquireRepositoryLock } from '../src/core/integrations.mjs';
 
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
+
 const execFileAsync = promisify(execFile);
 
 async function runGit(cwd, args) {
@@ -48,7 +55,7 @@ async function runGit(cwd, args) {
 }
 
 function fixture(t) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-workspaces-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-workspaces-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
   const at = '2026-09-02T00:00:00.000Z';
@@ -106,7 +113,7 @@ function mockObservation({
 }
 
 async function realGitFixture(t) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-real-git-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-real-git-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
@@ -742,7 +749,7 @@ test('request validation: commandId, grantId, principalHash, expectedBaseHead, b
 });
 
 test('folder grant store: active expired is rejected, claimed grant allows recovery even if expired, safe unclaim', () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-grant-test-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-grant-test-'));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
   let currentTime = 1000;
   const store = new EmptyFolderGrantStore({ db, clock: () => currentTime, ttlMs: 5000 });
@@ -836,7 +843,7 @@ test('main probe: verifies canonical path, repository identity, worktree identit
 });
 
 test('checkBranchExists: throws on unexpected git errors and differentiates exit code 0 vs 1', async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-chkbranch-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-chkbranch-'));
   const repoDir = path.join(root, 'chk-repo');
   mkdirSync(repoDir, { recursive: true });
 
@@ -1007,6 +1014,10 @@ test('REAL GIT: a clean completed workspace can start fresh from the current mai
   assert.equal(reused.baseCommit, headSha);
   assert.equal(reused.space.status, 'ready');
   assert.equal(reused.space.revision, 1);
+  assert.equal(reused.git.branch, reused.branch);
+  assert.equal(reused.git.head, headSha);
+  assert.equal(reused.git.hasChanges, false);
+  assert.ok(reused.git.observedAt);
   assert.equal(readWorkLineStates(db, 'proj-real-1')[0].status, 'open');
   assert.deepEqual(db.prepare('SELECT event FROM work_line_events ORDER BY revision').all().map((row) => row.event), ['close', 'reopen']);
 

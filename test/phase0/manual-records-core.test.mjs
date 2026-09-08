@@ -24,7 +24,11 @@ const at = '2026-09-08T00:00:00.000Z';
 
 function fixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-manual-core-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(root).startsWith('ugk-manual-core-'));
+    rmSync(root, { recursive: true, force: true });
+  });
   return { root, dbPath: path.join(root, 'cockpit.db') };
 }
 
@@ -67,7 +71,7 @@ function seedProject(db) {
   `).run(projectId, sourceWorktreeId, at);
 }
 
-function downgradeToSchema23(dbPath) {
+function downgradeToSchema25(dbPath) {
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(`
     DROP INDEX IF EXISTS idx_work_line_events_project_created;
@@ -79,37 +83,37 @@ function downgradeToSchema23(dbPath) {
     ALTER TABLE projects DROP COLUMN archived_at;
     ALTER TABLE projects DROP COLUMN archive_revision;
   `);
-  legacy.prepare('DELETE FROM schema_migrations WHERE version >= 24').run();
-  legacy.exec('PRAGMA user_version = 23');
+  legacy.prepare('DELETE FROM schema_migrations WHERE version >= 26').run();
+  legacy.exec('PRAGMA user_version = 25');
   legacy.close();
 }
 
-test('schema 23 upgrades repeatably and keeps manual records durable across core operations', (t) => {
+test('schema 25 upgrades repeatably and keeps manual records durable across core operations', (t) => {
   const { dbPath } = fixture(t);
   const seeded = openCockpitDatabase(dbPath);
   seedProject(seeded);
   seeded.close();
 
-  downgradeToSchema23(dbPath);
+  downgradeToSchema25(dbPath);
   let db = openCockpitDatabase(dbPath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
   assert.equal(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().at(-1).version,
-    24,
+    26,
   );
   assert.equal(db.prepare('SELECT archived_at, archive_revision FROM projects WHERE id = ?').get(projectId).archive_revision, 0);
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_line_states'").get());
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_line_events'").get());
   db.close();
 
-  // Re-run the migration from a real schema-23 marker. Existing rows and the
+  // Re-run the migration from a schema-25 marker. Existing rows and the
   // newly created schema objects must survive the second application.
   const pending = new DatabaseSync(dbPath);
-  pending.prepare('DELETE FROM schema_migrations WHERE version >= 24').run();
-  pending.exec('PRAGMA user_version = 23');
+  pending.prepare('DELETE FROM schema_migrations WHERE version >= 26').run();
+  pending.exec('PRAGMA user_version = 25');
   pending.close();
   db = openCockpitDatabase(dbPath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
   assert.equal(db.prepare('SELECT name FROM projects WHERE id = ?').get(projectId).name, 'Manual records core');
 
   assert.deepEqual(readWorkLineStates(db, projectId), [

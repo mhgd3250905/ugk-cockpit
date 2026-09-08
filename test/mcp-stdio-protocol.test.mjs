@@ -29,6 +29,7 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
     'ugk_work_begin',
     'ugk_work_init',
     'ugk_work_relay',
+    'ugk_work_takeover',
     'ugk_work_resume'
   ]);
   assert.deepEqual(
@@ -79,6 +80,14 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
   const contextTool = TOOLS.find((tool) => tool.name === 'ugk_work_context');
   assert.deepEqual(Object.keys(contextTool.inputSchema.properties), ['confirmSessionId', 'expectedRevision']);
   assert.deepEqual(contextTool.inputSchema.required ?? [], []);
+  const takeoverTool = TOOLS.find((tool) => tool.name === 'ugk_work_takeover');
+  assert.deepEqual(Object.keys(takeoverTool.inputSchema.properties), [
+    'sessionId', 'clientRequestId', 'transferCode',
+  ]);
+  assert.deepEqual(takeoverTool.inputSchema.required, [
+    'sessionId', 'clientRequestId', 'transferCode',
+  ]);
+  assert.match(takeoverTool.description, /one-time transferCode.*workbench/i);
 });
 
 test('context validation keeps confirmation fields optional but paired', async () => {
@@ -106,6 +115,32 @@ test('context validation keeps confirmation fields optional but paired', async (
   });
   assert.equal(valid.result.content[0].text, JSON.stringify({ ok: true, canContinue: false }));
   assert.deepEqual(received, [{ confirmSessionId: 'session-1', expectedRevision: 4 }]);
+});
+
+test('takeover requires workbench authorization and rejects the old chat confirmation route', async () => {
+  const invalid = await dispatchMessage({
+    jsonrpc: '2.0', id: 'takeover-invalid', method: 'tools/call',
+    params: { name: 'ugk_work_takeover', arguments: {
+      sessionId: 'session-1', clientRequestId: 'same', expectedRevision: 1, confirmationRequestId: 'same',
+    } },
+  });
+  assert.equal(invalid.result.isError, true);
+  assert.match(invalid.result.content[0].text, /Unexpected property/);
+
+  const received = [];
+  const valid = await dispatchMessage({
+    jsonrpc: '2.0', id: 'takeover-valid', method: 'tools/call',
+    params: { name: 'ugk_work_takeover', arguments: {
+      sessionId: 'session-1', clientRequestId: 'consume-2', transferCode: 'workbench-issued-code',
+    } },
+  }, { handlers: { ugk_work_takeover: async (args) => {
+    received.push(args);
+    return { ok: true, takeoverAccepted: true };
+  } } });
+  assert.equal(valid.result.content[0].text, JSON.stringify({ ok: true, takeoverAccepted: true }));
+  assert.deepEqual(received, [{
+    sessionId: 'session-1', clientRequestId: 'consume-2', transferCode: 'workbench-issued-code',
+  }]);
 });
 
 test('dispatchMessage handles initialize, ping, tools/list, and notifications', async () => {

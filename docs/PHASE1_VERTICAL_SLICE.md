@@ -6,6 +6,10 @@
 
 ## 实施状态
 
+- `0.1.0-alpha.39`：schema 25 持久工作节点、宿主平台/会话 ID、工作台授权转交及冻结/消费/取消。关闭聊天内异常接手旁路，接手成功立即形成新节点，错误聊天返回当前持有人与最新节点；ZCode 原生身份已接入。保留历史未知归属、正常 Relay、幂等和 Git 副作用前权限复核。代码部署和技能切换完成，用户已反馈原 ZCode 聊天接手后可写。
+
+- `0.1.0-alpha.38`：context 在已有持有人时返回可解释的持有人摘要；新增用户确认的 `ugk_work_takeover`，在 revision CAS 下撤销旧绑定、写入审计并转移写权限。无稳定聊天 ID 的 MCP 把受认证连接摘要持久化为 connection-only 归属，服务重启后提示确认接手，不再退化成无主会话。随后补齐可靠性边界：送审缓存使用真实临时路径；prepared 合并在 Git 写入前重新核验送审批准与领取 revision；命令回执以稳定 command id 重放；陈旧单实例锁串行回收；浏览器将非 JSON 服务响应投影为标准连接错误。
+
 - `0.1.0-alpha.37`：接力断线重试、过期码在当前聊天显式确认恢复、持久确认与并发归属保护；区分从未接手与已被替代的聊天。启动器传递明确数据目录并核对已有项目列表及详情。
 
 - `0.1.0-alpha.1`：Project Registry、一次性且可恢复的文件夹授权、同源浏览器会话、首次添加项目、晨间简报首页。
@@ -37,7 +41,43 @@
 - `0.1.0-alpha.34`：审核领取不再按时间失效，修复领取/结论重试和 HTTP 至 MCP 的恢复信息传递。继续保留固定版本、唯一审核领取、状态 CAS 与明确合并授权。全量测试 250/250、Phase 0 89/89、独立定向验收 40/40 及 Web 构建通过；运行中的服务尚未切换。方案与验收见 [统一送审](UNIFIED_SUBMIT.md)。
 - `0.1.0-alpha.35`：轻量 Submit 工作说明，本地实现与验收完成；2026-09-03 已切换运行服务、页面资源与用户级 `cockpit-submit` Skill，已有客户端须重连 MCP 并重新加载 Skill。发布说明与代码保存上传、旧审核对象及会话生命周期分开；项目待办支持复制、标记处理、归档与恢复，不增加冻结、领取或退回流程。`npm test` 289/289、Phase 0 90/90、隔离构建、Skill 校验及浏览器实测通过，Antigravity 独立复核通过。完整契约与本轮验证记录见 [Submit 工作说明](SUBMIT_NOTES.md)。
 - `0.1.0-alpha.36`：会话绑定由平台持久保存，支持宿主身份的聊天重连恢复，保留接力代际失效；修复合并中断恢复与自有 Git 索引锁恢复，见 [持久性契约](CONVERSATION_DURABILITY.md)。
-- 当前小步：会话持久绑定与中断恢复服务已升级，当前 Codex 已重连新版 MCP，并经用户确认完成旧会话持久关联；工作台界面继续等待用户试用反馈。跨机 MCP 可达性、托管平台合并 API、清理或删除工作副本仍不在本次默认动作内。
+- 当前小步：会话节点与工作台授权转交完成，当前 Codex 可继续，用户确认 ZCode 原聊天完成授权消费并可写；其他旧宿主需重连加载新版工具定义。工作台仍处于试用期，跨机 MCP、托管平台合并 API、清理或删除工作副本不在本次范围。
+
+### PR #6 审计修复合并与收束（2026-09-08）
+
+本轮基线为审核开始时的 main `c6ec5deba2dfbf26a1764bf77ee6e37b8331d26d`。用户明确授权合并 PR #6、closeout、保存与普通 push；GitHub 合并提交为 `5058f0c1fa14e2e05ff72d9356c1681e5851132d`，本地 main 随后快进同步。阶段增量为 5 个 PR 提交及 1 个合并提交、22 个路径；合并提交与最终送审版本 `e542b91ce5c82db258cb819dcbe3bfbe89efe0d5` 的完整代码树一致，无冲突。
+
+修复包含：送审内容经路径授权读取后以 stdin 写入 Git 对象，推送远端名及 SSH 主机检查，MCP 请求超时和结构化错误契约，时间线重复关联消除、一次 adopted 写入约束，工作流错误映射及 HTTP 异常处理，以及轮询、头像和接入消息复制反馈。MCP 的显式 close 回调已接入中止信号；宿主 stdin EOF 自动触发中止未在本轮完成，不将显式 close 测试描述成宿主退出验收。
+
+独立复审提出的三项 P2 已于最终送审版本修复：relay/handoff 列表保持既有 100 项、每项 4000 字的边界，避免阻断历史请求原样重放；含 `@` 的合法本地远端不再被当成 SSH 主机；创建并复制接入指令成功后的详情刷新失败独立处理，重试只读取详情，不再创建任务。Windows 也支持含 `@` 的相对本地路径，PR 初版相反论述已更正。
+
+2026-09-08 主会话在固定送审版本的隔离副本执行 `npm test -- --test-concurrency=4` **405/405**（329.75 秒）、`npm run test:phase0` **93/93**（117.48 秒）、`npm run build:web` 与 `git diff --check`，全部通过，无失败或跳过；构建保留既有大包提示。另用临时数据库确认 9 项/600 字的已持久化 relay 经新版 MCP 校验原样重放，取回同一接力码和 revision，记录仍为一条。Luna max 独立复核界面返工，主会话整合裁定可合并。完整树等价证明上述证据适用于合并提交；本次收束仅补文档，生产代码与测试源码继续保持该版本。
+
+非阻塞 P3：`web/src/assignment-copy-flow.mjs` 的“重试刷新”成功后，顶部原失败提示尚未清除；刷新已完成，不重复创建任务，后续可补提示清理。该项记录为已知产品问题，不视为文档对齐失败。
+
+Preflight 从根 AGENTS/README 发现并核对阶段记录、会话持久性、旧送审、时间线、路线图、语言规范和本机恢复要求；历史发布及迁移段落保留其原时点。合并后暂存、未暂存和未跟踪均为 0，收束只由当前会话修改 README 与本阶段记录。本轮不变更 `0.1.0-alpha.39` 版本或 schema 25，不重启服务、覆盖数据、创建标签/Release 或结束工作会话；代码已合并不代表运行中的服务与网页资源已经加载新实现。
+
+### alpha.39 main 集成与阶段发布（2026-09-07）
+
+用户随后明确授权合并 main、保存对齐、push、tag 和 Release。本轮集成基线为本地及远端 main `670fbfce1dafcb3121dfa1f0c703ca64b606fa35`；从 `codex/conversation-continuity` 快进到候选 `d2907c584c291f6525455c4180e0a392dcee017a`，保留 6 个提交、39 个路径的完整实现历史，无合并冲突。版本为 `0.1.0-alpha.39`，未修改生产代码、依赖或业务数据。
+
+独立 readiness 审核未发现阻断项：版本四处一致，已测实现到候选只含版本/文档差异，无运行数据库或凭据纳入版本；发布条件为最终 main 门禁通过及发布提交与候选源码一致。main 候选完整复验 `npm test -- --test-concurrency=4` **389/389**（375.50 秒）、`npm run test:phase0` **93/93**（135.43 秒）、`npm run build:web`、`git diff --check` 全部通过，无失败或跳过；随后仅保存本发布记录，不改变被测源码。既有大包警告保留，不扩大为界面优化任务。
+
+阶段标识为 `v0.1.0-alpha.39`，GitHub Release 按 prerelease 发布，指向 main 最终记录提交；发布说明包含 schema 25 回退边界、MCP/技能重载和 ZCode 用户现场反馈的准确范围，不附加安装器或二进制资产。发布是否成功以远端 main/tag SHA 与 GitHub Release 回执为准。保留原开发分支及其他工作副本，不创建终态 handoff、不重启用户正在使用的服务。后续从本节及会话持久性/本机恢复文档继续；不要因切分支重新 init 或覆盖运行中数据库。
+
+### alpha.39 节点追溯与平台转交收束（2026-09-07）
+
+实施基线 `c004dd56bc743ef63ee3e6e5cdb6b445545b83b7`；Preflight HEAD `d36e66ac687060249b6887f52263f465bf704c20`，两提交、32 路径，全部为本轮已授权实现与部署，工作区暂存/未暂存/未跟踪均 0。代码定版 `291648e983a6c11202161793428dcc4b7ce81793` 的全仓 `npm test -- --test-concurrency=4` 389/389、Phase 0 93/93、网页构建及隔离浏览器流程通过；到 Preflight HEAD 仅补部署文档，代码证据仍适用。本次仅递增开发版本、对齐当前入口和阶段记录、补记用户提供的原 ZCode 现场结果，不修改生产逻辑或依赖版本，不创建发布标签。
+
+当前契约以 [会话身份与中断恢复](CONVERSATION_DURABILITY.md) 为准，需求与测试范围见 [节点与转交验收](CONVERSATION_NODE_TRANSFER_REQUIREMENTS.md)，部署/备份/技能切换及现场反馈见 [本机服务恢复](LOCAL_SERVICE_RECOVERY.md)。alpha.32 恢复计划和此前两步 takeover 记录为历史，不作为当前操作指令。此前收束只获授权普通 push 到 `codex/conversation-continuity`，当时未合并 main 或创建 release；后续明确授权的 main 集成与发布见上节。
+
+收束验证对应 Preflight HEAD 加本次 8 文件版本/文档工作树：`node --test test/phase0/version.test.mjs` 1/1，`npm test -- --test-concurrency=4 --test-name-pattern='VERSION, package metadata'` 通过（仅匹配版本断言，其他文件加载不算全量业务复验），`npm run build:web` 与 `git diff --check` 通过。生产及测试源码未变，复用代码定版的 389/389 和 93/93 证据。版本文件改为 alpha.39；此次不重启用户已恢复使用的服务，运行进程的版本标识在下次正常重启时更新，已部署的 schema 25 业务逻辑不变。
+
+### alpha.38 可靠性补强与合并验收（2026-09-07）
+
+本轮基线为 PR #5 合并前的 `main`：`f362ebd3b4e951caf0ad0287d0329b00dd16f250`；合并后的 Preflight HEAD 为 `983b487ebbce5f00a9661bdec9b0241c66ffbdda`。阶段增量为已审核并合并的 PR #5：POSIX 临时目录下的送审缓存路径与路径授权保持一致；所有 prepared 合并重入在 Git 写入前重新核验送审和领取的当前状态及 revision；命令化回执重放复用稳定 receipt id；陈旧单实例锁以 `O_EXCL` 选举串行回收；浏览器 API 将代理错误页或服务崩溃产生的非 JSON 响应纳入既有连接错误契约。测试夹具同步使用真实临时路径，Windows 并发陈旧锁回归使用 `file://` ESM 模块地址。
+
+PR head `20cdf771ca0755d134a46b6e476fb22d6c09fbc1` 已独立复审并通过 `npm test` 354/354、`npm run test:phase0` 93/93、`npm run build:web` 与 `git diff --check`；合并提交与该 head 的代码树一致，因此上述代码验证适用于合并 HEAD。本轮无数据库迁移、版本或依赖变更，不切换运行中的服务、不修改业务项目、不创建发布标签；文档收束与后续普通 push 单独记录。
 
 ### alpha.35 工作台与本机认证收束（2026-09-05）
 
@@ -150,7 +190,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - `POST /api/v1/projects`：消费授权，探测并注册未知项目；
 - `GET /api/v1/dashboard`：返回按行动意义组织的项目卡片；
 - `POST /api/v1/projects/:projectId/assignments`：创建等待接手任务和一次性接手码；
-- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息，不创建或接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 14 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
+- 本机 stdio MCP 的普通路径使用 `ugk_work_context`、`ugk_work_init`、`ugk_work_progress`、`ugk_work_relay`、`ugk_work_takeover`、`ugk_work_resume`、`ugk_work_submit_preflight`、`ugk_work_submit`、`ugk_work_handoff`；主项目审核提示词使用 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`。context 只读恢复权威会话信息；只有 `ugk_work_takeover` 在用户逐次确认后才能接管会话。阶段 closeout 以本地收束为主，具备条件时可选调用 `ugk_work_progress` 记录一个非终态检查点，不因 closeout commit 再额外触发通用 progress。`ugk_work_submit_note`、`ugk_submit_note_get`、`ugk_submit_note_update` 服务于轻量工作说明；`ugk_work_accept`、`ugk_work_begin`、`ugk_work_finish` 暂留作旧客户端兼容，共 18 个工具。服务端从一次性代码、接力码、session 或已授权送审来源解析项目和代码位置；查询及送审 cwd 只由 MCP bridge 注入，不允许 Agent 自填任意路径。
 - Phase 0 Run API 继续作为内部状态机，不让 MCP 参数携带任意路径、projectId 或接管权限。
 
 所有错误继续满足：发生了什么、是否影响代码、推荐下一步。
@@ -174,7 +214,7 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 - 普通流程不出现 Repository、Worktree、HEAD、Dirty、Run、Lease、Snapshot、JSON。
 - 没有持久化确认时不显示“已保存”；离线数据必须带最后更新时间。
 - 有开始前改动时默认保留，错误归属给当前 AI 的次数必须为 0。
-- 同一代码位置的第二个写入会话默认被拒绝；接管必须二次确认。
+- 同一代码位置的第二个写入会话默认被拒绝；异常接管必须由用户在工作台授权，再由目标聊天消费一次性指令，不能在聊天内自批。
 - 存在尚未交接的旧会话时，不得因 heartbeat、记录时间或 service 重启推断中断或完成；只展示最近确认节点，并通过显式 relay、handoff 或 takeover 转换。
 - 错误仓库和同路径替换 100% 拒绝自动重绑。
 
@@ -195,6 +235,6 @@ Luna Max 与 Antigravity 并行核对影响面，宿主确定规则边界后由 
 
 工程约束已写入 AGENTS.md；仓库与 Codex/共享安装副本的 cockpit-relay 仅更新绑定持久性的说明，保留原确认与接力成功判据。未修改产品仓库代码，未 push 或创建标签。
 
-## 本轮最终本地收束
+## 历史：2026-09-05 最终本地收束
 
 基线 `9c50e0af76bb0587a1f85a14db88250fddb8a24a`，代码定版 `5db9dd17df57fa8789bb89b28877d5585e52fad4`。其间 4 个提交、41 个路径，覆盖工作台试用版本、本机认证和持久性改造；Preflight 完整工作区暂存、未暂存、未跟踪均为 0。2026-09-05 已执行的 npm test 338/338、npm run test:phase0 92/92、npm run build:web 和技能契约 12/12 对应该定版源码。本次收束仅更新 README、阶段及运维记录中的绑定措辞和原聊天验收结果，不改变被测源码，复用上述验证；文档另执行 git diff --check。平台检查点和 Relay 结果以随后 MCP 回执为准。

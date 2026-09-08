@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,8 +14,15 @@ import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import { resumeRelay } from '../src/core/relays.mjs';
 import { conversationKey } from '../src/mcp/conversation-identity.mjs';
 
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 test('durable per-request conversations survive restarts, preserve legacy history and fence old chats', async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-conversation-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-conversation-'));
   const token = 'conversation-test-service-token-'.padEnd(44, 'x');
   const dbPath = path.join(root, 'state.db');
   execFileSync('git', ['init', '--quiet'], { cwd: root });
@@ -28,6 +35,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
   let service = await createCockpitHttpServer({ dbPath, token });
   const fetchImpl = (url, options) => fetch(url, { ...options, headers: { ...options.headers, connection: 'close' } });
   const handlers = (id) => createServiceHandlers({ baseUrl: `http://127.0.0.1:${service.port}`, workingDirectory: root, fetchImpl,
+    token: id ? undefined : token, // Operator-only fixture seeds pre-identity historical data.
     conversationIdentity: id ? { host: 'codex', id } : null });
   try {
     const assignment = await (await fetchImpl(`http://127.0.0.1:${service.port}/api/v1/projects/${project.projectId}/assignments`, {
@@ -48,7 +56,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     service = await createCockpitHttpServer({ dbPath, token, port });
     db = openCockpitDatabase(dbPath);
     assert.deepEqual(snapshot(), before);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
     const first = handlers('original');
     let context = await first.ugk_work_context({});
     assert.equal(context.bindingStatus, 'unbound');
@@ -56,17 +64,32 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     assert.deepEqual(snapshot(), before); // Binding migration never edits business records.
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings').get().n, 1);
     await service.close();
-    // Preserve an already-migrated v22 binding when upgrading its ownership key.
-    const boundBefore = db.prepare('SELECT * FROM conversation_bindings').all();
+    // Preserve the historical v22 binding fields while adding the owner
+    // locator columns.  A real v22 database cannot contain those new fields.
+    const boundBefore = db.prepare(`SELECT
+      conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+      accepted_revision, revoked, bound_at
+      FROM conversation_bindings`).all();
     db.exec(`ALTER TABLE conversation_bindings RENAME TO binding_fixture;
       DROP INDEX conversation_binding_owner;
-      CREATE TABLE conversation_bindings AS SELECT * FROM binding_fixture;
+      CREATE TABLE conversation_bindings AS SELECT
+        conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+        accepted_revision, revoked, bound_at
+        FROM binding_fixture;
       DROP TABLE binding_fixture;
       CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;
       DELETE FROM schema_migrations WHERE version >= 23;
       PRAGMA user_version = 22;`);
     service = await createCockpitHttpServer({ dbPath, token, port });
-    assert.deepEqual(db.prepare('SELECT * FROM conversation_bindings').all(), boundBefore);
+    assert.deepEqual(db.prepare(`SELECT
+      conversation_key, worktree_id, session_id, relay_id, relay_sequence,
+      accepted_revision, revoked, bound_at
+      FROM conversation_bindings`).all(), boundBefore);
+    const legacyOwner = db.prepare(`SELECT binding_kind, owner_host, owner_locator
+      FROM conversation_bindings`).get();
+    assert.equal(legacyOwner.binding_kind, 'legacy');
+    assert.equal(legacyOwner.owner_host, null);
+    assert.equal(legacyOwner.owner_locator, null);
     context = await handlers('original').ugk_work_context({});
     assert.equal(context.canContinue, true);
     assert.equal(context.bindingPersistence, 'durable');
@@ -143,33 +166,51 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     db.prepare('UPDATE relays SET expires_at = 1 WHERE id = ?').run(expiring.relayId);
     const missing = await handlers('third').ugk_work_context({});
     assert.equal(missing.bindingStatus, 'unbound');
-    assert.equal(missing.bindingReason, 'not_resumed');
+    assert.equal(missing.bindingReason, 'held_by_another_chat');
     assert.equal(missing.generationScope, 'session_history_not_current_chat');
     assert.equal((await handlers('next').ugk_work_context({})).canContinue, true);
-    const offerA = await handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-a' });
-    const offerB = await handlers('fourth').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-b' });
-    assert.equal(offerA.status, 'confirmation_required');
-    assert.equal(offerB.status, 'confirmation_required');
+    await assert.rejects(handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-a' }),
+      /CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED/);
+    await assert.rejects(handlers('fourth').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'ask-b' }),
+      /CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED/);
+    const baseUrl = `http://${service.host}:${service.port}`;
+    const shell = await fetch(baseUrl + '/');
+    const cookie = shell.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie);
+    const authorization = await fetch(`${baseUrl}/api/v1/projects/${project.projectId}/conversation-control/${initialized.sessionId}/transfer`, {
+      method: 'POST',
+      headers: { cookie, origin: baseUrl, 'sec-fetch-site': 'same-origin',
+        'x-ugk-client-id': 'binding-transfer-browser-test', 'content-type': 'application/json' },
+      body: JSON.stringify({ clientRequestId: 'authorize-after-expiry', expectedRevision: expiring.revision }),
+    });
+    assert.equal(authorization.status, 200, await authorization.clone().text());
+    const grant = await authorization.json();
+    assert.equal(grant.revision, expiring.revision + 1);
+    assert.equal((await handlers('next').ugk_work_context({})).canContinue, false);
     const restartPort = service.port;
     await service.close();
     service = await createCockpitHttpServer({ dbPath, token, port: restartPort });
     const results = await Promise.allSettled([
-      handlers('third').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'confirm-a',
-        confirmationRequestId: offerA.confirmationRequestId, expectedRevision: offerA.expectedRevision }),
-      handlers('fourth').ugk_work_resume({ continueCode: expiring.continueCode, clientRequestId: 'confirm-b',
-        confirmationRequestId: offerB.confirmationRequestId, expectedRevision: offerB.expectedRevision }),
+      handlers('third').ugk_work_takeover({ sessionId: initialized.sessionId,
+        transferCode: grant.transferCode, clientRequestId: 'consume-a' }),
+      handlers('fourth').ugk_work_takeover({ sessionId: initialized.sessionId,
+        transferCode: grant.transferCode, clientRequestId: 'consume-b' }),
     ]);
-    assert.equal(results.filter(r => r.status === 'fulfilled' && r.value.relayAccepted).length, 1);
+    assert.equal(results.filter(r => r.status === 'fulfilled' && r.value.takeoverAccepted).length, 1);
     assert.equal(results.filter(r => r.status === 'rejected').length, 1);
     assert.equal((await handlers('next').ugk_work_context({})).bindingReason, 'replaced');
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings WHERE revoked = 0 AND session_id = ?').get(initialized.sessionId).n, 1);
   } finally {
-    db?.close();
+    // 清理必须逐项独立进行且容忍已关闭状态：一项失败不能跳过其余清理，
+    // 也不能用清理错误掩盖测试的真实失败（泄漏的服务句柄会挂死整个套件）。
+    try {
+      db?.close();
+    } catch (error) {
+      if (error?.code !== 'ERR_INVALID_STATE') throw error;
+    }
     try {
       await service?.close();
-    } catch (error) {
-      if (error?.code !== 'ERR_SERVER_NOT_RUNNING') throw error;
-    }
+    } catch {}
     rmSync(root, { recursive: true, force: true });
   }
 });

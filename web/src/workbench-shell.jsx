@@ -31,6 +31,7 @@ function ProjectAvatar({ project }) {
 export function WorkbenchShell({
   projects,
   activeProjectId,
+  activeProjectName,
   onOpenProject,
   onOverview,
   onAddProject,
@@ -116,7 +117,7 @@ export function WorkbenchShell({
         <header className="wb-topbar">
           <nav className="wb-breadcrumb" aria-label="页面位置">
             {activeProjectId && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
-            <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={activeProject?.name}>{activeProject?.name || '项目工作台'}</span>
+            <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={activeProject?.name || activeProjectName}>{activeProject?.name || activeProjectName || '项目工作台'}</span>
           </nav>
           <div className="wb-topbar-actions">
             <button className="wb-icon-button wb-refresh" type="button" onClick={onRefresh} disabled={busy} title="刷新项目数据" aria-label="刷新项目数据"><ShellIcon name="refresh" /></button>

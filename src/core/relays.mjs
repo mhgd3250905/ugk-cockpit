@@ -750,6 +750,14 @@ export function resumeRelay(db, request = {}, options = {}) {
     }
 
     if (row.state === 'expired' || row.expires_at <= nowMillis(options)) {
+      // Historical core callers may replay the legacy confirmation protocol.
+      // Public MCP requests require a new workbench authorization after expiry.
+      if (options.allowExpiredConfirmation === false) {
+        return failCommand(db, commandId, {
+          ok: false, code: 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED',
+          sessionId: row.session_id, worktreeId: row.worktree_id, revision: live.revision,
+        }, at);
+      }
       if (!request.conversationKey) {
         db.prepare("UPDATE relays SET state = 'expired' WHERE id = ? AND state = 'active'").run(row.id);
         return failCommand(db, commandId, { ok: false, code: 'RELAY_EXPIRED', relayId: row.id, sessionId: row.session_id }, at);
@@ -815,7 +823,7 @@ export function resumeRelay(db, request = {}, options = {}) {
     bindConversation(db, request.conversationKey, {
       sessionId: row.session_id, worktreeId: row.worktree_id,
       relayId: row.id, relaySequence: row.sequence, acceptedRevision: nextRevision,
-    }, { transfer: true });
+    }, { transfer: true, owner: options.conversationBinding });
     options.faultInjector?.('resume.after_command_commit_before_transaction_commit');
     return committed;
   });

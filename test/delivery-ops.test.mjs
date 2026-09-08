@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -21,6 +21,13 @@ import {
 } from '../src/git/delivery-ops.mjs';
 import { createDeliveryCache, discardDeliveryCache } from '../src/core/delivery-cache.mjs';
 import { remoteAuthArguments } from '../src/git/remote-auth.mjs';
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 
 test('rename scope requires both old and new paths; owned caches cannot delete other directories', async (t) => {
   const changes = parseStatusZ('R  new.txt\0old.txt\0');
@@ -47,7 +54,7 @@ function gitSync(cwd, args) {
   }).trim();
 }
 
-function createDeliveryFixture(t, parent = os.tmpdir()) {
+function createDeliveryFixture(t, parent = fixtureTempRoot()) {
   const root = mkdtempSync(path.join(parent, 'ugk-deliv-test-'));
   t.after(() => {
     try {
@@ -106,6 +113,31 @@ function snapshotRepo(dirPath) {
   const status = gitSync(dirPath, ['status', '--porcelain=v1']);
   return { head, index, status };
 }
+
+test('inspection candidates ingest the exact guarded working-tree bytes', async (t) => {
+  const f = createDeliveryFixture(t);
+  const featureBytes = 'feature\r\nwith cRLF and ünïcode\n';
+  // Kept uncommitted so validateDeliveryFiles accepts it as a working change.
+  writeFileSync(path.join(f.sourcePath, 'feature.txt'), featureBytes);
+
+  const inspection = await inspectDelivery({ ...f, files: ['feature.txt'] });
+  t.after(() => discardDeliveryCache(inspection));
+  assert.equal(inspection.files.length, 1);
+
+  // The candidate tree must contain a blob byte-identical to the guarded read
+  // (hash-object --stdin), not a re-read of the path by git itself.
+  const treeLines = gitSync(inspection.cachePath, ['ls-tree', inspection.candidateTree]).split(/\r?\n/);
+  const featureLine = treeLines.find((line) => /\tfeature\.txt$/.test(line));
+  assert.ok(featureLine, 'candidate tree must contain feature.txt');
+  const blobSha = featureLine.split(/\s+/)[2];
+  const stored = execFileSync('git', ['cat-file', 'blob', blobSha], {
+    cwd: inspection.cachePath,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  assert.equal(stored, featureBytes);
+});
 
 test('remote identity normalizes https and ssh to same repo, and handles local paths', () => {
   const httpsIdentity = normalizeRemoteIdentity('https://github.com/my-org/My-Repo.git');

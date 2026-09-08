@@ -86,7 +86,7 @@ test('canvas sampling is small, same-image only, and fails closed when unavailab
 test('project card avatar URL binds the project identity and saved avatar path', () => {
   assert.equal(
     projectAvatarUrl({ id: 'project/one', avatarPath: 'project/one/file.png' }),
-    '/api/v1/projects/project%2Fone/avatar?t=project%2Fone%2Ffile.png',
+    '/api/v1/projects/project%2Fone/avatar?path=project%2Fone%2Ffile.png',
   );
   assert.equal(projectAvatarUrl({ id: 'project-one', avatarPath: '' }), null);
 });

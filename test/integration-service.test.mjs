@@ -155,6 +155,30 @@ async function approve(f) {
   return { begun, reviewed };
 }
 
+test('transfer freeze prevents merge and subsequent push at write boundaries', async (t) => {
+  for (const frozenAt of ['merge', 'push']) {
+    const f = await fixture(t);
+    const { begun, reviewed } = await approve(f);
+    const before = git(f.mainPath, ['rev-parse', 'HEAD']);
+    let frozen = frozenAt === 'merge';
+    let pushes = 0;
+    const result = await mergeApprovedSubmission(f.db, {
+      commandId: `freeze-${frozenAt}`, sessionId: 'session-main', submissionId: f.submissionId,
+      claimId: begun.claimId, expectedRevision: 2, expectedSubmissionRevision: reviewed.submissionRevision,
+      expectedClaimRevision: reviewed.claimRevision, summary: '冻结边界',
+    }, {
+      assertSessionWrite() { if (frozen) throw Object.assign(new Error('frozen'), { code: 'CONVERSATION_BINDING_CONFLICT' }); },
+      faultInjector(point) { if (point === 'after_fast_forward_before_persist') frozen = true; },
+      pushIntegratedMain: async () => { pushes += 1; },
+    });
+    assert.equal(result.code, 'CONVERSATION_BINDING_CONFLICT');
+    assert.equal(pushes, 0);
+    if (frozenAt === 'merge') assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), before);
+    else assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), f.sourceCommit);
+    assert.equal(git(f.remotePath, ['rev-parse', 'refs/heads/main']), before);
+  }
+});
+
 test('main session claims, reviews, fast-forwards, pushes, receipts, and replays idempotently', async (t) => {
   const f = await fixture(t);
   const { begun, reviewed } = await approve(f);
@@ -390,4 +414,56 @@ for (const ownershipChange of ['lease', 'relay']) test(`an interrupted merge can
   assert.equal(f.db.prepare('SELECT state FROM commands WHERE id = ?').get(request.commandId).state, 'received');
   assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'prepared');
   assert.equal(f.db.prepare('SELECT count(*) AS count FROM integration_receipts').get().count, 0);
+});
+
+test('prepared merge re-entry revalidates a submission that was rejected in the meantime', async (t) => {
+  const f = await fixture(t);
+  const { begun, reviewed } = await approve(f);
+  const request = {
+    commandId: 'merge-stale-prepared', sessionId: 'session-main', submissionId: f.submissionId,
+    claimId: begun.claimId, expectedRevision: 2,
+    expectedSubmissionRevision: reviewed.submissionRevision,
+    expectedClaimRevision: reviewed.claimRevision,
+    summary: '中断后重试合并',
+  };
+  await assert.rejects(
+    mergeApprovedSubmission(f.db, request, {
+      faultInjector: async (point) => {
+        if (point === 'after_integration_attempt_prepared') {
+          throw Object.assign(new Error('simulated crash'), { simulateCrash: true });
+        }
+      },
+    }),
+    /simulated crash/,
+  );
+  assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'prepared');
+  const remoteMainBefore = git(f.remotePath, ['rev-parse', 'refs/heads/main']);
+
+  // 中断窗口内，同一会话用新的请求号把提交改判 rejected。
+  const rejected = await recordSessionIntegrationReview(f.db, {
+    commandId: 'record-review-rejected',
+    sessionId: 'session-main',
+    submissionId: f.submissionId,
+    claimId: begun.claimId,
+    expectedRevision: 2,
+    expectedClaimRevision: reviewed.claimRevision,
+    verdict: 'rejected',
+    summary: '发现回归，改判拒绝',
+    findings: ['regression'],
+    checks: [],
+  });
+  assert.equal(rejected.ok, true, JSON.stringify(rejected));
+  assert.equal(readSubmission(f.db, f.submissionId).status, 'rejected');
+
+  const retried = await mergeApprovedSubmission(f.db, request, {
+    // 若重入仍然跳过状态复查，这些替身会真实执行合并与推送。
+    fastForwardMain: async () => { throw new Error('merge must not run for a rejected submission'); },
+    pushIntegratedMain: async () => { throw new Error('push must not run for a rejected submission'); },
+  });
+  assert.equal(retried.ok, false);
+  assert.equal(retried.code, 'INTEGRATION_REVISION_CONFLICT');
+  assert.equal(retried.status, 'rejected');
+  assert.equal(readIntegrationAttempt(f.db, request.commandId).state, 'prepared');
+  assert.equal(git(f.remotePath, ['rev-parse', 'refs/heads/main']), remoteMainBefore);
+  assert.equal(readSubmission(f.db, f.submissionId).status, 'rejected');
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,13 @@ import { openCockpitDatabase } from '../src/core/database.mjs';
 import { registerProject } from '../src/core/projects.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
+
+
+// POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
+// 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
 
 const TOKEN = 'relay-http-test-token-that-is-long-enough';
 
@@ -20,7 +27,7 @@ async function post(service, pathname, body) {
 }
 
 test('HTTP relay/resume keeps one active session and exposes relay_waiting in the dashboard', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-relay-http-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-cockpit-relay-http-'));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   writeFileSync(path.join(root, 'README.md'), '# relay fixture\n');
   execFileSync('git', ['add', 'README.md'], { cwd: root });
@@ -115,7 +122,7 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   const relayRetry = await post(service, '/api/v1/mcp/work/relay', relayBody);
   assert.equal(relayRetry.status, 200, await relayRetry.clone().text());
   const retried = await relayRetry.json();
-  assert.deepEqual(retried, prepared);
+  assert.deepEqual({ ...retried, diagnosticId: undefined }, { ...prepared, diagnosticId: undefined });
   assert.equal(retried.git.head, prepared.git.head);
 
   const relayConflict = await post(service, '/api/v1/mcp/work/relay', {
@@ -162,6 +169,26 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     assert.equal((await invalid.json()).code, 'INVALID_REQUEST');
   }
 
+  // A stale development-space record can point at a folder that was removed
+  // outside Cockpit. It must not prevent the current registered worktree from
+  // resolving and consuming its own relay code.
+  const stalePath = path.join(root, 'removed-development-space');
+  const staleDb = openCockpitDatabase(dbPath, { migrate: false });
+  const staleAt = new Date().toISOString();
+  staleDb.prepare(`
+    INSERT INTO worktrees (id, canonical_path, repository_identity, identity_fingerprint, created_at)
+    VALUES ('relay-http-stale-worktree', ?, ?, 'relay-http-stale-identity', ?)
+  `).run(stalePath, observation.repositoryIdentity, staleAt);
+  staleDb.prepare(`
+    INSERT INTO development_spaces (
+      id, project_id, worktree_id, name, branch, base_commit, status, created_at, updated_at
+    ) VALUES (
+      'relay-http-stale-space', ?, 'relay-http-stale-worktree',
+      'Removed development space', 'ugk/removed-space', ?, 'ready', ?, ?
+    )
+  `).run(project.projectId, observation.after.head, staleAt, staleAt);
+  staleDb.close();
+
   const resumeResponse = await post(service, '/api/v1/mcp/work/resume', resumeBody);
   assert.equal(resumeResponse.status, 200, await resumeResponse.clone().text());
   const resumed = await resumeResponse.json();
@@ -178,7 +205,7 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     mcpWorkingDirectory: root,
   });
   assert.equal(replay.status, 200, await replay.clone().text());
-  assert.deepEqual(await replay.json(), resumed);
+  assert.deepEqual({ ...await replay.json(), diagnosticId: undefined }, { ...resumed, diagnosticId: undefined });
 
   const state = openCockpitDatabase(dbPath, { migrate: false });
   const row = state.prepare(`
@@ -201,5 +228,27 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
     WHERE request_json LIKE ? OR response_json LIKE ?
   `).get(`%${prepared.continueCode}%`, `%${prepared.continueCode}%`).count, 0);
   assert.equal(state.prepare('SELECT count(*) AS count FROM write_leases').get().count, 1);
+
+  // Only the isolated fixture clock is advanced; an expired public capability
+  // must not regain authority through the old chat-confirmation fields.
+  const expiringResponse = await post(service, '/api/v1/mcp/work/relay', {
+    ...relayBody, expectedRevision: resumed.revision, clientRequestId: 'relay-http-expiring',
+  });
+  assert.equal(expiringResponse.status, 200, await expiringResponse.clone().text());
+  const expiring = await expiringResponse.json();
+  state.prepare('UPDATE relays SET expires_at = 0 WHERE id = ?').run(expiring.relayId);
+  for (const confirmation of [false, true]) {
+    const rejected = await post(service, '/api/v1/mcp/work/resume', {
+      continueCode: expiring.continueCode, clientRequestId: `relay-http-expired-${confirmation}`,
+      mcpWorkingDirectory: root,
+      ...(confirmation ? { confirmationRequestId: 'old-offer', expectedRevision: expiring.revision } : {}),
+    });
+    assert.equal(rejected.status, 409);
+    const error = await rejected.json();
+    assert.equal(error.code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+    assert.equal(error.session_id, initialized.sessionId);
+    assert.equal(error.revision, expiring.revision);
+  }
+  assert.equal(state.prepare('SELECT revision FROM runs WHERE id = ?').get(initialized.sessionId).revision, expiring.revision);
   state.close();
 });

@@ -157,3 +157,22 @@ test('API client translates a lost local connection into a Chinese recovery mess
     return true;
   });
 });
+
+test('API client treats a non-JSON response as a connection failure with the standard contract', async () => {
+  const api = createClient({
+    fetchImpl: async () => ({
+      status: 502,
+      ok: false,
+      json: async () => { throw new SyntaxError('Unexpected token < in JSON'); },
+    }),
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+
+  await assert.rejects(api('/api/v1/dashboard'), (error) => {
+    assert.equal(error.code, 'SERVICE_UNAVAILABLE');
+    assert.equal(error.impact, '页面还没有收到操作结果；项目代码不会被 Cockpit 修改。');
+    assert.match(error.required_action, /Cockpit/);
+    return true;
+  });
+});

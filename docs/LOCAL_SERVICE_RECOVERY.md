@@ -1,5 +1,19 @@
 # 本机服务数据一致性与故障恢复
 
+## schema 25 节点与平台转交部署（2026-09-07）
+
+用户明确授权部署代码 `291648e` 并切换已安装技能。部署前旧 PID 25124 已不存在，端口 41737 未监听；保留的数据库为 schema 24、6 项目、19 运行、27 任务。使用 SQLite backup API 创建并验证 `.data/service/backups/before-node-transfer-2026-09-07T07-28-24-067Z.db`，包含 WAL 中已提交记录。
+
+通过既有启动器构建网页、清理已证明失效的旧锁并启动 PID 45780，继续使用 `.data/service`。未覆盖运行中数据目录、清库或重新添加项目。升级至 schema 25 后完整性检查 `ok`、外键错误 0；对 27 张历史业务表逐行比较其升级前字段，摘要全部一致，新节点和转交表均为 0。启动器核对 6 个已有项目及全部详情；新增会话控制 API 在真实项目可读。
+
+当前 Codex 原聊天调用 `ugk_work_context({})` 成功：原会话 `session_6ca84f6b88abea9e26dc204f33758878`、revision 61、durable/host、`canContinue=true`，持有人仍为原 Codex 聊天。此次只读验收未新增业务节点或推进 revision。
+
+两处现存技能根目录 `.codex/skills` 与 `.agents/skills` 各六包已先备份至 `.data/backups/skills-pre-schema25-20260907-7b392fd8/{codex,agents}`。旧文件全部匹配仓库历史，无不明定制；使用仓库安装器升级后，24/24 文件 SHA-256 与源版本一致，文件集合无额外或缺失。实际内容变化为 progress 和 relay 技能。
+
+部署时新启动的 stdio 进程公布 takeover 必填字段 `sessionId/clientRequestId/transferCode`，但当前宿主缓存仍显示旧工具定义。文件安装和服务升级不等于已运行 bridge 自动重载：旧聊天需重连 MCP 后再使用新版接手入口，技能在下一轮重新加载；未为此批量停止宿主或其他项目进程。
+
+随后用户在本对话提供原 ZCode 聊天的现场结果并确认恢复正常：用户从工作台签发指令，ZCode 消费成功后查询同一手腕工作会话，revision 从 41 经授权/接手推进到 43，`canContinue=true`、`bound/host/durable`，持有人与 takeover 节点均指向该 ZCode 宿主会话。反馈明确未重新 init、未改代码、尚未补记成果。本记录来源是用户转述的原宿主结果，不是主会话另读业务仓库或重新执行转交；后续记录必须使用最新平台 revision，不沿用 41。
+
 ## 启动器数据目录修复（2026-09-06）
 
 启动器现在把解析后的 `DataDirectory` 通过 `--data-directory` 传给服务，锁、日志和数据库使用同一目录。此前该参数未传给服务，服务始终读取 AppData。启动成功前，启动器通过浏览器会话核对磁盘与接口的项目 ID 集合，并验证每个已有项目详情；仅首页 HTTP 200 不再算验收通过。

@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { withImmediateTransaction } from './database.mjs';
+
+const actors = new AsyncLocalStorage();
+export function withCommandActor(actor, action) { return actors.run({ ...actor }, action); }
+export function setCommandActor(actor) { Object.assign(actors.getStore() ?? {}, actor); }
 
 function normalize(value) {
   if (Array.isArray(value)) return value.map(normalize);
@@ -57,9 +62,12 @@ export function beginCommand(db, {
 
     db.prepare(`
       INSERT INTO commands (
-        id, kind, request_digest, request_json, state, run_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'received', ?, ?, ?)
-    `).run(commandId, kind, digest, requestJson, runId, now, now);
+        id, kind, request_digest, request_json, state, run_id, created_at, updated_at,
+        actor_kind, actor_host, actor_conversation_id
+      ) VALUES (?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?)
+    `).run(commandId, kind, digest, requestJson, runId, now, now,
+      actors.getStore()?.kind ?? 'unattributed', actors.getStore()?.host ?? null,
+      actors.getStore()?.conversationId ?? null);
 
     return { command: readCommand(db, commandId), fresh: true };
   };

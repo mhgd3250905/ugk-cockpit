@@ -11,7 +11,7 @@ export const AVATAR_COLOR_STRENGTH = 0.12;
 
 export function projectAvatarUrl(project) {
   if (!project?.id || !project?.avatarPath) return null;
-  return `/api/v1/projects/${encodeURIComponent(project.id)}/avatar?t=${encodeURIComponent(project.avatarPath)}`;
+  return `/api/v1/projects/${encodeURIComponent(project.id)}/avatar?path=${encodeURIComponent(project.avatarPath)}`;
 }
 
 function clampByte(value) {

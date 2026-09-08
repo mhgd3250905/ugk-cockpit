@@ -70,7 +70,7 @@ function resumeInProcess(dbPath, request, clock, killBeforeCommit = false) {
   { encoding: 'utf8', windowsHide: true, timeout: 10000 }));
 }
 
-test('expired relay confirmation survives process death and commits ownership exactly once', (t) => {
+test('legacy core expired relay confirmation survives process death and commits ownership exactly once', (t) => {
   const db = fixture(t);
   activeSession(db);
   const now = Date.now();
@@ -98,7 +98,7 @@ test('expired relay confirmation survives process death and commits ownership ex
   db.close();
 });
 
-test('expired confirmation cannot bypass an absent offer, a new relay, or intervening progress', (t) => {
+test('legacy core expired confirmation cannot bypass an absent offer, a new relay, or intervening progress', (t) => {
   const db = fixture(t);
   activeSession(db);
   const now = Date.now();
@@ -118,6 +118,32 @@ test('expired confirmation cannot bypass an absent offer, a new relay, or interv
   assert.equal(resumeRelay(db, { ...confirmation, clientRequestId: 'confirm-again' },
     { clock: now + 50 }).code, 'RELAY_SUPERSEDED');
   assert.equal(db.prepare('SELECT count(*) n FROM conversation_bindings').get().n, 0);
+  db.close();
+});
+
+test('strict relay expiry requires platform authorization while committed legacy receipts stay replayable', (t) => {
+  const db = fixture(t);
+  activeSession(db);
+  const now = Date.now();
+  createRelay(db, { ...relayFields, sessionId: 'session-relay', clientRequestId: 'strict-offer',
+    expectedRevision: 2, continueCode: 'strict-expired-code', ttlMs: 1 }, { clock: now });
+  const request = { continueCode: 'strict-expired-code', conversationKey: 'strict-chat', clientRequestId: 'strict-inspect' };
+  const denied = resumeRelay(db, request, { clock: now + 10, allowExpiredConfirmation: false });
+  assert.equal(denied.code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+  assert.equal(denied.sessionId, 'session-relay');
+  assert.equal(denied.worktreeId, 'worktree-relay');
+  assert.equal(denied.revision, 3);
+  const legacyOffer = resumeRelay(db, { ...request, clientRequestId: 'legacy-offer' }, { clock: now + 20 });
+  const confirmation = { ...request, clientRequestId: 'strict-confirm',
+    confirmationRequestId: legacyOffer.confirmationRequestId, expectedRevision: legacyOffer.expectedRevision };
+  assert.equal(resumeRelay(db, confirmation, { clock: now + 30, allowExpiredConfirmation: false }).code,
+    'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+  assert.equal(db.prepare('SELECT revision FROM runs').get().revision, 3);
+  assert.equal(db.prepare('SELECT count(*) n FROM conversation_bindings').get().n, 0);
+  const legacyRequest = { ...confirmation, clientRequestId: 'legacy-confirm' };
+  const accepted = resumeRelay(db, legacyRequest, { clock: now + 40 });
+  assert.equal(accepted.relayAccepted, true);
+  assert.deepEqual(resumeRelay(db, legacyRequest, { clock: now + 50, allowExpiredConfirmation: false }), accepted);
   db.close();
 });
 
