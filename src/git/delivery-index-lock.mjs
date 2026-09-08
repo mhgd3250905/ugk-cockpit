@@ -56,15 +56,36 @@ export function acquireDeliveryIndexLock(indexPath, commandId) {
     fsyncSync(fd);
   } catch (error) {
     closeSync(fd);
-    // An incomplete ownership record is deliberately left for explicit inspection.
+    // The write failed, so this file can never satisfy the ownership protocol
+    // again — and while our own pid is recorded as alive, reclaimExitedOwner
+    // would refuse it forever. Remove the artifact we just created (only if
+    // it is still the file we opened) so one failed write cannot lock the
+    // repository until the next service restart.
+    try {
+      const stat = lstatSync(lockPath, { bigint: true });
+      if (stat.isFile() && identity(stat) === fileIdentity) unlinkSync(lockPath);
+    } catch {}
     throw error;
   }
   return { fd, lockPath, fileIdentity, bytes };
 }
 
 export function releaseDeliveryIndexLock(lock) {
-  closeSync(lock.fd);
-  if (sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) unlinkSync(lock.lockPath);
+  // Best effort: the caller's finally already holds the real outcome, and a
+  // release error must not mask a saved commit (or its local_saved state).
+  // A few immediate retries cover the shortest Windows transient refusals
+  // (AV / indexer); if the unlink still fails, the leaked lock is reclaimed
+  // once the owning service process is gone — the pid liveness check in
+  // reclaimExitedOwner stays the durable recovery path.
+  try { closeSync(lock.fd); } catch {}
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) return true;
+    try {
+      unlinkSync(lock.lockPath);
+      return true;
+    } catch {}
+  }
+  return false;
 }
 
 export function assertDeliveryIndexLock(lock) {
