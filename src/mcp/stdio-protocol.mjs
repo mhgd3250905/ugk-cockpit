@@ -1407,12 +1407,30 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
     terminal: false
   });
 
+  // The host can destroy the pipes at any moment (crash, restart, user
+  // cancel). An 'error' event with no listener would escape the request queue
+  // and take the whole bridge process down as an uncaught exception.
+  outStream?.on?.('error', () => {});
+  errStream?.on?.('error', () => {});
+
   const writeResponse = (response) => {
-    if (response) {
-      const line = JSON.stringify(response);
-      outStream.write(`${line}\n`);
+    try {
+      outStream.write(`${JSON.stringify(response)}\n`);
+    } catch {}
+  };
+
+  // Hosts close stdin when the session ends. In-flight service calls must be
+  // aborted so this process cannot linger on a stalled connection: wire the
+  // readline 'close' event (EOF or close()) into the same shutdown path.
+  let shutdownInvoked = false;
+  const shutdown = () => {
+    if (shutdownInvoked) return;
+    shutdownInvoked = true;
+    if (typeof onShutdown === 'function') {
+      try { onShutdown(); } catch {}
     }
   };
+  rl.on('close', shutdown);
 
   const handleLine = async (line) => {
     const trimmed = line.trim();
@@ -1481,11 +1499,9 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   return {
     close() {
       rl.close();
-      // Hosts close stdin when the session ends. In-flight service calls must
-      // be aborted so this process cannot linger on a stalled connection.
-      if (typeof onShutdown === 'function') {
-        try { onShutdown(); } catch {}
-      }
+      // EOF and an explicit close() both converge on the same shutdown path;
+      // whichever arrives first aborts in-flight service calls exactly once.
+      shutdown();
     },
     dispatchMessage(msg) {
       return dispatchMessage(msg, { handlers, stderr: errStream });
