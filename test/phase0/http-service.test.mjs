@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1416,5 +1416,35 @@ test('HTTP refreshes a stale main-project observation before development-space c
     }),
   });
   assert.equal(createResponse.status, 201, await createResponse.clone().text());
-  assert.equal((await createResponse.json()).ok, true);
+  const created = await createResponse.json();
+  assert.equal(created.ok, true);
+
+  const reusedResponse = await request(service, `/api/v1/projects/${registered.projectId}/spaces/${created.spaceId}/reuse`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'reuse-fresh-space',
+      expectedRevision: created.space.revision,
+      expectedBaseHead: refreshed.git.head,
+    }),
+  });
+  assert.equal(reusedResponse.status, 200, await reusedResponse.clone().text());
+  const reused = await reusedResponse.json();
+  assert.equal(reused.ok, true);
+  assert.notEqual(reused.branch, created.branch);
+  assert.equal(reused.space.status, 'ready');
+
+  const removedResponse = await request(service, `/api/v1/projects/${registered.projectId}/spaces/${created.spaceId}/remove`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      commandId: 'remove-fresh-space',
+      expectedRevision: reused.space.revision,
+    }),
+  });
+  assert.equal(removedResponse.status, 200, await removedResponse.clone().text());
+  const removed = await removedResponse.json();
+  assert.equal(removed.ok, true);
+  assert.equal(removed.space.status, 'archived');
+  assert.equal(existsSync(emptyFolder), false);
 });

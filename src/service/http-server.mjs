@@ -41,8 +41,15 @@ import {
 } from '../core/project-avatars.mjs';
 import { listDevelopmentSpaces, readDevelopmentSpace } from '../core/spaces.mjs';
 import { listSubmissions } from '../core/integrations.mjs';
-import { createDevelopmentWorkspace, listDevelopmentWorkspaces } from '../core/workspaces.mjs';
+import {
+  createDevelopmentWorkspace,
+  listDevelopmentWorkspaces,
+  removeDevelopmentWorkspace,
+  reuseDevelopmentWorkspace,
+} from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
+import { readWorkLineContexts } from '../core/work-line-context.mjs';
+import { setProjectArchived, setWorkLineClosed, readWorkLineStates } from '../core/manual-records.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
@@ -486,6 +493,90 @@ const PUBLIC_ERRORS = {
     message: '找不到这个开发空间。',
     impact: '没有创建任务，也没有修改代码。',
     requiredAction: '请刷新项目页，确认开发空间仍存在。',
+  },
+  SPACE_REVISION_CONFLICT: {
+    status: 409,
+    message: '这个开发空间刚刚发生了变化。',
+    impact: '本次操作没有覆盖新的状态，原有代码和记录保持不变。',
+    requiredAction: '请刷新开发空间列表，确认最新状态后再试。',
+  },
+  PROJECT_ARCHIVE_REVISION_CONFLICT: {
+    status: 409,
+    message: '项目的归档状态刚刚发生了变化。',
+    impact: '本次操作没有覆盖新状态，项目代码不受影响。',
+    requiredAction: '请刷新项目后重试。',
+  },
+  WORK_LINE_REVISION_CONFLICT: {
+    status: 409,
+    message: '这条工作线的结束标记刚刚发生了变化。',
+    impact: '本次操作没有覆盖新状态，代码和会话不受影响。',
+    requiredAction: '请刷新工作线后重试。',
+  },
+  WORK_LINE_NOT_FOUND: {
+    status: 404,
+    message: '没有找到这个项目下的工作线。',
+    impact: '没有修改工作记录或项目代码。',
+    requiredAction: '请刷新项目并重新选择工作线。',
+  },
+  MAIN_WORK_LINE_NOT_CLOSABLE: {
+    status: 409,
+    message: '主项目不使用分支的结束标记。',
+    impact: '项目代码和会话没有改变。',
+    requiredAction: '要收起整个项目，请使用归档项目。',
+  },
+  SPACE_NOT_REUSABLE: {
+    status: 409,
+    message: '这个开发空间现在还不能重新开始。',
+    impact: '没有切换代码，也没有改动现有文件。',
+    requiredAction: '请先结束或交接正在进行的工作，再重新开始。',
+  },
+  SPACE_NOT_REMOVABLE: {
+    status: 409,
+    message: '这个开发空间现在还不能删除。',
+    impact: '本地文件夹和现有记录保持不变。',
+    requiredAction: '请先结束或交接正在进行的工作，再删除这个空间。',
+  },
+  SPACE_HAS_ACTIVE_WORK: {
+    status: 409,
+    message: '这个开发空间仍有进行中的 AI 工作。',
+    impact: '为了保留正在工作的代码，Cockpit 没有切换或删除该空间。',
+    requiredAction: '请先完成、交接或明确结束这项工作，然后再试。',
+  },
+  WORKSPACE_HAS_CHANGES: {
+    status: 409,
+    message: '这个开发空间还有未保存到代码历史的改动。',
+    impact: '这些文件保持原样；Cockpit 没有切换分支或删除目录。',
+    requiredAction: '请先处理这些改动，再重新开始或删除空间。',
+  },
+  WORKSPACE_IDENTITY_MISMATCH: {
+    status: 409,
+    message: '这个开发空间已经不是登记时的那份代码。',
+    impact: 'Cockpit 已停止操作，现有文件和记录没有被覆盖。',
+    requiredAction: '请确认该文件夹的代码状态后再处理。',
+  },
+  WORKSPACE_INCOHERENT: {
+    status: 409,
+    message: '这个开发空间的代码正在变化。',
+    impact: 'Cockpit 没有切换分支或删除目录。',
+    requiredAction: '请等待当前修改结束，再刷新后重试。',
+  },
+  WORKSPACE_PROBE_FAILED: {
+    status: 503,
+    message: '暂时无法核验开发空间的代码状态。',
+    impact: 'Cockpit 没有切换分支或删除目录。',
+    requiredAction: '请确认本地文件夹和 Git 可访问后重试。',
+  },
+  WORKSPACE_SWITCH_FAILED: {
+    status: 409,
+    message: '暂时无法为这个空间开始新的代码工作线。',
+    impact: 'Cockpit 没有确认新的工作线已经准备好。',
+    requiredAction: '请刷新当前空间的代码状态后再试。',
+  },
+  WORKSPACE_REMOVE_FAILED: {
+    status: 409,
+    message: '暂时无法移除这个开发空间的本地文件夹。',
+    impact: 'Cockpit 没有把该空间标记为已删除。',
+    requiredAction: '请关闭可能正在使用该文件夹的程序后重试。',
   },
   SPACE_ID_CONFLICT: {
     status: 409,
@@ -2501,6 +2592,75 @@ export async function createCockpitHttpServer({
         return;
       }
 
+      const projectSpaceActionMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/spaces\/([^/]+)\/(reuse|remove)$/);
+      if (request.method === 'POST' && projectSpaceActionMatch) {
+        const projectId = decodeURIComponent(projectSpaceActionMatch[1]);
+        const spaceId = decodeURIComponent(projectSpaceActionMatch[2]);
+        const action = projectSpaceActionMatch[3];
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 0) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const allowedKeys = action === 'reuse'
+          ? new Set(['commandId', 'expectedRevision', 'expectedBaseHead'])
+          : new Set(['commandId', 'expectedRevision']);
+        if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        if (action === 'reuse') requireString(body, 'expectedBaseHead');
+
+        const result = action === 'reuse'
+          ? await reuseDevelopmentWorkspace(db, {
+              commandId: body.commandId,
+              projectId,
+              spaceId,
+              expectedRevision: body.expectedRevision,
+              expectedBaseHead: body.expectedBaseHead,
+            }, { probe, checkBranchExists })
+          : await removeDevelopmentWorkspace(db, {
+              commandId: body.commandId,
+              projectId,
+              spaceId,
+              expectedRevision: body.expectedRevision,
+            }, { probe });
+        if (result.ok) {
+          sendJson(response, 200, result);
+        } else {
+          sendError(response, result.code, {
+            commandId: body.commandId,
+            extra: { space_id: spaceId },
+          });
+        }
+        return;
+      }
+
+      const projectArchiveMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/archive$/);
+      const workLineStateMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/work-lines\/([^/]+)\/state$/);
+      if (request.method === 'POST' && (projectArchiveMatch || workLineStateMatch)) {
+        const match = projectArchiveMatch || workLineStateMatch;
+        const projectId = decodeURIComponent(match[1]);
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        const flag = projectArchiveMatch ? 'archived' : 'closed';
+        const allowedKeys = new Set(['commandId', 'expectedRevision', flag]);
+        if (Object.keys(body).some((key) => !allowedKeys.has(key))
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0
+          || typeof body[flag] !== 'boolean') {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const recordRequest = { commandId: body.commandId, projectId, expectedRevision: body.expectedRevision };
+        const result = projectArchiveMatch
+          ? setProjectArchived(db, { ...recordRequest, archived: body.archived })
+          : setWorkLineClosed(db, { ...recordRequest, worktreeId: decodeURIComponent(match[2]), closed: body.closed });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, { commandId: body.commandId });
+        return;
+      }
+
       const projectDetailMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)$/);
       if (request.method === 'GET' && projectDetailMatch) {
         const projectId = decodeURIComponent(projectDetailMatch[1]);
@@ -2562,6 +2722,8 @@ export async function createCockpitHttpServer({
           ok: true,
           refreshedAt: new Date().toISOString(),
           ...detail,
+          workLineContexts: readWorkLineContexts(db, projectId),
+          workLineStates: readWorkLineStates(db, projectId),
           developmentSpaces,
           submissions,
           submitNotes,
@@ -3020,6 +3182,7 @@ export async function createCockpitHttpServer({
           ok: true,
           refreshedAt: new Date().toISOString(),
           projects: readDashboard(db),
+          archivedProjects: readDashboard(db, { archived: true }),
         });
         return;
       }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
   SUPPORTED_SCHEMA_VERSION,
 } from '../src/core/database.mjs';
 import { EmptyFolderGrantStore } from '../src/core/folder-grants.mjs';
+import { setWorkLineClosed, readWorkLineStates } from '../src/core/manual-records.mjs';
 import {
   authorizeEmptyDirectory,
 } from '../src/core/path-guard.mjs';
@@ -17,7 +18,9 @@ import {
   createDevelopmentWorkspace,
   createWorkspace,
   listDevelopmentWorkspaces,
+  removeDevelopmentWorkspace,
   readDevelopmentWorkspace,
+  reuseDevelopmentWorkspace,
 } from '../src/core/workspaces.mjs';
 import {
   checkBranchExists,
@@ -967,5 +970,136 @@ test('REAL GIT: workspace creation, deterministic branch, idempotent replay, and
   assert.ok(space2);
   assert.equal(space2.branch, crashBranch);
 
+  db.close();
+});
+
+test('REAL GIT: a clean completed workspace can start fresh from the current main commit', async (t) => {
+  const { root, db, repoDir, headSha } = await realGitFixture(t);
+  const targetPath = path.join(root, 'reusable-workspace');
+  mkdirSync(targetPath);
+  const grantStore = new EmptyFolderGrantStore({ db });
+  const grant = grantStore.issue(authorizeEmptyDirectory(targetPath), 'principal-reuse');
+  const created = await createDevelopmentWorkspace(db, {
+    commandId: 'cmd-reuse-create',
+    projectId: 'proj-real-1',
+    name: 'reusable-space',
+    grantId: grant.grantId,
+    principalHash: 'principal-reuse',
+    expectedBaseHead: headSha,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+
+  const closed = setWorkLineClosed(db, {
+    commandId: 'cmd-close-before-reuse', projectId: 'proj-real-1',
+    worktreeId: created.space.worktreeId, expectedRevision: 0, closed: true,
+  });
+  assert.equal(closed.ok, true, JSON.stringify(closed));
+  const reused = await reuseDevelopmentWorkspace(db, {
+    commandId: 'cmd-reuse-space',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+    expectedBaseHead: headSha,
+  });
+  assert.equal(reused.ok, true, JSON.stringify(reused));
+  assert.notEqual(reused.branch, created.branch);
+  assert.equal(reused.previousBranch, created.branch);
+  assert.equal(reused.baseCommit, headSha);
+  assert.equal(reused.space.status, 'ready');
+  assert.equal(reused.space.revision, 1);
+  assert.equal(readWorkLineStates(db, 'proj-real-1')[0].status, 'open');
+  assert.deepEqual(db.prepare('SELECT event FROM work_line_events ORDER BY revision').all().map((row) => row.event), ['close', 'reopen']);
+
+  const observation = await probeGitWorktree(targetPath);
+  assert.equal(observation.after.branch, reused.branch);
+  assert.equal(observation.after.head, headSha);
+  assert.equal(observation.after.hasChanges, false);
+  assert.equal(await checkBranchExists(repoDir, created.branch), true, 'old branch remains available for recovery');
+  assert.equal(await checkBranchExists(repoDir, reused.branch), true);
+
+  const replay = await reuseDevelopmentWorkspace(db, {
+    commandId: 'cmd-reuse-space',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+    expectedBaseHead: headSha,
+  });
+  assert.deepEqual(replay, reused);
+  db.close();
+});
+
+test('REAL GIT: reuse and removal refuse a workspace with uncommitted changes', async (t) => {
+  const { root, db, headSha } = await realGitFixture(t);
+  const targetPath = path.join(root, 'protected-workspace');
+  mkdirSync(targetPath);
+  const grantStore = new EmptyFolderGrantStore({ db });
+  const grant = grantStore.issue(authorizeEmptyDirectory(targetPath), 'principal-protected');
+  const created = await createDevelopmentWorkspace(db, {
+    commandId: 'cmd-protected-create',
+    projectId: 'proj-real-1',
+    name: 'protected-space',
+    grantId: grant.grantId,
+    principalHash: 'principal-protected',
+    expectedBaseHead: headSha,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+  writeFileSync(path.join(targetPath, 'unfinished.txt'), 'keep this work');
+
+  const reuse = await reuseDevelopmentWorkspace(db, {
+    commandId: 'cmd-protected-reuse',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+    expectedBaseHead: headSha,
+  });
+  assert.equal(reuse.ok, false);
+  assert.equal(reuse.code, 'WORKSPACE_HAS_CHANGES');
+
+  const removal = await removeDevelopmentWorkspace(db, {
+    commandId: 'cmd-protected-remove',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+  });
+  assert.equal(removal.ok, false);
+  assert.equal(removal.code, 'WORKSPACE_HAS_CHANGES');
+  assert.equal(existsSync(targetPath), true, 'dirty local files must remain intact');
+  db.close();
+});
+
+test('REAL GIT: removing a clean workspace archives its record and releases its directory', async (t) => {
+  const { root, db, repoDir, headSha } = await realGitFixture(t);
+  const targetPath = path.join(root, 'removable-workspace');
+  mkdirSync(targetPath);
+  const grantStore = new EmptyFolderGrantStore({ db });
+  const grant = grantStore.issue(authorizeEmptyDirectory(targetPath), 'principal-remove');
+  const created = await createDevelopmentWorkspace(db, {
+    commandId: 'cmd-remove-create',
+    projectId: 'proj-real-1',
+    name: 'removable-space',
+    grantId: grant.grantId,
+    principalHash: 'principal-remove',
+    expectedBaseHead: headSha,
+  });
+  assert.equal(created.ok, true, JSON.stringify(created));
+
+  const removed = await removeDevelopmentWorkspace(db, {
+    commandId: 'cmd-remove-space',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+  });
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  assert.equal(removed.space.status, 'archived');
+  assert.equal(existsSync(targetPath), false);
+  assert.equal(await checkBranchExists(repoDir, created.branch), true, 'removal keeps the recovery branch');
+
+  const replay = await removeDevelopmentWorkspace(db, {
+    commandId: 'cmd-remove-space',
+    projectId: 'proj-real-1',
+    spaceId: created.spaceId,
+    expectedRevision: created.space.revision,
+  });
+  assert.deepEqual(replay, removed);
   db.close();
 });

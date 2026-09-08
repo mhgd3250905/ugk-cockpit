@@ -1,0 +1,32 @@
+.work-context-summary {
+  display: grid;
+  width: 100%;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--wb-line);
+  border-radius: 9px;
+  background: var(--wb-surface);
+  color: var(--wb-ink);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+}
+.work-context-summary:hover { border-color: var(--border-strong); background: var(--wb-surface); box-shadow: none; transform: none; }
+.work-context-summary:focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 3px; }
+.work-context-label { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--wb-muted); }
+.work-context-label > span { flex-shrink: 0; color: var(--wb-accent); }
+.work-context-goal { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: 13px; line-height: 1.8; }
+.work-context-goal strong { margin-right: 12px; font-weight: 600; }
+.work-context-facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 11px; color: var(--wb-muted); overflow-wrap: anywhere; }
+.work-context-fields { margin: 0; display: grid; gap: 18px; }
+.work-context-fields dt { margin-bottom: 5px; color: var(--wb-muted); font-size: 12px; }
+.work-context-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.85; }
+.work-context-dialog { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.work-context-caption { margin: 18px 0; color: var(--wb-muted); font-size: 12px; }
+.work-context-technical summary { color: var(--wb-muted); cursor: pointer; font-size: 12px; }
+.work-context-technical .work-context-fields { margin-top: 16px; }
+.project-detail-content .workspace-layout { grid-template-columns: minmax(0, 1fr); }
+.work-line-record-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--wb-muted); }
+.archived-projects { margin-top: 28px; border-top: 1px solid var(--wb-line); padding-top: 18px; }
+.archived-projects > summary { cursor: pointer; font-size: 13px; color: var(--wb-muted); }
+.archived-projects .workspace-list { margin-top: 16px; }

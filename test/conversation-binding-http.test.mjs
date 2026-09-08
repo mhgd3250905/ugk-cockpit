@@ -48,7 +48,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     service = await createCockpitHttpServer({ dbPath, token, port });
     db = openCockpitDatabase(dbPath);
     assert.deepEqual(snapshot(), before);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 23);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 24);
     const first = handlers('original');
     let context = await first.ugk_work_context({});
     assert.equal(context.bindingStatus, 'unbound');
@@ -63,7 +63,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
       CREATE TABLE conversation_bindings AS SELECT * FROM binding_fixture;
       DROP TABLE binding_fixture;
       CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;
-      DELETE FROM schema_migrations WHERE version = 23;
+      DELETE FROM schema_migrations WHERE version >= 23;
       PRAGMA user_version = 22;`);
     service = await createCockpitHttpServer({ dbPath, token, port });
     assert.deepEqual(db.prepare('SELECT * FROM conversation_bindings').all(), boundBefore);
@@ -165,7 +165,11 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     assert.equal(db.prepare('SELECT count(*) AS n FROM conversation_bindings WHERE revoked = 0 AND session_id = ?').get(initialized.sessionId).n, 1);
   } finally {
     db?.close();
-    await service.close();
+    try {
+      await service?.close();
+    } catch (error) {
+      if (error?.code !== 'ERR_SERVER_NOT_RUNNING') throw error;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });

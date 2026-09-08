@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button, buttonVariants } from '@appica/ui-react/button';
 import { Badge } from '@appica/ui-react/badge';
@@ -44,6 +44,8 @@ import {
   projectAvatarUrl,
 } from './avatar-color.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
+import { WorkContext } from './work-context.jsx';
+import { ManualRecordAction } from './manual-record-action.jsx';
 import './styles.css';
 import './workbench.css';
 
@@ -123,6 +125,8 @@ const TIMELINE_KINDS = {
   handoff: { code: 'HANDOFF', label: '阶段交接' },
   integration: { code: 'INTEGRATED', label: '接入主项目' },
   submit_note: { code: 'NOTE', label: '工作说明' },
+  work_line_closed: { code: 'CLOSED', label: '用户手动结束' },
+  work_line_reopened: { code: 'REOPENED', label: '用户重新打开' },
 };
 
 const TIMELINE_SPACE_COLORS = [
@@ -612,6 +616,7 @@ function App() {
   const [dispatch, setDispatch] = useState(null);
   const [projectDetail, setProjectDetail] = useState(null);
   const [editingProject, setEditingProject] = useState(null);
+  const [spaceAction, setSpaceAction] = useState(null);
   const [themeMode, setThemeMode] = useTheme();
   const detailRequestRef = useRef(0);
   const projectDetailRef = useRef(projectDetail);
@@ -1017,6 +1022,10 @@ function App() {
     });
   }
 
+  async function refreshManualRecords() {
+    await Promise.all([refresh(), refreshOpenProjectDetail()]);
+  }
+
   async function createDevelopmentSpaceFromDetail() {
     const current = projectDetailRef.current;
     const project = current?.data?.project;
@@ -1096,6 +1105,65 @@ function App() {
           actionNotice: {
             error: true,
             message: error.message || '还没有生成开发空间接入消息。',
+            detail: error.required_action || '请刷新当前项目后重试。',
+          },
+        } : {}),
+      } : previous);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmSpaceAction() {
+    const action = spaceAction;
+    const current = projectDetailRef.current;
+    const project = current?.data?.project;
+    const projectId = project?.id;
+    const requestId = current?.requestId;
+    if (!action || !projectId || !isCurrentDetailRequest(requestId, projectId)) return;
+    setBusy(true);
+    try {
+      if (action.kind === 'reuse') {
+        const refreshed = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/refresh`, {
+          method: 'POST',
+          body: JSON.stringify({ commandId: crypto.randomUUID() }),
+        });
+        await api(`/api/v1/projects/${encodeURIComponent(projectId)}/spaces/${encodeURIComponent(action.space.spaceId)}/reuse`, {
+          method: 'POST',
+          body: JSON.stringify({
+            commandId: crypto.randomUUID(),
+            expectedRevision: action.space.revision,
+            expectedBaseHead: refreshed.git.head,
+          }),
+        });
+      } else {
+        await api(`/api/v1/projects/${encodeURIComponent(projectId)}/spaces/${encodeURIComponent(action.space.spaceId)}/remove`, {
+          method: 'POST',
+          body: JSON.stringify({
+            commandId: crypto.randomUUID(),
+            expectedRevision: action.space.revision,
+          }),
+        });
+      }
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
+      setSpaceAction(null);
+      await refreshOpenProjectDetail({
+        message: action.kind === 'reuse'
+          ? `${action.space.name} 已准备好新的开发工作。`
+          : `${action.space.name} 已从本机移除。`,
+        detail: action.kind === 'reuse'
+          ? '新的工作从主项目当前本地提交开始；之前的工作线仍保留，方便需要时找回。'
+          : '本地工作副本已释放；此前的工作线和项目记录仍保留，方便需要时找回。',
+      });
+    } catch (error) {
+      if (!isCurrentDetailRequest(requestId, projectId)) return;
+      setSpaceAction(null);
+      setProjectDetail((previous) => previous ? {
+        ...previous,
+        ...(previous.requestId === requestId && previous.seed.id === projectId ? {
+          actionNotice: {
+            error: true,
+            message: error.message || '开发空间操作没有完成。',
             detail: error.required_action || '请刷新当前项目后重试。',
           },
         } : {}),
@@ -1290,8 +1358,11 @@ function App() {
             busy={busy}
             onCreateSpace={createDevelopmentSpaceFromDetail}
             onAssignSpace={assignDevelopmentSpace}
+            onReuseSpace={(space) => setSpaceAction({ kind: 'reuse', space })}
+            onRemoveSpace={(space) => setSpaceAction({ kind: 'remove', space })}
             onCopyReviewPrompt={copyIntegrationPrompt}
             onNoteStatusChange={refreshOpenProjectDetail}
+            onRecordsChanged={refreshManualRecords}
             onEdit={(projectToEdit) => setEditingProject(projectToEdit)}
           />
         ) : (
@@ -1303,7 +1374,7 @@ function App() {
 
             {!dashboard ? (
               <LoadingState notice={notice} />
-            ) : projects.length === 0 ? (
+            ) : projects.length === 0 && !dashboard.archivedProjects?.length ? (
               <EmptyState busy={busy} onChoose={() => chooseFolder()} />
             ) : (
               groups.length > 0 && (
@@ -1330,6 +1401,22 @@ function App() {
                   </div>
                 </section>
               )
+            )}
+            {dashboard?.archivedProjects?.length > 0 && (
+              <details className="archived-projects">
+                <summary>已归档项目（{dashboard.archivedProjects.length}）</summary>
+                <div className="workspace-list">
+                  {dashboard.archivedProjects.map((project) => (
+                    <article className="workspace-card" key={project.id}>
+                      <strong>{project.name}</strong>
+                      <div className="workspace-card-actions">
+                        <Button variant="soft" size="sm" onClick={() => openProjectDetail(project)}>查看记录</Button>
+                        <ManualRecordAction project={project} api={api} onSaved={refreshManualRecords} disabled={busy} />
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </details>
             )}
           </>
         )}
@@ -1358,6 +1445,15 @@ function App() {
           onClose={() => { setHandoffProject(null); setNotice(null); setDispatch(null); }}
           onCreate={createHandoff}
           onCopy={copyDispatchMessage}
+        />
+      )}
+
+      {spaceAction && (
+        <SpaceActionModal
+          action={spaceAction}
+          busy={busy}
+          onClose={() => setSpaceAction(null)}
+          onConfirm={confirmSpaceAction}
         />
       )}
 
@@ -1523,7 +1619,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange, onEdit }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onEdit }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     id: projectId,
@@ -1583,8 +1679,10 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
                     编辑项目
                   </Button>
                 )}
+                {state?.data && <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />}
               </div>
               <div className="detail-kicker-row">
+                {project.archivedAt && <Badge variant="soft" size="sm" className="stat-neutral">已归档</Badge>}
                 {project.stage && (
                   <Badge variant="soft" size="sm" className="stat-neutral">
                     {STAGES[project.stage] || project.stage}
@@ -1616,8 +1714,11 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             busy={busy}
             onCreateSpace={onCreateSpace}
             onAssignSpace={onAssignSpace}
+            onReuseSpace={onReuseSpace}
+            onRemoveSpace={onRemoveSpace}
             onCopyReviewPrompt={onCopyReviewPrompt}
             onNoteStatusChange={onNoteStatusChange}
+            onRecordsChanged={onRecordsChanged}
           />
         ) : (
           <DetailErrorState
@@ -1686,16 +1787,16 @@ function SubmitHelp() {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onCopyReviewPrompt, onNoteStatusChange }) {
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
-  const git = project.git ?? {};
-  const sessionId = project.activeWork?.sessionId ?? project.activeRun?.id ?? null;
-  const revision = project.activeWork?.revision ?? project.activeRun?.revision ?? null;
   const [activeTab, setActiveTab] = useState('timeline');
   const tabRefs = useRef([]);
   const [focusedLaneKey, setFocusedLaneKey] = useState(null);
+  const selectedContext = data.workLineContexts?.find((context) => context.laneKey === (focusedLaneKey || 'main'));
   const timelineItems = Array.isArray(timeline?.items) ? timeline.items : [];
   const timelineLanes = useMemo(() => getTimelineLanes(timeline, timelineItems), [timeline, timelineItems]);
+  const selectedLane = timelineLanes.find((lane) => lane.key === focusedLaneKey);
+  const selectedLineState = data.workLineStates?.find((state) => state.worktreeId === selectedLane?.worktreeId);
   const timelineEntries = useMemo(
     () => getTimelineEntries(timeline, timelineLanes),
     [timeline, timelineLanes],
@@ -1765,9 +1866,32 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
 
               <TimelineLaneControls
                 lanes={timelineLanes}
+                workLineStates={data.workLineStates}
                 focusedLaneKey={focusedLaneKey}
                 onFocusLane={setFocusedLaneKey}
               />
+
+              <WorkContext
+                context={selectedContext}
+                label={focusedLaneKey ? (timelineLanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选工作线') : '项目总览'}
+                overview={focusedLaneKey ? null : {
+                  lineCount: timelineLanes.filter((lane) => ['development_space', 'delivery_source'].includes(lane.role)).length,
+                  closedCount: data.workLineStates?.filter((line) => line.status === 'closed').length || 0,
+                }}
+                formatTime={formatTime}
+              />
+              {selectedLane && ['development_space', 'delivery_source'].includes(selectedLane.role) && (
+                <div className="work-line-record-actions">
+                  <span>{selectedLineState?.status === 'closed' ? '已由你手动结束' : '尚未手动结束'}</span>
+                  <ManualRecordAction
+                    project={project}
+                    workLine={{ ...selectedLane, status: selectedLineState?.status || 'open', revision: selectedLineState?.revision || 0 }}
+                    api={api}
+                    onSaved={onRecordsChanged}
+                    disabled={busy}
+                  />
+                </div>
+              )}
 
               {timelineEntries.length === 0 ? (
                 <div className="timeline-empty">
@@ -1850,7 +1974,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                 <div>
                   <span className="timeline-overline">DEVELOPMENT SPACES</span>
                   <h3 id="workspace-title">功能开发空间</h3>
-                  <p>每个空间独立承载一项功能；你只需选择一个空文件夹。</p>
+                  <p>完成的空间可以重新开始，也可以删除本地副本来释放空间。</p>
                 </div>
                 <Button variant="soft" size="sm" onClick={onCreateSpace} disabled={busy}>
                   {busy
@@ -1866,13 +1990,25 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                     <article className="workspace-card" key={space.spaceId}>
                       <div>
                         <strong>{space.name}</strong>
-                        <span>{space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已接入主项目，可稍后整理' : '可以继续开发'}</span>
+                        <span>{space.statusReason === 'removed_by_user' ? '本地副本已删除，工作记录已保留' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '可以继续开发'}</span>
                       </div>
-                      {space.status === 'ready' && (
-                        <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
-                          复制接入消息
-                        </Button>
-                      )}
+                      <div className="workspace-card-actions">
+                        {space.status === 'ready' && (
+                          <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy}>
+                            复制接入消息
+                          </Button>
+                        )}
+                        {['ready', 'cleanup_ready', 'paused', 'attention'].includes(space.status) && (
+                          <>
+                            <Button variant="soft" size="sm" onClick={() => onReuseSpace(space)} disabled={busy}>
+                              重新开始
+                            </Button>
+                            <Button variant="soft" size="sm" className="workspace-remove-button" onClick={() => onRemoveSpace(space)} disabled={busy}>
+                              删除空间
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </article>
                   ))}
                 </div>
@@ -1881,40 +2017,12 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
 
           </div>
         </div>
-        <aside className="workspace-context" aria-label="项目当前信息">
-          <section className="context-section">
-            <h3>当前工作</h3>
-            <dl>
-              <div><dt>AI 工作会话</dt><dd>{project.currentAgent || '没有进行中的会话'}</dd></div>
-              <div><dt>工作目标</dt><dd>{project.currentGoal || '尚未设置工作目标'}</dd></div>
-            </dl>
-          </section>
-          <section className="context-section">
-            <h3>代码状态</h3>
-            <dl>
-              <div><dt>当前工作线</dt><dd>{git.branch || '分支未记录'}</dd></div>
-              <div><dt>最近提交</dt><dd>{git.shortHead || '提交未记录'}</dd></div>
-              <div><dt>本地文件</dt><dd>{git.hasChanges ? '有尚未归属的改动' : git.coherence === 'coherent' ? '与最近检查一致' : '等待确认'}</dd></div>
-              <div><dt>最近检查</dt><dd>{formatTime(project.lastObservedAt)}</dd></div>
-            </dl>
-            <p className="context-caption">以上为最近一次只读检查的结果。</p>
-          </section>
-          <details className="project-tech-panel">
-            <summary>技术详情</summary>
-            <dl>
-              <div><dt>代码位置</dt><dd>{project.path}</dd></div>
-              <div><dt>项目 ID</dt><dd>{project.id}</dd></div>
-              {sessionId && <div><dt>会话 ID</dt><dd>{sessionId}</dd></div>}
-              {revision !== null && <div><dt>Revision</dt><dd>{revision}</dd></div>}
-            </dl>
-          </details>
-        </aside>
       </div>
     </>
   );
 }
 
-function TimelineLaneControls({ lanes, focusedLaneKey, onFocusLane }) {
+function TimelineLaneControls({ lanes, focusedLaneKey, onFocusLane, workLineStates = [] }) {
   const visibleLanes = lanes.filter((lane) => (
     lane.eventCount > 0 || lane.origin?.createdAt || lane.role === 'main'
   ));
@@ -1932,7 +2040,7 @@ function TimelineLaneControls({ lanes, focusedLaneKey, onFocusLane }) {
             onClick={() => onFocusLane(lane.key)}
           >
             <span className="timeline-lane-swatch" aria-hidden="true" />
-            <span>{lane.label}</span>
+            <span>{lane.label}{workLineStates.some((line) => line.worktreeId === lane.worktreeId && line.status === 'closed') ? ' · 已结束' : ''}</span>
           </button>
         ))}
       </div>
@@ -2084,6 +2192,7 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
     <svg
       className="timeline-graph-svg"
       aria-hidden="true"
+      style={{ width: geometry.railWidth, height: Math.max(1, geometry.height) }}
       viewBox={`0 0 ${geometry.railWidth} ${Math.max(1, geometry.height)}`}
       preserveAspectRatio="none"
     >
@@ -2109,12 +2218,13 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
       : '日期未记录';
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const history = historyRef.current;
     if (!history) return undefined;
 
     const measure = () => {
       const rootRect = history.getBoundingClientRect();
+      const historyHeight = rootRect.height;
       const railWidth = timelineRailWidth(lanes.length, history.clientWidth);
       const points = new Map();
       const connectorEndX = new Map();
@@ -2146,12 +2256,12 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
         return [lane.key, timelineRailEndY({
           laneRole: lane.role,
           originY: originPoint?.y,
-          historyHeight: Math.max(history.scrollHeight, history.clientHeight),
+          historyHeight,
         })];
       }));
       setGeometry({
         railWidth,
-        height: Math.max(history.scrollHeight, history.clientHeight),
+        height: historyHeight,
         laneX: new Map(lanes.map((lane) => [lane.key, timelineLaneX(lane, lanes.length, railWidth)])),
         railEndY,
         points,
@@ -2159,16 +2269,7 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
       });
     };
 
-    const frame = typeof requestAnimationFrame === 'function'
-      ? requestAnimationFrame(measure)
-      : setTimeout(measure, 0);
-    const cancelFrame = () => {
-      if (typeof cancelAnimationFrame === 'function' && typeof frame === 'number') {
-        cancelAnimationFrame(frame);
-      } else {
-        clearTimeout(frame);
-      }
-    };
+    measure();
     const resizeObserver = typeof ResizeObserver === 'function'
       ? new ResizeObserver(measure)
       : null;
@@ -2177,11 +2278,10 @@ function TimelineHistory({ entries, lanes, focusedLaneKey, onFocusLane }) {
     window.addEventListener('resize', measure);
 
     return () => {
-      cancelFrame();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [entries, lanes]);
+  }, [entries, lanes, focusedLaneKey, expansion]);
 
   const historyStyle = {
     '--timeline-rail-width': `${geometry?.railWidth ?? timelineRailWidth(lanes.length, 800)}px`,
@@ -2381,6 +2481,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
   const relayInfo = getRelayStateInfo(item);
   const isRelayOrHandoff = item.kind === 'relay' || item.kind === 'handoff';
   const isSubmitNote = item.kind === 'submit_note';
+  const isUserRecord = item.kind === 'work_line_closed' || item.kind === 'work_line_reopened';
   const hasCollapsibleContext = isRelayOrHandoff || item.kind === 'init' || isSubmitNote;
   const hasCounts = isRelayOrHandoff && (
     (item.completedItems?.length > 0) ||
@@ -2441,6 +2542,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
         </h4>
         <div className="timeline-expanded-content" id={`timeline-content-${item.kind}-${item.id}`} hidden={!expanded}>
           <div className="timeline-preview-meta">
+            {isUserRecord && <span>用户操作记录</span>}
             {item.agent && <span>{item.agent}</span>}
             {relayInfo && <span>{relayInfo.label}</span>}
             {item.kind === 'handoff' && <span>阶段已交接</span>}
@@ -2455,14 +2557,14 @@ const TimelineNode = React.forwardRef(function TimelineNode({
             <summary>完整记录与技术详情</summary>
             <p className="timeline-record-summary">{item.summary || item.note || kind.label}</p>
         <div className="timeline-context-row">
-          {item.kind !== 'integration' && (
+          {item.kind !== 'integration' && !isUserRecord && (
             <span className="timeline-agent">
               {isSubmitNote
                 ? (item.agent ? `提交方 · ${item.agent}` : '提交方 · 未归属')
                 : `AI · ${item.agent || '未记录'}`}
             </span>
           )}
-          {item.kind === 'integration' ? (
+          {isUserRecord ? <span>用户操作 · 保留代码与会话</span> : item.kind === 'integration' ? (
             <>
               <span className="integration-receipt-chip">已确认接入</span>
               {item.sourceBranch && <span className="git-chip git-branch">来源 {item.sourceBranch}</span>}
@@ -3111,6 +3213,64 @@ function EditProjectModal({ project, onClose, onSave }) {
             {saving
               ? (<><Spinner variant="dots" currentColor data-icon="start" />正在保存…</>)
               : '保存设置'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SpaceActionModal({ action, busy, onClose, onConfirm }) {
+  const isReuse = action.kind === 'reuse';
+  const handleOpenChange = createDialogCloseGuard(busy, onClose);
+  const spaceName = action.space.name || '这个开发空间';
+
+  return (
+    <Dialog open onOpenChange={handleOpenChange} disablePointerDismissal>
+      <DialogContent className="ugk-dialog" closeButton aria-labelledby="space-action-dialog-title">
+        <DialogHeader>
+          <div className="modal-kicker-row">
+            <Badge variant="soft" size="sm" className={isReuse ? 'badge-brand' : 'workspace-remove-badge'}>
+              {isReuse ? '重新开始开发空间' : '删除本地开发空间'}
+            </Badge>
+          </div>
+          <DialogTitle id="space-action-dialog-title">
+            {isReuse ? `重新开始 ${spaceName}` : `删除 ${spaceName}`}
+          </DialogTitle>
+          <DialogDescription>
+            {isReuse
+              ? '会为这个空间开始一条新的工作线，基于主项目当前可见的本地版本。'
+              : '会移除这个空间的本地工作副本，释放它占用的电脑空间。'}
+          </DialogDescription>
+        </DialogHeader>
+
+        <DialogBody>
+          <div className="modal-form">
+            <Alert variant={isReuse ? 'info' : 'error'}>
+              <AlertIcon />
+              <div className="notice-body">
+                <AlertTitle>{isReuse ? '原来的工作不会丢失' : '删除前会再次核对代码状态'}</AlertTitle>
+                <AlertDescription>
+                  {isReuse
+                    ? '只有空间干净且没有正在进行的 AI 工作时才会切换；之前的工作线会保留，方便需要时找回。'
+                    : '只有空间干净且没有正在进行的 AI 工作时才会删除；之前的工作线和项目记录会保留，方便需要时找回。'}
+                </AlertDescription>
+              </div>
+            </Alert>
+          </div>
+        </DialogBody>
+
+        <DialogFooter>
+          <Button variant="soft" onClick={onClose} disabled={busy}>取消</Button>
+          <Button
+            variant={isReuse ? 'primary' : 'soft'}
+            className={isReuse ? undefined : 'workspace-remove-button'}
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy
+              ? (<><Spinner variant="dots" currentColor data-icon="start" />正在处理…</>)
+              : (isReuse ? '确认重新开始' : '确认删除空间')}
           </Button>
         </DialogFooter>
       </DialogContent>

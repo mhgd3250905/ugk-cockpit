@@ -136,6 +136,7 @@ function attachTimelineLane(item, resolver) {
  * - 'relay': Mid-session conversational relays
  * - 'handoff': Stage completion handoffs
  * - 'integration': Main-project integration receipts with an integrated commit
+ * - 'work_line_closed' / 'work_line_reopened': User-authored work-line state records
  */
 export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = {}) {
   const laneResolver = timelineLaneResolver(db, projectId);
@@ -252,6 +253,12 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
   } catch (err) {
     if (!err.message?.includes('no such table')) throw err;
   }
+
+  const workLineEventRows = db.prepare(`
+    SELECT id, project_id, worktree_id, event, revision, actor, command_id, created_at
+    FROM work_line_events
+    WHERE project_id = ?
+  `).all(projectId);
 
   const handoffItems = handoffRows.map((row) => ({
     id: row.id,
@@ -540,6 +547,45 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     };
   });
 
+  const workLineEventItems = workLineEventRows.map((row) => {
+    const kind = row.event === 'close'
+      ? 'work_line_closed'
+      : row.event === 'reopen'
+        ? 'work_line_reopened'
+        : null;
+    if (!kind) return null;
+    const closed = row.event === 'close';
+    return {
+      id: row.id,
+      kind,
+      typeLabel: closed ? '用户手动结束' : '用户重新打开',
+      timestamp: row.created_at,
+      agent: null,
+      actor: row.actor || 'user',
+      actorType: 'user',
+      userAction: true,
+      worktreeId: row.worktree_id ?? null,
+      revision: row.revision ?? 1,
+      sequence: row.revision ?? 1,
+      git: null,
+      summary: closed ? '你已手动结束这条工作线' : '你已重新打开这条工作线',
+      details: [],
+      note: null,
+      currentState: closed ? '工作线已结束；原有代码与记录保留' : '工作线已重新打开；原有代码与记录保留',
+      completedItems: [],
+      pendingItems: [],
+      decisions: [],
+      artifactRefs: [],
+      risks: [],
+      suggestedSkills: [],
+      nextSessionFocus: null,
+      bodyMarkdown: null,
+      closed,
+      event: row.event,
+      commandId: row.command_id,
+    };
+  }).filter(Boolean);
+
   const allItems = [
     ...initItems,
     ...progressItems,
@@ -548,6 +594,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     ...receiptItems,
     ...integrationItems,
     ...submitNoteItems,
+    ...workLineEventItems,
   ].map((item) => attachTimelineLane(item, laneResolver));
 
   // Sort only for display order. A branch name changing between adjacent
@@ -608,7 +655,7 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 export function readProjectDetail(db, projectId, options = {}) {
   const row = db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
-           projects.avatar_path,
+           projects.avatar_path, projects.archived_at, projects.archive_revision,
            projects.last_observed_at, projects.status, projects.status_reason,
            projects.created_at, projects.updated_at,
            worktrees.canonical_path, worktrees.repository_identity, worktrees.identity_fingerprint,
@@ -695,6 +742,9 @@ export function readProjectDetail(db, projectId, options = {}) {
     name: row.name,
     stage: row.stage,
     avatarPath: row.avatar_path || null,
+    archived: row.archived_at !== null,
+    archivedAt: row.archived_at ?? null,
+    archiveRevision: row.archive_revision,
     status: isWorking
       ? 'active'
       : (row.stage === 'paused'

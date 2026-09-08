@@ -739,7 +739,6 @@ details[open] > summary::before {
 
 .has-avatar-color .card-open:hover {
   border-color: color-mix(in srgb, var(--project-avatar-color) 52%, var(--border));
-  box-shadow: 0 10px 30px -14px color-mix(in srgb, var(--project-avatar-color) 40%, var(--shadow-color));
 }
 
 .card-eyebrow {
@@ -1178,6 +1177,28 @@ details[open] > summary::before {
   margin-top: 3px;
   color: var(--foreground-muted);
   font-size: 12px;
+}
+
+.workspace-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.workspace-remove-button,
+.workspace-remove-badge {
+  color: var(--danger-strong, #df6c69) !important;
+}
+
+.workspace-remove-button {
+  border-color: color-mix(in srgb, var(--danger-strong, #df6c69) 42%, var(--border)) !important;
+}
+
+.workspace-remove-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-strong, #df6c69) 12%, transparent) !important;
 }
 
 .workspace-card a {

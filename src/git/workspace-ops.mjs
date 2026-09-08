@@ -113,3 +113,81 @@ export async function createGitWorktree(repoPath, {
     throw gitError;
   }
 }
+
+export async function switchGitWorktreeToNewBranch(worktreePath, {
+  branch,
+  baseCommit,
+  timeoutMs = 15_000,
+  maxBuffer = 2 * 1024 * 1024,
+}) {
+  if (!branch) {
+    const error = new Error('branch is required.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  if (!baseCommit) {
+    const error = new Error('baseCommit is required.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+
+  try {
+    const result = await execFileAsync(
+      'git',
+      [...SAFE_GIT_PREFIX, 'switch', '-c', branch, baseCommit],
+      {
+        cwd: worktreePath,
+        timeout: timeoutMs,
+        maxBuffer,
+        windowsHide: true,
+        shell: false,
+        encoding: 'utf8',
+        env: safeGitEnvironment(),
+      },
+    );
+    return { ok: true, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').trim() };
+  } catch (error) {
+    const gitError = new Error(`Failed to start a fresh workspace branch: ${error.message}`, { cause: error });
+    gitError.code = 'GIT_WORKTREE_SWITCH_FAILED';
+    gitError.stderr = error.stderr;
+    gitError.stdout = error.stdout;
+    gitError.exitCode = error.code;
+    throw gitError;
+  }
+}
+
+export async function removeGitWorktree(repoPath, {
+  targetPath,
+  timeoutMs = 15_000,
+  maxBuffer = 2 * 1024 * 1024,
+}) {
+  if (!targetPath) {
+    const error = new Error('targetPath is required.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+
+  try {
+    const result = await execFileAsync(
+      'git',
+      [...SAFE_GIT_PREFIX, 'worktree', 'remove', '--', targetPath],
+      {
+        cwd: repoPath,
+        timeout: timeoutMs,
+        maxBuffer,
+        windowsHide: true,
+        shell: false,
+        encoding: 'utf8',
+        env: safeGitEnvironment(),
+      },
+    );
+    return { ok: true, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').trim() };
+  } catch (error) {
+    const gitError = new Error(`Failed to remove development workspace: ${error.message}`, { cause: error });
+    gitError.code = 'GIT_WORKTREE_REMOVE_FAILED';
+    gitError.stderr = error.stderr;
+    gitError.stdout = error.stdout;
+    gitError.exitCode = error.code;
+    throw gitError;
+  }
+}

@@ -25,6 +25,7 @@ export function readProjectContext(db, projectId) {
   return db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
            projects.repository_identity, projects.avatar_path,
+           projects.archived_at, projects.archive_revision,
            projects.worktree_id, worktrees.canonical_path,
            worktrees.repository_identity AS worktree_repository_identity,
            worktrees.identity_fingerprint
@@ -265,9 +266,10 @@ export function refreshProject(db, request) {
   });
 }
 
-export function readDashboard(db) {
+export function readDashboard(db, { archived = false } = {}) {
   const rows = db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.avatar_path,
+           projects.archived_at, projects.archive_revision,
            projects.last_observed_at, observations.has_changes,
            observations.coherence,
            worktrees.canonical_path,
@@ -298,6 +300,7 @@ export function readDashboard(db) {
       ORDER BY history.finished_at DESC LIMIT 1
     )
     LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
+    WHERE projects.archived_at IS ${archived === true ? 'NOT NULL' : 'NULL'}
     ORDER BY
       CASE
         WHEN observations.coherence != 'coherent' OR observations.has_changes = 1 THEN 0
@@ -355,6 +358,8 @@ export function readDashboard(db) {
       name: row.name,
       stage: row.stage,
       avatarPath: row.avatar_path || null,
+      archivedAt: row.archived_at ?? null,
+      archiveRevision: row.archive_revision,
       status: isWorking
         ? 'active'
         : (row.stage === 'paused'

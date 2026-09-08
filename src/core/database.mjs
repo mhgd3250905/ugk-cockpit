@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 23;
+export const SUPPORTED_SCHEMA_VERSION = 24;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -770,6 +770,68 @@ CREATE TABLE conversation_bindings (
       }
       db.exec(`DROP TABLE conversation_bindings_v22;
         CREATE UNIQUE INDEX conversation_binding_owner ON conversation_bindings(session_id) WHERE revoked = 0;`);
+    },
+  },
+  {
+    version: 24,
+    name: 'manual-project-and-work-line-records',
+    apply(db) {
+      const projectColumns = new Set(
+        db.prepare('PRAGMA table_info(projects)').all().map((row) => row.name),
+      );
+      if (!projectColumns.has('archived_at')) {
+        db.exec('ALTER TABLE projects ADD COLUMN archived_at TEXT;');
+      }
+      if (!projectColumns.has('archive_revision')) {
+        db.exec(`
+          ALTER TABLE projects
+          ADD COLUMN archive_revision INTEGER NOT NULL DEFAULT 0
+          CHECK (archive_revision >= 0);
+        `);
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS work_line_states (
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+          status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+          revision INTEGER NOT NULL CHECK (revision >= 0),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, worktree_id)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS idx_work_line_states_project
+          ON work_line_states(project_id, updated_at DESC, worktree_id);
+
+        CREATE TABLE IF NOT EXISTS work_line_events (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          worktree_id TEXT NOT NULL REFERENCES worktrees(id),
+          event TEXT NOT NULL CHECK (event IN ('close', 'reopen')),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          actor TEXT NOT NULL DEFAULT 'user' CHECK (actor = 'user'),
+          command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, worktree_id, revision)
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS idx_work_line_events_project_created
+          ON work_line_events(project_id, created_at DESC, id DESC);
+
+        DROP TRIGGER IF EXISTS work_line_events_append_only_update;
+        CREATE TRIGGER work_line_events_append_only_update
+        BEFORE UPDATE ON work_line_events
+        BEGIN
+          SELECT RAISE(ABORT, 'work_line_events is append-only');
+        END;
+
+        DROP TRIGGER IF EXISTS work_line_events_append_only_delete;
+        CREATE TRIGGER work_line_events_append_only_delete
+        BEFORE DELETE ON work_line_events
+        BEGIN
+          SELECT RAISE(ABORT, 'work_line_events is append-only');
+        END;
+      `);
     },
   },
 ];
