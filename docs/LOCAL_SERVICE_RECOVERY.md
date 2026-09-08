@@ -1,5 +1,15 @@
 # 本机服务数据一致性与故障恢复
 
+## schema 27 主项目服务切换（2026-09-08）
+
+用户授权合并并重启后，main 从 `990e231c40378e3ace68df27c08ae9fe8722378d` 快进到复审通过的 `b523b38602905d739c4540d0291b8466e66d74bb`，普通推送后远端 main SHA 一致。启动前核对分支服务 PID 39352 的命令行，入口为 `E:/AII-Bug-Fix/BUG-Cockpit/src/main.mjs`，数据仍在主项目 `.data/service`；7 个已有项目及全部详情正常。
+
+先通过 SQLite backup API 创建并验证 `backups/before-b523b386-2026-09-08T07-04-18-900Z.db`（相对 `.data/service`）。启动器在主项目构建网页、核验并停止旧 PID，再从 `E:/AII/ugk-cockpit/src/main.mjs` 启动 PID 38464，继续使用原数据目录。迁移前还自动生成 `backups/cockpit-schema-26-before-27-2026-09-08T07-04-31-588Z.db`。
+
+升级后 schema 为 27，完整性检查 `ok`、外键错误 0；按迁移前备份中的原字段核对 31 张历史业务表（排除迁移台账），逐行摘要全部一致。启动器核对 7 个项目及所有详情。当前 Codex 原聊天 `ugk_work_context({})` 返回原 session、revision 67、active、durable、`canContinue=true`；随后合并进展登记成功，revision 68。未重新 init、覆盖运行中数据库或重新添加项目，也未批量重启 MCP 宿主。
+
+以上 PID、项目数量和 revision 是切换时验收事实。日常访问地址为 `http://127.0.0.1:41737/`；后续收束仅修改文档，不需要再次重启。
+
 ## schema 25 节点与平台转交部署（2026-09-07）
 
 用户明确授权部署代码 `291648e` 并切换已安装技能。部署前旧 PID 25124 已不存在，端口 41737 未监听；保留的数据库为 schema 24、6 项目、19 运行、27 任务。使用 SQLite backup API 创建并验证 `.data/service/backups/before-node-transfer-2026-09-07T07-28-24-067Z.db`，包含 WAL 中已提交记录。
