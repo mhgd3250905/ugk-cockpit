@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertSafeRemoteName, git } from './probe.mjs';
+import { git } from './probe.mjs';
+import { assertSafePushTarget } from './delivery-ops.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -133,7 +134,7 @@ export async function isCommitDescendant(worktreePath, ancestor, descendant, ove
 }
 
 export async function pushSubmissionBranch(worktreePath, { remote, branch, ...overrides }) {
-  assertSafeRemoteName(remote);
+  await assertSafePushTarget(worktreePath, remote, overrides);
   await git(
     worktreePath,
     ['push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],

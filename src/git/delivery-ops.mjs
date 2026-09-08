@@ -10,27 +10,17 @@ import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-gu
 import { createDeliveryCache, assertDeliveryCache, discardDeliveryCache } from '../core/delivery-cache.mjs';
 import { remoteAuthArguments } from './remote-auth.mjs';
 import { acquireDeliveryIndexLock, assertDeliveryIndexLock, releaseDeliveryIndexLock } from './delivery-index-lock.mjs';
+import { assertSafeRemoteName, SAFE_GIT_PREFIX } from './probe.mjs';
 
 const execFileAsync = promisify(execFile);
 
-export const SAFE_GIT_PREFIX = [
-  '--no-optional-locks',
-  '-c', 'core.fsmonitor=false',
-  '-c', 'core.untrackedCache=false',
-  '-c', 'credential.helper=',
-  '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
-  '-c', 'core.longpaths=true',
-  '-c', 'protocol.allow=never',
-  '-c', 'protocol.file.allow=always',
-  '-c', 'protocol.https.allow=always',
-  '-c', 'protocol.ssh.allow=always',
-  '-c', 'core.sshCommand=ssh',
-  '-c', 'ssh.variant=ssh',
-  '-c', 'filter.lfs.clean=',
-  '-c', 'filter.lfs.smudge=',
-  '-c', 'filter.lfs.process=',
-  '-c', 'filter.lfs.required=false',
-];
+// One hardened argv prefix for every Git invocation this product makes,
+// including the delivery flow: the explicit per-protocol denies matter because
+// git resolves a specific repo-local `protocol.<name>.allow` before the
+// generic command-line `protocol.allow`, so a hostile repository could
+// otherwise self-authorize the ext:: command transport. Re-exported so
+// existing delivery-side importers keep their symbol.
+export { SAFE_GIT_PREFIX };
 
 export function safeGitEnvironment(extraEnv = {}) {
   const environment = Object.fromEntries(
@@ -112,6 +102,23 @@ export function isLocalPath(rawUrl) {
   return existsSync(rawUrl);
 }
 
+// A push follows remote.<name>.pushurl or pushInsteadOf-rewritten URLs, which
+// plain `remote get-url` does not surface. `--push` prints every URL the push
+// would actually use (one per line for multi-URL remotes); each must satisfy
+// the same transport policy as the delivery flow: no ext::/helper transports,
+// no embedded credentials, no ssh option hostnames.
+export async function assertSafePushTarget(worktreePath, remote, overrides = {}) {
+  assertSafeRemoteName(remote);
+  const resolved = await runGit(worktreePath, ['remote', 'get-url', '--push', remote], overrides);
+  const urls = resolved.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  if (urls.length === 0) {
+    const error = new Error('Push remote has no URL.');
+    error.code = 'UNSAFE_REMOTE_URL';
+    throw error;
+  }
+  for (const url of urls) validateRemoteUrlSecurity(url);
+}
+
 export function validateRemoteUrlSecurity(url) {
   if (typeof url !== 'string' || !url.trim()) {
     const error = new Error('Remote URL is empty or invalid.');
@@ -127,7 +134,9 @@ export function validateRemoteUrlSecurity(url) {
 
   // Reject ext helper, remote-testgit, or custom protocol helper syntax
   if (/^[a-zA-Z0-9_-]+::/i.test(trimmed) || /^ext::/i.test(trimmed) || trimmed.includes('::')) {
-    const error = new Error(`Remote URL uses unsafe protocol helper: ${trimmed}`);
+    // Error text must never echo the URL: malformed forms can carry embedded
+    // credentials that would otherwise reach logs, diagnostics and attempts.
+    const error = new Error('Remote URL uses unsafe protocol helper.');
     error.code = 'UNSAFE_REMOTE_URL';
     throw error;
   }
@@ -143,7 +152,7 @@ export function validateRemoteUrlSecurity(url) {
       }
     } catch (e) {
       if (e.code === 'CREDENTIALS_IN_REMOTE_URL') throw e;
-      const error = new Error(`Invalid HTTP/HTTPS remote URL: ${trimmed}`);
+      const error = new Error('Invalid HTTP/HTTPS remote URL.');
       error.code = 'UNSAFE_REMOTE_URL';
       throw error;
     }
@@ -162,13 +171,13 @@ export function validateRemoteUrlSecurity(url) {
       }
       // A hostname starting with '-' would be parsed as an ssh option flag.
       if (!parsed.hostname || parsed.hostname.startsWith('-')) {
-        const error = new Error(`SSH remote URL has an unsafe hostname: ${trimmed}`);
+        const error = new Error('SSH remote URL has an unsafe hostname.');
         error.code = 'UNSAFE_REMOTE_URL';
         throw error;
       }
     } catch (e) {
       if (e.code === 'CREDENTIALS_IN_REMOTE_URL' || e.code === 'UNSAFE_REMOTE_URL') throw e;
-      const error = new Error(`Invalid SSH remote URL: ${trimmed}`);
+      const error = new Error('Invalid SSH remote URL.');
       error.code = 'UNSAFE_REMOTE_URL';
       throw error;
     }
@@ -640,9 +649,11 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
 
   // Check remote source ahead / diverged
   if (remoteSourceHead) {
-    const isLocalAhead = await runGit(cachePath, ['merge-base', '--is-ancestor', remoteSourceHead, sourceLocation.head], { acceptExitCodes: [0, 1, 128] });
+    // 128 is a git fatal (unreadable history), not a topology answer; let it
+    // throw instead of reporting the branch as diverged.
+    const isLocalAhead = await runGit(cachePath, ['merge-base', '--is-ancestor', remoteSourceHead, sourceLocation.head], { acceptExitCodes: [0, 1] });
     if (isLocalAhead.exitCode !== 0) {
-      const isRemoteAhead = await runGit(cachePath, ['merge-base', '--is-ancestor', sourceLocation.head, remoteSourceHead], { acceptExitCodes: [0, 1, 128] });
+      const isRemoteAhead = await runGit(cachePath, ['merge-base', '--is-ancestor', sourceLocation.head, remoteSourceHead], { acceptExitCodes: [0, 1] });
       if (isRemoteAhead.exitCode === 0) {
         const error = new Error('Remote source branch is ahead of local branch.');
         error.code = 'REMOTE_SOURCE_AHEAD';

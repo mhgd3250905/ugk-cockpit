@@ -17,6 +17,28 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'credential.helper=',
   '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
   '-c', 'core.longpaths=true',
+  // Command-line -c overrides repo-local config for the SAME key, but git
+  // resolves the specific protocol.<name>.allow before the generic
+  // protocol.allow — so a hostile repository could otherwise self-authorize
+  // helper transports (ext::) with one repo-local line and execute remote
+  // URLs like `ext::cmd /c ...` on the next push. Deny every non-approved
+  // transport explicitly; file/https/ssh stay allow-listed, mirroring the
+  // URL policy that delivery-ops.mjs enforces.
+  '-c', 'protocol.allow=never',
+  '-c', 'protocol.file.allow=always',
+  '-c', 'protocol.https.allow=always',
+  '-c', 'protocol.ssh.allow=always',
+  '-c', 'protocol.ext.allow=never',
+  '-c', 'protocol.git.allow=never',
+  '-c', 'protocol.http.allow=never',
+  '-c', 'protocol.ftp.allow=never',
+  '-c', 'protocol.ftps.allow=never',
+  '-c', 'core.sshCommand=ssh',
+  '-c', 'ssh.variant=ssh',
+  '-c', 'filter.lfs.clean=',
+  '-c', 'filter.lfs.smudge=',
+  '-c', 'filter.lfs.process=',
+  '-c', 'filter.lfs.required=false',
 ];
 
 export function digest(value) {
@@ -141,12 +163,20 @@ async function observe(cwd, options) {
 async function headRelation(cwd, baselineHead, finalHead, options) {
   if (!baselineHead) return 'unknown';
   if (baselineHead === finalHead) return 'same';
+  // Only 0 (ancestor) and 1 (not an ancestor) answer the topology question.
+  // Exit 128 means git could not read the history at all (a replaced or
+  // shallow repository); reporting that as 'diverged' would persist a factual
+  // claim the probe cannot back. Keep the probe alive so identity checks can
+  // still raise their precise errors, and let completion stay blocked on the
+  // honest 'unknown'.
   const result = await git(
     cwd,
     ['merge-base', '--is-ancestor', baselineHead, finalHead],
     { ...options, acceptExitCodes: [0, 1, 128] },
   );
-  return result.exitCode === 0 ? 'descendant' : 'diverged';
+  if (result.exitCode === 0) return 'descendant';
+  if (result.exitCode === 1) return 'diverged';
+  return 'unknown';
 }
 
 export async function probeGitWorktree(

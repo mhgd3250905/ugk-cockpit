@@ -1,4 +1,5 @@
-import { assertSafeRemoteName, git } from './probe.mjs';
+import { git } from './probe.mjs';
+import { assertSafePushTarget } from './delivery-ops.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -20,7 +21,7 @@ export async function fastForwardMain(worktreePath, sourceCommit, overrides = {}
 }
 
 export async function pushIntegratedMain(worktreePath, { remote, branch, ...overrides }) {
-  assertSafeRemoteName(remote);
+  await assertSafePushTarget(worktreePath, remote, overrides);
   await git(
     worktreePath,
     ['push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],
