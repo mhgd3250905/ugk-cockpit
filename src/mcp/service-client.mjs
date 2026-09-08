@@ -248,6 +248,7 @@ export function createServiceHandlers({
   workingDirectory = process.cwd(),
   conversationIdentity = null,
   connectionHandle = null,
+  shutdownSignal = null,
 }) {
   if (token != null && (typeof token !== 'string' || token.length < 32)) {
     throw new Error('UGK Cockpit local API token is unavailable.');
@@ -355,13 +356,44 @@ export function createServiceHandlers({
       || pathname.startsWith('/api/v1/mcp/submit-notes/')
       || pathname === '/api/v1/mcp/work/submit-note'
     );
+    // Every service attempt is bounded: the loopback service must answer
+    // within one timeout window, and host shutdown must abort in-flight
+    // requests so the process cannot linger on a stalled connection.
+    const timeoutMs = isRecoverableConversationWrite ? 10000 : 30000;
+    const attemptSignal = () => (shutdownSignal
+      ? AbortSignal.any([AbortSignal.timeout(timeoutMs), shutdownSignal])
+      : AbortSignal.timeout(timeoutMs));
+    const ensureBearer = async () => (token ?? scopedToken ?? await bootstrapScopedToken(diagnosticId));
+    // Structured writes keep the retry contract even when the failure happens
+    // during credential bootstrap: transport-typed bootstrap errors already
+    // carry the same-request-id wording and only gain `retryable`, while any
+    // other bootstrap failure is normalized into the full transport error.
+    const guardedBearer = async () => {
+      try {
+        return await ensureBearer();
+      } catch (cause) {
+        if (isStructured) {
+          if (cause?.transportFailure === true) {
+            if (cause.retryable === undefined) cause.retryable = true;
+            throw cause;
+          }
+          throw createIntegrationTransportError(arguments_, cause, diagnosticId);
+        }
+        throw cause;
+      }
+    };
     let response = null;
+    // Fail fast before the first attempt: a credential bootstrap failure must
+    // not lose the structured retry contract for write operations.
+    await guardedBearer();
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const bearer = token ?? scopedToken ?? await bootstrapScopedToken(diagnosticId);
+      // A 401 may have rotated the token or invalidated the scoped token,
+      // so the credential is re-resolved per attempt under the same guard.
+      const bearer = await guardedBearer();
       try {
         response = await fetchImpl(new URL(pathname, baseUrl), {
           method: 'POST',
-          ...(isRecoverableConversationWrite ? { signal: AbortSignal.timeout(10000) } : {}),
+          signal: attemptSignal(),
           headers: {
             authorization: `Bearer ${bearer}`,
             'content-type': 'application/json',

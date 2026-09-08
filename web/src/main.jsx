@@ -43,6 +43,8 @@ import {
   getProjectCardAvatarColorStyle,
   projectAvatarUrl,
 } from './avatar-color.mjs';
+import { copyNoteText } from './copy-note-text.mjs';
+import { completeAssignmentCopy } from './assignment-copy-flow.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
 import './styles.css';
 import './workbench.css';
@@ -803,15 +805,19 @@ function App() {
     }
   }
 
+  const dashboardPollSeqRef = useRef(0);
   useEffect(() => {
     refresh();
     const timer = setInterval(async () => {
+      // 序号守卫：慢响应晚于新响应到达时不得用旧数据覆盖新数据。
+      const sequence = ++dashboardPollSeqRef.current;
       try {
         const data = await api('/api/v1/dashboard');
+        if (sequence !== dashboardPollSeqRef.current) return;
         setDashboard(data);
         setIsStale(false);
       } catch {
-        setIsStale(true);
+        if (sequence === dashboardPollSeqRef.current) setIsStale(true);
       }
     }, 4000);
     return () => clearInterval(timer);
@@ -1102,8 +1108,9 @@ function App() {
     const requestId = current?.requestId;
     if (!projectId || !isCurrentDetailRequest(requestId, projectId)) return;
     setBusy(true);
+    let result;
     try {
-      const result = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/assignments`, {
+      result = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/assignments`, {
         method: 'POST',
         body: JSON.stringify({
           clientRequestId: crypto.randomUUID(),
@@ -1113,14 +1120,8 @@ function App() {
           spaceId: space.spaceId,
         }),
       });
-      if (!isCurrentDetailRequest(requestId, projectId)) return;
-      await navigator.clipboard.writeText(result.message);
-      if (!isCurrentDetailRequest(requestId, projectId)) return;
-      await refreshOpenProjectDetail({
-        message: '开发空间接入消息已复制。',
-        detail: '请把它粘贴给将在该代码位置工作的 Agent。',
-      });
     } catch (error) {
+      setBusy(false);
       if (!isCurrentDetailRequest(requestId, projectId)) return;
       setProjectDetail((previous) => previous ? {
         ...previous,
@@ -1132,9 +1133,20 @@ function App() {
           },
         } : {}),
       } : previous);
-    } finally {
-      setBusy(false);
+      return;
     }
+    if (!isCurrentDetailRequest(requestId, projectId)) { setBusy(false); return; }
+    // Clipboard write and detail refresh are best-effort follow-ups handled by
+    // completeAssignmentCopy: busy stays on until they settle so a double
+    // click cannot re-create the assignment, and a failed refresh keeps the
+    // "generated and copied" fact with a read-only retry.
+    await completeAssignmentCopy({
+      copyText: () => copyNoteText(result.message),
+      refreshDetail: refreshOpenProjectDetail,
+      notify: setNotice,
+      isCurrent: () => isCurrentDetailRequest(requestId, projectId),
+    });
+    setBusy(false);
   }
 
   async function copyIntegrationPrompt(submission) {
@@ -1639,7 +1651,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             <ProjectAvatar
               project={project}
               avatarUrl={project.avatarPath
-                ? `/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?t=${encodeURIComponent(project.avatarPath)}`
+                ? `/api/v1/projects/${encodeURIComponent(effectiveProjectId)}/avatar?path=${encodeURIComponent(project.avatarPath)}`
                 : null}
               size={48}
             />
