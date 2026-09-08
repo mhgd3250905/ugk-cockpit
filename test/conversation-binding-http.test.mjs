@@ -4,7 +4,7 @@ import { realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { openCockpitDatabase } from '../src/core/database.mjs';
+import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../src/core/database.mjs';
 import { registerProject } from '../src/core/projects.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { createServiceHandlers } from '../src/mcp/service-client.mjs';
@@ -56,7 +56,7 @@ test('durable per-request conversations survive restarts, preserve legacy histor
     service = await createCockpitHttpServer({ dbPath, token, port });
     db = openCockpitDatabase(dbPath);
     assert.deepEqual(snapshot(), before);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
     const first = handlers('original');
     let context = await first.ugk_work_context({});
     assert.equal(context.bindingStatus, 'unbound');

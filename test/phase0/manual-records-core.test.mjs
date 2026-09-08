@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { beginCommand } from '../../src/core/command-journal.mjs';
 import { createDevelopmentSpace } from '../../src/core/spaces.mjs';
-import { openCockpitDatabase } from '../../src/core/database.mjs';
+import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../../src/core/database.mjs';
 import {
   readWorkLineStates,
   setProjectArchived,
@@ -96,10 +96,10 @@ test('schema 25 upgrades repeatably and keeps manual records durable across core
 
   downgradeToSchema25(dbPath);
   let db = openCockpitDatabase(dbPath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   assert.equal(
     db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().at(-1).version,
-    26,
+    SUPPORTED_SCHEMA_VERSION,
   );
   assert.equal(db.prepare('SELECT archived_at, archive_revision FROM projects WHERE id = ?').get(projectId).archive_revision, 0);
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_line_states'").get());
@@ -113,7 +113,7 @@ test('schema 25 upgrades repeatably and keeps manual records durable across core
   pending.exec('PRAGMA user_version = 25');
   pending.close();
   db = openCockpitDatabase(dbPath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 26);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   assert.equal(db.prepare('SELECT name FROM projects WHERE id = ?').get(projectId).name, 'Manual records core');
 
   assert.deepEqual(readWorkLineStates(db, projectId), [
