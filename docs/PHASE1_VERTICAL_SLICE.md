@@ -43,6 +43,24 @@
 - `0.1.0-alpha.36`：会话绑定由平台持久保存，支持宿主身份的聊天重连恢复，保留接力代际失效；修复合并中断恢复与自有 Git 索引锁恢复，见 [持久性契约](CONVERSATION_DURABILITY.md)。
 - 当前小步：工作台反馈与复用/移除恢复已合并部署，当前 schema 27；项目归档、手动工作线记录和按工作线查看上下文可用。工作台仍处于试用期，跨机 MCP、托管平台合并 API 和自动清理不在本轮范围。工作副本移除仅由用户明确操作，并保留并发和恢复检查。
 
+### 独立审计修复与复验（2026-09-09）
+
+外部审计在 `b523b386` 基线上确认并修复 7 项缺陷，每项先经真实复现证实，再从根因修复；新增 `test/audit-2026-09-09.test.mjs` 七项回归（审计者用 `git archive main` 验证这些测试在旧代码上逐项失败，确认真实锁定）。
+
+1. **P0 安全（Git 传输协议自授权）**：仓库本地配置 `protocol.ext.allow=always` 配合 `ext::` 远端 URL，可在 Cockpit 的提交、集成及 delivery 探测路径上执行任意命令（已复现命令被执行）。修复：`probe.mjs` 的 `SAFE_GIT_PREFIX` 显式逐协议 deny（ext/git/http/ftp/ftps）并 allow file/https/ssh，`delivery-ops.mjs` 弃用本地副本改用同一前缀；提交与集成 push 在联网前用 `git remote get-url --push` 解析实际推送 URL（覆盖 pushurl/pushInsteadOf 重写与多 URL 远端）并执行与 delivery 相同的 `validateRemoteUrlSecurity`。注意 git 会先读具体键 `protocol.<name>.allow` 再读泛化 `protocol.allow`，仅设泛化键无效。
+2. **P1 凭据卫生**：`validateRemoteUrlSecurity` 四条拒绝消息内嵌原始 URL，畸形 URL 携带的密码进入错误流（已复现）。修复：错误文本不再回显 URL。
+3. **P1 稳定性（MCP stdio EOF）**：宿主关闭 stdin 不触发 onShutdown，in-flight 服务调用不被中止、进程滞留至超时（挂起服务实测滞留 >8 秒）。这正是此前台账记录“宿主 stdin EOF 自动触发中止未完成”的遗留项，本轮完成：readline `close` 接线到与 `close()` 相同的幂等 shutdown 路径；stdout/stderr 挂 error 监听并用 try/catch 包裹写出，防宿主销毁管道时 EPIPE 崩溃。
+4. **P1 契约（传输层过窄）**：HTTP 64KB 上限小于 stdio 网关/核心对 relay/handoff（约 2.9MB）、finish acknowledgements（约 400KB）、preflight files（约 205KB）等合法载荷的宽度，大载荷必被 413 拒绝且“原样重放”承诺失效（复审实证）。修复：全部 MCP 工具路由统一以 18MB 上限读取（覆盖最坏 `\uXXXX` 转义），session bootstrap 与浏览器路由保持 64KB。
+5. **P2 数据诚实**：probe 的 `headRelation` 把 merge-base exit 128（历史不可读）折叠为 `diverged`。修复：128 归类为 `unknown`，完成门禁保持 fail-closed，被替换仓库场景仍返回精确的 `WORKTREE_IDENTITY_CHANGED`；delivery-ops 两处同型 merge-base 不再接受 128 当拓扑答案。
+6. **P2 可用性（delivery index 锁）**：acquire 写失败遗留半写锁文件，同进程（pid 存活）永远无法回收；release 抛错会掩盖 finally 之前的真实业务结果。修复：acquire 失败时清理自建工件（带 dev:ino 身份核对）；release 改为尽力而为、不抛错。
+7. **P2 资源**：MCP 桥 401 重试路径在确认发起第二次请求后显式取消被弃响应体，避免 keep-alive 连接滞留至 GC。
+
+2026-09-09 于本分支复验：`npm test` **449/449**（507.73 秒）、`npm run test:phase0` **97/97**，全部通过，无失败或跳过。独立审查线程（只读）按需求完整性、逻辑正确性、边界情况、代码质量、测试覆盖、实际运行六维复核；其提出的两项必须修复（delivery 前缀缺口、finish 路由上限）与 pushInsteadOf 绕过已修复并补测，一项“终轮 401 未消费”经核实为误报（两条响应路径都会读取 body）。版本保持 `0.1.0-alpha.39`，schema 不变。
+
+审计证实但记录为残留/后续项：push 超时只杀死直接 git 子进程，ssh 等孙进程可完成传输导致“报失败但远端已更新”（需进程组方案）；saveDelivery 复制→rename 覆盖 index 窗口内用户并发暂存可被静默回滚（工作区文件无损）；MCP 声明支持 2025-03-26 协议但拒绝批次数组（如需兼容须实现批处理分发）；stdio 行读取无单行长度上限；会话身份 (host, id) 由宿主元数据声明、本机进程可伪造，本地信任模型内为既有边界，跨信任域部署前必须重评；`web/src/assignment-copy-flow.mjs` 重试成功后旧失败提示未清理（既有 P3，未动）；`core.sshCommand=ssh` 会覆盖仓库本地自定义 ssh 命令（与既有中和全局配置的路线一致）。
+
+审计同时证伪以下怀疑，不改代码：目标环境（Windows/Node 24.15）execFile 超时返回 `code=null/signal=SIGTERM`，与退出码 1 可区分；Git 2.50 中仓库本地 `url.*.insteadOf`/`pushInsteadOf` 不会劫持 fetch 校验层可见的 URL（push 侧已由 `--push` 校验覆盖）；`_meta.threadId` 非字符串硬失败是测试覆盖的显式 fail-closed 契约。
+
 ### 工作台反馈合并、部署与收束（2026-09-08）
 
 阶段基线为本轮复审开始时 main 的 `990e231c40378e3ace68df27c08ae9fe8722378d`；复审及合并 HEAD 为 `b523b38602905d739c4540d0291b8466e66d74bb`。基线是 HEAD 祖先，增量为 5 个提交、32 个路径，涉及工作台界面、手动记录、工作线上下文、Git 工作副本操作、schema 26/27、恢复契约及回归测试。用户授权后 main 无冲突快进并普通推送，远端 SHA 一致。
