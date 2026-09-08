@@ -86,6 +86,16 @@ import { createDiagnosticLogger, readRecentSessionDiagnostics } from './diagnost
 import { VERSION } from '../version.mjs';
 
 const MAX_BODY_BYTES = 64 * 1024;
+// MCP tool payloads are admitted by the stdio gate up to the core persistence
+// contracts: relay/handoff carry 3 text fields × 20k chars + 7 list fields ×
+// 100 × 4k chars (~2.9MB), finish acknowledgements 100 × 4k, preflight files
+// 200 × 1k, submit-note bodies 20k — all before JSON escaping, which can
+// multiply a worst-case payload again (control chars cost 6 bytes each). The
+// transport must stay wider than the widest legal payload or both the first
+// request and its verbatim idempotent replay would die in transit, so every
+// authenticated MCP tool route reads with this bound; the session bootstrap
+// and browser routes keep the tight default.
+const MCP_PAYLOAD_LIMIT = 18 * 1024 * 1024;
 const MCP_SESSION_LIMIT = 64;
 const MCP_SESSION_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../dist/web', import.meta.url));
@@ -2160,12 +2170,12 @@ function legacyBridgeBindingMatches(state, binding) {
     && current.acceptedRevision === bound.acceptedRevision;
 }
 
-async function readJson(request) {
+async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       const error = new Error('Request body is too large.');
       error.code = 'REQUEST_TOO_LARGE';
       throw error;
@@ -2174,6 +2184,11 @@ async function readJson(request) {
   }
   if (size === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+// Every authenticated MCP tool route reads with the stdio-contract width.
+function readMcpBody(request) {
+  return readJson(request, { maxBytes: MCP_PAYLOAD_LIMIT });
 }
 
 async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
@@ -3949,7 +3964,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/context') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpContextBody(body);
         if (body.confirmSessionId !== undefined && authentication.kind === 'mcp' && !identity) {
           sendError(response, 'CONVERSATION_IDENTITY_REQUIRED'); return;
@@ -3977,7 +3992,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/accept') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         requireString(body, 'dispatchCode');
         requireString(body, 'clientRequestId');
         const context = readDispatchContext(db, body);
@@ -4049,7 +4064,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/begin') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpBeginBody(body);
         assertConversationWrite(key, body.sessionId, ['active', 'accepted']);
         const context = readSessionContext(db, body.sessionId);
@@ -4098,7 +4113,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/init') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpInitBody(body);
         const dispatchRequest = {
           dispatchCode: body.initCode,
@@ -4184,7 +4199,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/relay') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpRelayBody(body);
         assertConversationWrite(key, body.sessionId, ['active', 'awaiting_resume']);
         let gitEvidence = {};
@@ -4228,7 +4243,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/resume') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpResumeBody(body);
         const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
         const result = resumeRelay(db, {
@@ -4252,7 +4267,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/takeover') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpTakeoverBody(body);
         if (conversationBinding?.bindingKind !== 'host') {
           sendError(response, 'CONVERSATION_IDENTITY_REQUIRED');
@@ -4286,7 +4301,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/progress') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpProgressBody(body);
         assertConversationWrite(key, body.sessionId);
         let gitEvidence = {};
@@ -4319,7 +4334,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit/preflight') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         const invalid = validateDeliveryRequest(body, 'preflight', { bridge: true });
         if (invalid) { sendError(response, 'INVALID_REQUEST'); return; }
         assertConversationWrite(key, body.sessionId);
@@ -4377,7 +4392,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         const invalid = validateDeliveryRequest(body, 'submit', { bridge: true });
         if (invalid) {
           sendJson(response, 200, deliveryResponse({ ok: false, code: body.preflightId ? 'INVALID_REQUEST' : 'DELIVERY_PREFLIGHT_REQUIRED', localSaved: false, pushed: false }));
@@ -4393,7 +4408,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/submit-note') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         try {
           validateSubmitNoteBody(body);
           const result = await createSubmitNote(db, body, { faultInjector, conversationKey: key });
@@ -4409,7 +4424,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/submit-notes/get') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         try {
           validateSubmitNoteGetBody(body);
           const result = await readSubmitNote(db, body);
@@ -4426,7 +4441,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/submit-notes/update') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         try {
           validateSubmitNoteUpdateBody(body);
           const result = await updateSubmitNote(db, body, { faultInjector });
@@ -4445,7 +4460,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/begin') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpIntegrationBody(body, 'begin');
         assertConversationWrite(key, body.sessionId);
         const result = await beginIntegrationReview(db, {
@@ -4458,7 +4473,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/review') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpIntegrationBody(body, 'review');
         assertConversationWrite(key, body.sessionId);
         const result = await recordSessionIntegrationReview(db, {
@@ -4471,7 +4486,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/integration/merge') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpIntegrationBody(body, 'merge');
         assertConversationWrite(key, body.sessionId);
         const result = await mergeApprovedSubmission(db, {
@@ -4491,7 +4506,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/finish') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpFinishBody(body);
         assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         const context = readSessionContext(db, body.sessionId);
@@ -4548,7 +4563,7 @@ export async function createCockpitHttpServer({
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/handoff') {
-        const body = await readJson(request);
+        const body = await readMcpBody(request);
         validateMcpHandoffBody(body);
         assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
         const context = readSessionContext(db, body.sessionId);

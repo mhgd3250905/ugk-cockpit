@@ -423,6 +423,10 @@ export function createServiceHandlers({
       } else {
         scopedToken = null;
       }
+      // Reaching here means a second attempt will replace this response.
+      // Release the abandoned 401 body so the keep-alive connection can
+      // return to the pool instead of waiting for garbage collection.
+      try { await response.body?.cancel(); } catch {}
     }
     if (isStructured) {
       let body;
