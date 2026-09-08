@@ -186,14 +186,17 @@ export function validateRemoteUrlSecurity(url) {
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
       throw error;
     }
-    // host:path form — the host must not start with '-' (ssh option injection).
-    const hostPort = trimmed.slice(atIndex + 1);
-    const colonIndex = hostPort.indexOf(':');
-    const host = colonIndex === -1 ? '' : hostPort.slice(0, colonIndex);
-    if (!host || host.startsWith('-')) {
-      const error = new Error(`Remote URL has an unsafe host: ${trimmed}`);
-      error.code = 'UNSAFE_REMOTE_URL';
-      throw error;
+    // A '@' inside a local path (e.g. ./remotes@work/repo.git) never reaches
+    // ssh, so the dash-host rule only applies to genuine remote specs.
+    if (!isLocalPath(trimmed)) {
+      const hostPort = trimmed.slice(atIndex + 1);
+      const colonIndex = hostPort.indexOf(':');
+      const host = colonIndex === -1 ? '' : hostPort.slice(0, colonIndex);
+      if (!host || host.startsWith('-')) {
+        const error = new Error(`Remote URL has an unsafe host: ${trimmed}`);
+        error.code = 'UNSAFE_REMOTE_URL';
+        throw error;
+      }
     }
   }
 }

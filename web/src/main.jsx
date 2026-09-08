@@ -44,6 +44,7 @@ import {
   projectAvatarUrl,
 } from './avatar-color.mjs';
 import { copyNoteText } from './copy-note-text.mjs';
+import { completeAssignmentCopy } from './assignment-copy-flow.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
 import './styles.css';
 import './workbench.css';
@@ -1135,28 +1136,17 @@ function App() {
       return;
     }
     if (!isCurrentDetailRequest(requestId, projectId)) { setBusy(false); return; }
-    // Clipboard access is best-effort and separate from assignment creation:
-    // a denied write must never claim the assignment was not generated, and
-    // retrying creation would mint a duplicate pending assignment. Busy stays
-    // on until the copy attempt finishes so a double click cannot re-create.
-    const copied = await copyNoteText(result.message).catch(() => false);
-    setBusy(false);
-    if (!isCurrentDetailRequest(requestId, projectId)) return;
-    if (copied === true) {
-      await refreshOpenProjectDetail({
-        message: '开发空间接入消息已复制。',
-        detail: '请把它粘贴给将在该代码位置工作的 Agent。',
-      });
-      return;
-    }
-    setNotice({
-      tone: 'error',
-      message: '开发空间接入消息已生成，但无法自动写入剪贴板。',
-      impact: '接入指令已创建且仍然有效，代码没有变化。',
-      required_action: '点击“重试复制”再次尝试；仍失败时在该开发空间卡片重新生成接入指令并手动复制。',
-      actionLabel: '重试复制',
-      retry: () => { copyNoteText(result.message).catch(() => {}); },
+    // Clipboard write and detail refresh are best-effort follow-ups handled by
+    // completeAssignmentCopy: busy stays on until they settle so a double
+    // click cannot re-create the assignment, and a failed refresh keeps the
+    // "generated and copied" fact with a read-only retry.
+    await completeAssignmentCopy({
+      copyText: () => copyNoteText(result.message),
+      refreshDetail: refreshOpenProjectDetail,
+      notify: setNotice,
+      isCurrent: () => isCurrentDetailRequest(requestId, projectId),
     });
+    setBusy(false);
   }
 
   async function copyIntegrationPrompt(submission) {

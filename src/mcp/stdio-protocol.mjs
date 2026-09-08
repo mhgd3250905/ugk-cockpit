@@ -337,10 +337,10 @@ export const TOOLS = [
         },
         acknowledgements: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'Optional list of acknowledgements or receipts'
         }
@@ -387,64 +387,64 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of key decisions made'
         },
         artifactRefs: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'List of suggested skills for next session'
         },
         acknowledgements: {
           type: 'array',
-          maxItems: 8,
+          maxItems: 100,
           items: {
               type: 'string',
-              maxLength: 500
+              maxLength: 4000
           },
           description: 'Optional verified commit:<sha> references or unattributed_changes confirmation'
         }
@@ -555,32 +555,32 @@ export const TOOLS = [
         },
         completedItems: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of completed items'
         },
         pendingItems: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of pending items'
         },
         decisions: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of key decisions'
         },
         artifactRefs: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of artifact references or paths'
         },
         risks: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of identified risks or caveats'
         },
         suggestedSkills: {
           type: 'array',
-          maxItems: 8, items: { type: 'string', maxLength: 500 },
+          maxItems: 100, items: { type: 'string', maxLength: 4000 },
           description: 'List of suggested skills for the next conversation'
         }
       },
@@ -664,10 +664,14 @@ const HANDOFF_ARRAY_FIELDS = [
   'suggestedSkills'
 ];
 
-// Matches the progress.details contract and the JSON Schema bounds: relay and
-// handoff payloads carry bounded structured lists, not free-form bulk data.
-const ARRAY_FIELD_MAX_ITEMS = 8;
-const ARRAY_ITEM_MAX_LENGTH = 500;
+// Relay and handoff list fields follow the core persistence contract
+// (MAX_LIST_ITEMS / MAX_ITEM_LENGTH in src/core/relays.mjs and handoffs.mjs).
+// The MCP gate must stay exactly as wide: a persisted request whose reply was
+// lost has to replay verbatim through validation into the idempotency layer —
+// any narrower bound would make an old 101+-item or long-item payload
+// permanently unrecoverable, and trimming it would break the frozen digest.
+const ARRAY_FIELD_MAX_ITEMS = 100;
+const ARRAY_ITEM_MAX_LENGTH = 4_000;
 
 function isStringArray(val) {
   return Array.isArray(val)

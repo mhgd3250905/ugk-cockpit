@@ -168,7 +168,7 @@ test('push helpers reject remote nicknames that parse as git options', async () 
   );
 });
 
-test('remote URL validation rejects dash-leading ssh hostnames', () => {
+test('remote URL validation rejects dash-leading ssh hostnames but keeps local paths with @', () => {
   assert.throws(
     () => validateRemoteUrlSecurity('ssh://git@--oProxyCommand=calc/x'),
     { code: 'UNSAFE_REMOTE_URL' },
@@ -179,6 +179,9 @@ test('remote URL validation rejects dash-leading ssh hostnames', () => {
   );
   validateRemoteUrlSecurity('ssh://git@github.com/owner/repo.git');
   validateRemoteUrlSecurity('git@github.com:owner/repo.git');
+  // Local paths that merely contain '@' never reach ssh and must keep passing.
+  validateRemoteUrlSecurity('./remotes@work/repo.git');
+  validateRemoteUrlSecurity('/tmp/cache@a');
 });
 
 test('requests carrying an id are answered even when the method name looks like a notification', async () => {
@@ -192,37 +195,81 @@ test('requests carrying an id are answered even when the method name looks like 
   assert.equal(response.id, 7);
 });
 
-test('handoff and relay array arguments are bounded like progress details', async () => {
-  const oversized = Array.from({ length: 9 }, (_, index) => `item-${index}`);
+test('relay list arguments keep the core 100x4000 contract so persisted requests can replay', async () => {
+  // A persisted relay whose reply was lost must pass MCP validation verbatim:
+  // the core contract (MAX_LIST_ITEMS=100, MAX_ITEM_LENGTH=4000 in
+  // src/core/relays.mjs) is deliberately wider than progress.details.
+  const nineItems = Array.from({ length: 9 }, (_, index) => `item-${index}`);
+  const longItem = 'x'.repeat(600);
+  const relayed = [];
   const response = await dispatchMessage({
     jsonrpc: '2.0',
-    id: 1,
+    id: 2,
     method: 'tools/call',
     params: {
-      name: 'ugk_work_handoff',
+      name: 'ugk_work_relay',
       arguments: {
         sessionId: 'session-x',
-        clientRequestId: 'cr-x',
+        clientRequestId: 'cr-replay-1',
         expectedRevision: 1,
-        outcome: 'completed',
-        summary: 'summary',
         nextSessionFocus: 'focus',
+        summary: 'summary',
         currentState: 'state',
-        completedItems: oversized,
-        pendingItems: [], decisions: [], artifactRefs: [], risks: [], suggestedSkills: [],
+        completedItems: nineItems,
+        pendingItems: [longItem],
+        decisions: [], artifactRefs: [], risks: [], suggestedSkills: [],
+      },
+    },
+  }, {
+    handlers: {
+      ugk_work_relay: async (args) => {
+        relayed.push(args);
+        return { ok: true };
       },
     },
   });
-  assert.equal(response.result.isError, true);
-  assert.match(response.result.content[0].text, /completedItems/);
+  assert.equal(response.result.isError, undefined, 'a 9-item/600-char relay must pass validation');
+  assert.equal(relayed.length, 1, 'the request must reach the handler for idempotent replay');
+  assert.equal(relayed[0].completedItems.length, 9);
 
+  // The core bounds still apply: 101 items and 4001-char items are rejected.
+  const tooMany = Array.from({ length: 101 }, (_, index) => `item-${index}`);
+  const tooLong = 'x'.repeat(4001);
+  for (const [field, value] of [['completedItems', tooMany], ['pendingItems', [tooLong]]]) {
+    const rejected = await dispatchMessage({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'ugk_work_relay',
+        arguments: {
+          sessionId: 'session-x',
+          clientRequestId: 'cr-replay-2',
+          expectedRevision: 1,
+          nextSessionFocus: 'focus',
+          summary: 'summary',
+          currentState: 'state',
+          completedItems: [], pendingItems: [], decisions: [], artifactRefs: [], risks: [], suggestedSkills: [],
+          [field]: value,
+        },
+      },
+    });
+    assert.equal(rejected.result.isError, true, `${field} beyond the core bound must be rejected`);
+  }
+
+  // progress.details keeps its own tighter 8x500 contract.
   for (const tool of TOOLS) {
     const properties = tool.inputSchema?.properties ?? {};
     for (const [name, schema] of Object.entries(properties)) {
       if (schema?.type !== 'array') continue;
       if (name === 'files' || name === 'findings' || name === 'checks' || name === 'references') continue;
-      assert.ok(schema.maxItems, `${tool.name}.${name} must declare maxItems`);
-      assert.equal(schema.items?.maxLength, 500, `${tool.name}.${name} items must declare maxLength`);
+      if (tool.name === 'ugk_work_progress' && name === 'details') {
+        assert.equal(schema.maxItems, 8, 'progress.details keeps the 8-item bound');
+        assert.equal(schema.items?.maxLength, 500, 'progress.details keeps the 500-char bound');
+        continue;
+      }
+      assert.equal(schema.maxItems, 100, `${tool.name}.${name} must match the core 100-item bound`);
+      assert.equal(schema.items?.maxLength, 4000, `${tool.name}.${name} must match the core 4000-char bound`);
     }
   }
 });
