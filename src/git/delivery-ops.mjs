@@ -94,32 +94,41 @@ export async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_
   }
 }
 
-export function isLocalPath(rawUrl) {
+export function isLocalPath(rawUrl, cwd = null) {
   if (rawUrl.startsWith('file://')) return true;
   if (/^[a-zA-Z]:[\\/]/.test(rawUrl)) return true;
   if (rawUrl.startsWith('/') || rawUrl.startsWith('\\\\')) return true;
   if (rawUrl.startsWith('./') || rawUrl.startsWith('../') || rawUrl.startsWith('.\\') || rawUrl.startsWith('..\\')) return true;
-  return existsSync(rawUrl);
+  // A bare relative remote (e.g. remotes/local.git) is resolved by git against
+  // the worktree the command runs in — never against this service process's
+  // working directory.
+  return existsSync(cwd ? path.resolve(cwd, rawUrl) : rawUrl);
 }
 
-// A push follows remote.<name>.pushurl or pushInsteadOf-rewritten URLs, which
-// plain `remote get-url` does not surface. `--push` prints every URL the push
-// would actually use (one per line for multi-URL remotes); each must satisfy
-// the same transport policy as the delivery flow: no ext::/helper transports,
-// no embedded credentials, no ssh option hostnames.
+// A push contacts every pushurl (or every url when no pushurl is set), and
+// resolves any pushInsteadOf rewrite first. `git remote get-url --push --all`
+// enumerates exactly those destinations; plain get-url prints only the first
+// one, which let a hostile repository hide a self-authorized custom helper
+// behind a safe-looking entry. Each destination must satisfy the same
+// transport policy as the delivery flow — no helper transports, no embedded
+// credentials, no ssh option hostnames — before any network operation starts.
 export async function assertSafePushTarget(worktreePath, remote, overrides = {}) {
   assertSafeRemoteName(remote);
-  const resolved = await runGit(worktreePath, ['remote', 'get-url', '--push', remote], overrides);
+  const resolved = await runGit(
+    worktreePath,
+    ['remote', 'get-url', '--push', '--all', remote],
+    overrides,
+  );
   const urls = resolved.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   if (urls.length === 0) {
     const error = new Error('Push remote has no URL.');
     error.code = 'UNSAFE_REMOTE_URL';
     throw error;
   }
-  for (const url of urls) validateRemoteUrlSecurity(url);
+  for (const url of urls) validateRemoteUrlSecurity(url, { cwd: worktreePath });
 }
 
-export function validateRemoteUrlSecurity(url) {
+export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
   if (typeof url !== 'string' || !url.trim()) {
     const error = new Error('Remote URL is empty or invalid.');
     error.code = 'UNSAFE_REMOTE_URL';
@@ -127,7 +136,7 @@ export function validateRemoteUrlSecurity(url) {
   }
   const trimmed = url.trim();
   if (trimmed.startsWith('-') || /[\0\r\n]/.test(trimmed)
-    || (!isLocalPath(trimmed) && !/^https:\/\//i.test(trimmed) && !/^ssh:\/\//i.test(trimmed)
+    || (!isLocalPath(trimmed, cwd) && !/^https:\/\//i.test(trimmed) && !/^ssh:\/\//i.test(trimmed)
       && !/^(git@)?[a-zA-Z0-9.-]+:[^/\\]/.test(trimmed))) {
     throw Object.assign(new Error('Unsupported remote transport'), { code: 'UNSAFE_REMOTE_URL' });
   }
@@ -190,14 +199,14 @@ export function validateRemoteUrlSecurity(url) {
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
       throw error;
     }
-    if (userPart !== 'git' && !isLocalPath(trimmed)) {
+    if (userPart !== 'git' && !isLocalPath(trimmed, cwd)) {
       const error = new Error('Remote URL contains unrecognized credentials.');
       error.code = 'CREDENTIALS_IN_REMOTE_URL';
       throw error;
     }
     // A '@' inside a local path (e.g. ./remotes@work/repo.git) never reaches
     // ssh, so the dash-host rule only applies to genuine remote specs.
-    if (!isLocalPath(trimmed)) {
+    if (!isLocalPath(trimmed, cwd)) {
       const hostPort = trimmed.slice(atIndex + 1);
       const colonIndex = hostPort.indexOf(':');
       const host = colonIndex === -1 ? '' : hostPort.slice(0, colonIndex);
@@ -211,11 +220,11 @@ export function validateRemoteUrlSecurity(url) {
 }
 
 export function normalizeRemoteIdentity(rawUrl, cwd = process.cwd()) {
-  validateRemoteUrlSecurity(rawUrl);
+  validateRemoteUrlSecurity(rawUrl, { cwd });
   const trimmed = rawUrl.trim();
 
   // Local filesystem or file:// URL
-  if (isLocalPath(trimmed)) {
+  if (isLocalPath(trimmed, cwd)) {
     let localPath = trimmed;
     if (localPath.startsWith('file://')) {
       localPath = localPath.slice(7);
@@ -357,11 +366,11 @@ export async function readDeliveryLocation(cwd, { files = null } = {}) {
     const urlRes = await runGit(cwd, ['config', '--get-all', `remote.${name}.url`], { acceptExitCodes: [0, 1] });
     const url = urlRes.stdout.trim();
     if (url) {
-      validateRemoteUrlSecurity(url);
+      validateRemoteUrlSecurity(url, { cwd });
       const identity = normalizeRemoteIdentity(url, cwd);
       const push = await runGit(cwd, ['config', '--get-all', `remote.${name}.pushurl`], { acceptExitCodes: [0, 1] });
       if (push.stdout && push.stdout !== url) throw Object.assign(new Error('Separate push destination needs explicit reconciliation'), { code: 'REMOTE_IDENTITY_CHANGED' });
-      const localPath = isLocalPath(url) ? (url.startsWith('file:') ? fileURLToPath(url) : path.resolve(cwd, url)) : null;
+      const localPath = isLocalPath(url, cwd) ? (url.startsWith('file:') ? fileURLToPath(url) : path.resolve(cwd, url)) : null;
       if (localPath && !existsSync(localPath)) throw Object.assign(new Error('Local remote is unavailable'), { code: 'REMOTE_SOURCE_UNREACHABLE' });
       remotes.push({ name, url: localPath ? realpathSync(localPath) : url, identity });
     }
