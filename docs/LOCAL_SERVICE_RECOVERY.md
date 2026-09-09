@@ -1,5 +1,13 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.40 本机升级验收（2026-09-09）
+
+用户要求查看已发布的使用指南后，先核对旧服务返回 alpha.39，数据库与接口中的 7 个项目及全部详情一致。使用 SQLite backup API 创建 `backups/before-alpha40-2026-09-09T07-03-26-464Z.db`（相对本机 `.data/service`），备份包含 7 个项目，完整性检查 `ok`、外键错误 0。
+
+在发布提交 `b31618c51dbc7752d0d6302ca6059dbe3539a9af` 上，使用既有启动器及已通过构建的网页资源：`scripts/launch-cockpit.ps1 -RepoDirectory E:/AII/ugk-cockpit -DataDirectory E:/AII/ugk-cockpit/.data/service -SkipBuild -NoPause`。启动器核验后停止旧 PID 26568，以隐藏窗口启动 PID 31868，继续使用原数据目录；本次沿用 schema 27，没有新增迁移、覆盖数据库、重新 init 或重新添加项目。
+
+启动器再次核对 7 个已有项目及全部详情；07:03 UTC 的 `/health` 返回 `0.1.0-alpha.40`。已打开 `http://127.0.0.1:41737/#/guide`，用户随后确认页面正常。PID、时间及数量仅表示本次验收时点；没有据此声称所有 Agent 宿主已更新插件或重载技能。
+
 ## schema 27 主项目服务切换（2026-09-08）
 
 用户授权合并并重启后，main 从 `990e231c40378e3ace68df27c08ae9fe8722378d` 快进到复审通过的 `b523b38602905d739c4540d0291b8466e66d74bb`，普通推送后远端 main SHA 一致。启动前核对分支服务 PID 39352 的命令行，入口为 `E:/AII-Bug-Fix/BUG-Cockpit/src/main.mjs`，数据仍在主项目 `.data/service`；7 个已有项目及全部详情正常。
