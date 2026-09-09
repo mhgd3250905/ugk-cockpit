@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
-import { closeSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -346,4 +346,90 @@ test('transport accepts finish acknowledgements at the stdio gate width', async 
   assert.equal(finished.ok, true);
   assert.equal(finished.cockpitVerified, true);
   assert.equal(finished.status, 'completed');
+});
+
+function remoteHeadOrNull(barePath) {
+  try {
+    return execFileSync('git', ['--git-dir', barePath, 'rev-parse', 'refs/heads/main'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+test('a safe first pushurl must not let a later helper-transport pushurl execute', async (t) => {
+  const base = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-multiurl-'));
+  t.after(() => {
+    try { rmSync(base, { recursive: true, force: true }); } catch {}
+  });
+  const repo = path.join(base, 'repo');
+  const bare = path.join(base, 'good.git');
+  const helperDir = path.join(base, 'bin');
+  mkdirSync(helperDir);
+  gitSync(base, ['init', '--bare', '-b', 'main', bare]);
+  gitSync(base, ['init', '-b', 'main', repo]);
+  gitSync(repo, ['config', 'user.email', 'ugk@example.invalid']);
+  gitSync(repo, ['config', 'user.name', 'UGK Test']);
+  writeFileSync(path.join(repo, 'a.txt'), 'content');
+  gitSync(repo, ['add', 'a.txt']);
+  gitSync(repo, ['commit', '--quiet', '-m', 'init']);
+  gitSync(repo, ['remote', 'add', 'origin', bare]);
+  // git pushes to EVERY pushurl: the first destination is legitimate, the
+  // second hides a self-authorized custom helper behind a safe-looking entry.
+  gitSync(repo, ['config', '--add', 'remote.origin.pushurl', bare]);
+  gitSync(repo, ['config', '--add', 'remote.origin.pushurl', 'auditprobe::target']);
+  gitSync(repo, ['config', 'protocol.auditprobe.allow', 'always']);
+
+  const helperScript = path.join(helperDir, 'git-remote-auditprobe');
+  writeFileSync(helperScript, '#!/bin/sh\necho PWNED > "$0.marker"\nexit 0\n');
+  chmodSync(helperScript, 0o755);
+  const marker = `${helperScript}.marker`;
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${helperDir}${path.delimiter}${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+
+  await assert.rejects(
+    () => pushSubmissionBranch(repo, { remote: 'origin', branch: 'main' }),
+    (error) => error.code === 'UNSAFE_REMOTE_URL',
+  );
+  assert.equal(existsSync(marker), false,
+    'validation must reject the helper-transport pushurl before any push starts');
+  assert.equal(remoteHeadOrNull(bare), null,
+    'a rejected multi-destination push must not have contacted the first (safe) destination either');
+
+  await assert.rejects(
+    () => pushIntegratedMain(repo, { remote: 'origin', branch: 'main' }),
+    (error) => error.code === 'UNSAFE_REMOTE_URL',
+  );
+  assert.equal(existsSync(marker), false);
+  assert.equal(remoteHeadOrNull(bare), null);
+});
+
+test('a worktree-relative remote path is resolved against the worktree, not the service cwd', async (t) => {
+  const repo = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-relurl-'));
+  t.after(() => {
+    try { rmSync(repo, { recursive: true, force: true }); } catch {}
+  });
+  const bare = path.join(repo, 'remotes', 'local.git');
+  mkdirSync(path.dirname(bare));
+  gitSync(repo, ['init', '--bare', '-b', 'main', bare]);
+  gitSync(repo, ['init', '-b', 'main', repo]);
+  gitSync(repo, ['config', 'user.email', 'ugk@example.invalid']);
+  gitSync(repo, ['config', 'user.name', 'UGK Test']);
+  writeFileSync(path.join(repo, 'a.txt'), 'content');
+  gitSync(repo, ['add', 'a.txt']);
+  gitSync(repo, ['commit', '--quiet', '-m', 'init']);
+  // No ./ prefix: git resolves this relative remote against its own cwd (the
+  // worktree), and the validation must do the same instead of consulting the
+  // service process's working directory.
+  gitSync(repo, ['remote', 'add', 'origin', 'remotes/local.git']);
+  assert.notEqual(process.cwd(), repo, 'fixture assumes the test process runs outside the worktree');
+
+  await pushSubmissionBranch(repo, { remote: 'origin', branch: 'main' });
+  const localHead = gitSync(repo, ['rev-parse', 'refs/heads/main']);
+  assert.equal(remoteHeadOrNull(bare), localHead,
+    'a legitimate worktree-relative remote must still receive the push');
+
+  await pushIntegratedMain(repo, { remote: 'origin', branch: 'main' });
+  assert.equal(remoteHeadOrNull(bare), localHead);
 });
