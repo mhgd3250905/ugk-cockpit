@@ -1,0 +1,7 @@
+{
+  "name": "ugk-cockpit",
+  "version": "0.1.0",
+  "description": "通过对话使用 UGK Cockpit 工作台、记录项目进展并跨聊天接力。",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

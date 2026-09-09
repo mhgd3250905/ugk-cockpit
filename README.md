@@ -4,19 +4,23 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 ## 让 Agent 帮你安装
 
-把本仓库地址发给 Codex，并说：
+把本仓库地址发给 Codex 或 ZCode，并说：
 
 > 帮我按照 docs/AGENT_INSTALL.md 安装 UGK Cockpit，包括全部技能、MCP 连接和本机服务。验证完成后，带我开始使用。
 
-已有本仓库的 Windows 用户，也可以在程序目录执行：
+已有本仓库的 Windows 用户，也可以在程序目录执行对应命令：
 
 ```powershell
+# Codex
 npm run setup:codex
+
+# ZCode
+npm run setup:zcode
 ```
 
-安装器将准备工作台、安装包含全部技能和 MCP 的 Codex 插件，并复用已经正常运行的服务。若当前聊天需要重新连接才能加载工具，会明确提示；实际调用验证通过后才算可以使用。之后直接说“帮我打开 Cockpit”或“这个工具怎么用”即可。
+安装器将准备工作台、安装包含全部技能和 MCP 的对应宿主插件，并复用已经正常运行的服务。若当前聊天需要重新连接才能加载工具，会明确提示；实际调用验证通过后才算可以使用。之后直接说“帮我打开 Cockpit”或“这个工具怎么用”即可。
 
-首版支持 Windows + Codex，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
+目前提供 Windows 下 Codex 和 ZCode 两个安装入口，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
 
 2026-09-06 已按工作台试用反馈调整项目卡片、宽屏比例、时间线摘要、返回导航及 Logo，并修复提示语与加载占位重叠。完整问题清单和验证结果见 [工作台试用反馈](docs/WORKBENCH_FEEDBACK.md)。
 
@@ -86,7 +90,7 @@ stdio 入口通过服务已有的本机 MCP 认证通道获取凭据，不读取
 npm run mcp
 ```
 
-手动接入 Codex、ZCode 或 Antigravity 时，stdio 配置执行 `node <仓库绝对路径>\src\mcp\main.mjs`。新的 Codex 安装入口通过宿主原生插件命令注册 MCP，无需用户填写程序路径；其他宿主仍需按各自配置方式接入。
+手动接入时，stdio 配置执行 `node <仓库绝对路径>\src\mcp\main.mjs`。Codex 和 ZCode 安装入口通过各自宿主原生插件接口注册 MCP，无需用户填写程序路径；其他宿主仍需按各自配置方式接入。
 
 ## 配套 Skills
 
