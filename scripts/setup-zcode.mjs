@@ -99,8 +99,8 @@ export async function setupZcode(options = {}, dependencies = {}) {
   const legacy = deps.inspect();
   if (legacy.skills.length || legacy.mcp) return { status: 'migration_needed', standaloneSkills: legacy.skills,
     standaloneMcp: legacy.mcp, nextAction: 'Review and back up the existing standalone Cockpit installation before switching to the plugin. Existing configuration was not changed.' };
-  await deps.service({ dryRun: true });
-  if (options.dryRun) return { status: 'plan', steps: ['prepare plugin', 'verify service', 'register native ZCode marketplace and plugin', 'verify tools in current host'] };
+  const preflight = await deps.service({ dryRun: true });
+  if (options.dryRun) return { status: 'plan', dataDirectory: preflight?.dataDirectory, steps: ['prepare plugin', 'verify service', 'register native ZCode marketplace and plugin', 'verify tools in current host'] };
   const bundle = await deps.build({ outputRoot: options.outputRoot ?? path.join(process.env.LOCALAPPDATA, 'UGK Cockpit', 'zcode-plugin-packages') });
   const service = await deps.service();
   const client = deps.connect({ cli });
@@ -116,6 +116,7 @@ export async function setupZcode(options = {}, dependencies = {}) {
     if (!visible || visible.enabled !== true || visible.version !== bundle.version || visible.skillCount !== COCKPIT_SKILL_NAMES.length
       || !visible.mcpServerNames?.includes('plugin:ugk-cockpit:ugk-cockpit')) throw new Error('ZCode did not expose all Cockpit skills and the plugin MCP server.');
     return { status: 'host_verification_pending', pluginInstalled: true, hostVerification: 'pending', serviceUrl: service?.serviceUrl,
+      dataDirectory: service?.dataDirectory,
       nextAction: 'Reconnect the ZCode task if needed, then call the Cockpit ugk_work_context tool with {}. Do not init an existing work session.' };
   } finally { client.close(); }
 }

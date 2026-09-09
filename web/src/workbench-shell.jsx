@@ -12,6 +12,7 @@ function ShellIcon({ name, ...props }) {
     chevron: <path d="m9 5 7 7-7 7" />,
     back: <path d="m11 5-7 7 7 7M4 12h16" />,
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
+    book: <><path d="M12 5v15M3 4h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v15h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3z" /></>,
   };
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name]}</svg>;
 }
@@ -34,6 +35,8 @@ export function WorkbenchShell({
   activeProjectName,
   onOpenProject,
   onOverview,
+  onGuide,
+  guideActive = false,
   onAddProject,
   busy,
   themeControl,
@@ -90,8 +93,11 @@ export function WorkbenchShell({
         </div>
 
         <div className="wb-navigation" id="wb-navigation">
-          <button type="button" className={`wb-overview${!activeProjectId ? ' is-selected' : ''}`} aria-current={!activeProjectId ? 'page' : undefined} onClick={selectOverview}>
+          <button type="button" className={`wb-overview${!activeProjectId && !guideActive ? ' is-selected' : ''}`} aria-current={!activeProjectId && !guideActive ? 'page' : undefined} onClick={selectOverview}>
             <ShellIcon name="grid" /><span>项目总览</span><span className="wb-count">{projects.length}</span>
+          </button>
+          <button type="button" className={`wb-overview${guideActive ? ' is-selected' : ''}`} aria-current={guideActive ? 'page' : undefined} onClick={() => { onGuide(); setNavigationOpen(false); }}>
+            <ShellIcon name="book" /><span>使用指南</span>
           </button>
           <div className="wb-project-section-label"><span>我的项目</span><button type="button" className="wb-icon-button" title="添加项目" aria-label="添加项目" onClick={onAddProject} disabled={busy}><ShellIcon name="plus" /></button></div>
           <label className="wb-search"><ShellIcon name="search" /><input type="search" placeholder="查找项目" aria-label="查找项目" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
@@ -116,8 +122,8 @@ export function WorkbenchShell({
       <div className="wb-workspace">
         <header className="wb-topbar">
           <nav className="wb-breadcrumb" aria-label="页面位置">
-            {activeProjectId && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
-            <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={activeProject?.name || activeProjectName}>{activeProject?.name || activeProjectName || '项目工作台'}</span>
+            {(activeProjectId || guideActive) && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
+            <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={guideActive ? '使用指南' : activeProject?.name || activeProjectName}>{guideActive ? '使用指南' : activeProject?.name || activeProjectName || '项目工作台'}</span>
           </nav>
           <div className="wb-topbar-actions">
             <button className="wb-icon-button wb-refresh" type="button" onClick={onRefresh} disabled={busy} title="刷新项目数据" aria-label="刷新项目数据"><ShellIcon name="refresh" /></button>

@@ -128,7 +128,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
     ...dependencies,
   };
   const [major, minor] = deps.version.split('.').map(Number);
-  if (major < 24 || (major === 24 && minor < 15)) throw new Error('Node.js 24.15.0 or newer is required.');
+  if (major !== 24 || !Number.isInteger(minor) || minor < 15) throw new Error('Node.js >=24.15.0 <25 is required.');
   if (deps.platform !== 'win32') throw new Error('This installer currently supports Windows.');
   if (!options.startOnly) {
     await deps.run('git', ['--version']);
@@ -144,7 +144,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
   const running = await deps.probe();
   if (running) await deps.verify(directory, serviceUrl);
   if (options.dryRun) return {
-    status: 'plan', service: running ? 'reuse' : 'start',
+    status: 'plan', service: running ? 'reuse' : 'start', dataDirectory: directory,
     steps: options.startOnly ? ['start or reuse service and verify projects']
       : ['prepare plugin', 'start or reuse service and verify projects', 'register marketplace', 'install plugin', 'verify MCP in host'],
   };
@@ -164,7 +164,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
     if (!ready) throw new Error('Service startup was not verified. Inspect setup-service logs; do not reset data.');
     await deps.verify(directory, serviceUrl);
   }
-  if (options.startOnly) return { status: 'service_verified', serviceUrl };
+  if (options.startOnly) return { status: 'service_verified', serviceUrl, dataDirectory: directory };
   let installed;
   try {
     await deps.run('codex', ['plugin', 'marketplace', 'add', bundle.marketplaceRoot, '--json']);
@@ -177,7 +177,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
     throw new Error('Codex did not confirm the expected Cockpit plugin version. Installation is not verified; inspect the marketplace registration before retrying.');
   }
   return {
-    status: 'host_verification_pending', serviceUrl, pluginInstalled: true,
+    status: 'host_verification_pending', serviceUrl, dataDirectory: directory, pluginInstalled: true,
     hostVerification: 'pending',
     nextAction: 'Reconnect Codex or open a new task if necessary, then call ugk_work_context with {}. Installation is usable only after the host exposes and successfully calls the MCP tool. Do not init an existing session.',
   };

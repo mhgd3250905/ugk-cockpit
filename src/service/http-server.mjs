@@ -279,9 +279,9 @@ const PUBLIC_ERRORS = {
   },
   AUTH_REQUIRED: {
     status: 401,
-    message: '本地控制台身份已失效。',
+    message: '此请求缺少有效身份凭据。',
     impact: '代码和已有记录都没有被修改。',
-    requiredAction: '请关闭当前页面后重新打开 UGK Cockpit。',
+    requiredAction: '网页用户请关闭当前页面后重新打开 UGK Cockpit；脚本调用请使用对应的认证方式，仅检查服务是否运行请访问 /health。',
   },
   ORIGIN_REJECTED: {
     status: 403,

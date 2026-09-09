@@ -1,10 +1,10 @@
 {
   "name": "ugk-cockpit",
-  "version": "0.1.0-alpha.39",
+  "version": "0.1.0-alpha.40",
   "private": true,
   "type": "module",
   "engines": {
-    "node": "24.15.x"
+    "node": ">=24.15.0 <25"
   },
   "scripts": {
     "serve": "npm run build:web && node src/main.mjs",

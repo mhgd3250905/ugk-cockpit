@@ -27,6 +27,7 @@ test('new install builds, starts and verifies data before registering plugin; ho
   const result = await setupCodex({}, deps);
   assert.equal(result.status, 'host_verification_pending');
   assert.equal(result.hostVerification, 'pending');
+  assert.equal(result.dataDirectory, 'C:/isolated-data');
   assert.ok(calls.findIndex((row) => row[0] === 'verify') < calls.findIndex((row) => row.includes('C:/plugin & space')));
   assert.deepEqual(calls.at(-2), ['codex', 'plugin', 'marketplace', 'add', 'C:/plugin & space', '--json']);
   assert.deepEqual(calls.at(-1), ['codex', 'plugin', 'add', 'ugk-cockpit@ugk-cockpit-local', '--json']);
@@ -48,13 +49,16 @@ test('data mismatch stops installation before mutation', async () => {
 
 test('dry run does not build, start or install', async () => {
   const { calls, deps } = fixture();
-  assert.equal((await setupCodex({ dryRun: true }, deps)).status, 'plan');
+  const result = await setupCodex({ dryRun: true }, deps);
+  assert.equal(result.status, 'plan');
+  assert.equal(result.dataDirectory, 'C:/isolated-data');
   assert.ok(calls.every((row) => row.includes('--help') || row.includes('--version')));
 });
 
 test('unsupported environment and missing Codex fail before mutations', async () => {
   const { calls, deps } = fixture();
   await assert.rejects(setupCodex({}, { ...deps, version: '24.14.0' }), /24.15/);
+  await assert.rejects(setupCodex({}, { ...deps, version: '25.0.0' }), /<25/);
   assert.equal(calls.length, 0);
   deps.run = async () => { throw new Error('missing codex'); };
   await assert.rejects(setupCodex({}, deps), /missing codex/);
@@ -78,7 +82,9 @@ test('existing standalone installation is reported before any mutation', async (
 
 test('start-only reuses the verified service without Codex or plugin installation', async () => {
   const { calls, deps } = fixture(true);
-  assert.equal((await setupCodex({ startOnly: true }, deps)).status, 'service_verified');
+  const result = await setupCodex({ startOnly: true }, { ...deps, version: '24.16.0' });
+  assert.equal(result.status, 'service_verified');
+  assert.equal(result.dataDirectory, 'C:/isolated-data');
   assert.deepEqual(calls, [['verify']]);
 });
 

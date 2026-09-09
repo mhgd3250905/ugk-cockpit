@@ -57,6 +57,7 @@ import {
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
+import { SkillGuide } from './skill-guide.jsx';
 import { WorkContext } from './work-context.jsx';
 import { ManualRecordAction } from './manual-record-action.jsx';
 import './styles.css';
@@ -313,6 +314,7 @@ const PROJECT_ROUTE_PREFIX = '#/projects/';
 function readAppRoute() {
   if (typeof window === 'undefined') return { kind: 'list', projectId: null };
   const hash = window.location.hash || '';
+  if (hash === '#/guide') return { kind: 'guide', projectId: null };
   if (!hash.startsWith(PROJECT_ROUTE_PREFIX)) return { kind: 'list', projectId: null };
 
   const encodedId = hash.slice(PROJECT_ROUTE_PREFIX.length).replace(/\/+$/, '');
@@ -1685,6 +1687,8 @@ function App() {
   return (
     <WorkbenchShell
       projects={projects}
+      guideActive={route.kind === 'guide'}
+      onGuide={() => { window.location.hash = '/guide'; }}
       activeProjectId={route.kind === 'detail' ? activeDetailProjectId : null}
       activeProjectName={projectDetail?.seed?.id === activeDetailProjectId ? (projectDetail.data?.project?.name || projectDetail.seed.name) : undefined}
       onOpenProject={openProjectDetail}
@@ -1697,8 +1701,8 @@ function App() {
       onRefresh={() => refresh()}
     >
       <main className="control-content">
-        {notice && !selection && !handoffProject && <NoticeBanner notice={notice} busy={busy} />}
-        {route.kind === 'detail' ? (
+        {route.kind !== 'guide' && notice && !selection && !handoffProject && <NoticeBanner notice={notice} busy={busy} />}
+        {route.kind === 'guide' ? <SkillGuide /> : route.kind === 'detail' ? (
           <ProjectDetailPage
             state={route.invalid || projectDetail?.seed?.id !== activeDetailProjectId ? null : projectDetail}
             projectId={activeDetailProjectId}

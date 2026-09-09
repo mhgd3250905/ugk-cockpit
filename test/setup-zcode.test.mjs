@@ -17,7 +17,7 @@ function fixture() {
       resolve: () => ({}),
       inspect: () => ({ skills: [], mcp: false }),
       build: async () => ({ marketplaceRoot: 'C:/bundle', version: 'v1' }),
-      service: async (options = {}) => { calls.push(options.dryRun ? 'preflight' : 'service'); return { status: 'service_verified' }; },
+      service: async (options = {}) => { calls.push(options.dryRun ? 'preflight' : 'service'); return { status: 'service_verified', dataDirectory: 'C:/custom-cockpit-data' }; },
       connect: () => ({
         request: async (method) => { calls.push(method); return { installedPlugins: [plugin], plugins: [plugin] }; },
         close: () => calls.push('close'),
@@ -28,14 +28,18 @@ function fixture() {
 
 test('native installation verifies all skills/MCP while host call remains pending', async () => {
   const { calls, deps } = fixture();
-  assert.equal((await setupZcode({}, deps)).status, 'host_verification_pending');
+  const result = await setupZcode({}, deps);
+  assert.equal(result.status, 'host_verification_pending');
+  assert.equal(result.dataDirectory, 'C:/custom-cockpit-data');
   assert.deepEqual(calls, ['preflight', 'service', 'plugins/marketplace/add', 'plugins/install', 'plugins/list', 'close']);
 });
 
 test('dry run only preflights, without bundle writes or native process', async () => {
   const { calls, deps } = fixture();
   deps.build = () => assert.fail();
-  assert.equal((await setupZcode({ dryRun: true }, deps)).status, 'plan');
+  const result = await setupZcode({ dryRun: true }, deps);
+  assert.equal(result.status, 'plan');
+  assert.equal(result.dataDirectory, 'C:/custom-cockpit-data');
   assert.deepEqual(calls, ['preflight']);
 });
 
@@ -44,7 +48,7 @@ test('start-only bypasses ZCode resolution and collision checks', async () => {
     const { calls, deps } = fixture();
     deps.resolve = () => assert.fail();
     deps.inspect = () => assert.fail();
-    await setupZcode({ startOnly: true, dryRun }, deps);
+    assert.equal((await setupZcode({ startOnly: true, dryRun }, deps)).dataDirectory, 'C:/custom-cockpit-data');
     assert.deepEqual(calls, [dryRun ? 'preflight' : 'service']);
   }
 });

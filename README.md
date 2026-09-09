@@ -26,7 +26,9 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.39` — 工作节点持久记录平台与宿主会话 ID，接手成功本身就是新节点。异常转交由用户在工作台选择准确工作会话并授权：旧聊天立即冻结，新聊天凭一次性指令接手；支持定向授权、过期重签和明确取消恢复。聊天内两步 takeover 已关闭，正常 Relay 保留。ZCode 原生请求身份已接入；走错聊天时返回当前持有人和最新节点，未知历史不猜身份。本机服务现为 schema 27，两处技能沿用已完成的切换，用户已反馈原 ZCode 聊天接手后可写。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。工作台仍处于用户试用期。
+`0.1.0-alpha.40` — 新增工作台“使用指南”，按场景介绍七个技能并提供可复制说法；内置 `cockpit` 支持对话讲解用途和区别。改进 Codex / ZCode 安装体验：统一支持 Node.js `>=24.15.0 <25`，安装及启动结果提供实际数据目录，补充免认证存活检查与浅克隆说明，并改善未认证请求提示。工作台仍处于用户试用期。
+
+保留 `alpha.39` 的工作节点持久记录平台与宿主会话 ID，接手成功本身就是新节点。异常转交由用户在工作台选择准确工作会话并授权：旧聊天立即冻结，新聊天凭一次性指令接手；支持定向授权、过期重签和明确取消恢复。聊天内两步 takeover 已关闭，正常 Relay 保留。ZCode 原生请求身份已接入；走错聊天时返回当前持有人和最新节点，未知历史不猜身份。本机服务现为 schema 27，两处技能沿用已完成的切换，用户已反馈原 ZCode 聊天接手后可写。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
 
 保留轻量 Submit 工作说明：向所属项目发布说明，可以引用 PR、本地提交或其他分支的审核结果，不再默认保存上传或创建代码审核对象。说明发布不冻结分支，不结束会话，已有 progress 与 relay 照常推进。2026-09-03 的实现、切换及历史验收见 [Submit 工作说明](docs/SUBMIT_NOTES.md)。
 
@@ -38,7 +40,7 @@ npm run setup:zcode
 
 当前开发版本以 `VERSION` 为准；版本与阶段验收的当前事实源是 [阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
-2026-09-08 已合并工作台反馈及返工版本 `b523b386`，包含此前 PR #6 的修复。新增项目归档、手动关闭/重开工作线、按工作线查看上下文，以及工作副本复用/移除的并发保护和原请求恢复。独立全量 442/442、Phase 0 97/97、构建及差异检查通过；本机服务已从分支切回主项目并升级到 schema 27，7 个已有项目及详情正常。版本号仍为 alpha.39，未创建新发布；当前结果与既有遗留项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+2026-09-08 已合并工作台反馈及返工版本 `b523b386`，包含此前 PR #6 的修复。新增项目归档、手动关闭/重开工作线、按工作线查看上下文，以及工作副本复用/移除的并发保护和原请求恢复。独立全量 442/442、Phase 0 97/97、构建及差异检查通过；本机服务已从分支切回主项目并升级到 schema 27，7 个已有项目及详情正常。当时保留版本 alpha.39，未创建新发布；当前结果与既有遗留项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
 会话恢复的当前契约见 [会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)，alpha.32 历史计划见 [会话信息恢复](docs/SESSION_CONTEXT_RECOVERY.md)。升级后，运行中的本地服务及 Agent MCP 连接需加载新版；接手工具必填字段为 `sessionId/clientRequestId/transferCode` 才表示客户端已加载本轮接口。重新连接不等于重新 init，也不会结束平台已有会话。
 
@@ -69,14 +71,16 @@ Phase 0 已验证的基础能力继续保留：
 
 ## 启动本地预览
 
-要求 Node.js 24.15：
+要求 Node.js 24，最低 24.15.0（`>=24.15.0 <25`）：
 
 ```powershell
 npm install
 npm run serve
 ```
 
-然后打开 `http://127.0.0.1:41737`。数据保存在 `%LOCALAPPDATA%\UGK Cockpit`，项目代码不会被 Cockpit 自动清理、提交、上传或删除。
+然后打开 `http://127.0.0.1:41737`。数据默认保存在 `%LOCALAPPDATA%\UGK Cockpit`；安装器的 `dataDirectory` 返回实际使用的路径。项目代码不会被 Cockpit 自动清理、提交、上传或删除。
+
+脚本可用 `curl.exe http://127.0.0.1:41737/health` 免认证检查存活，响应包含 `status` 和 `version`。它不代表项目数据验收通过；受保护的 `/api/*` 接口仍需认证。浅克隆 `git clone --depth 1 https://github.com/mhgd3250905/ugk-cockpit.git` 可用于安装、运行及通常的后续更新；需要完整历史时执行 `git fetch --unshallow`。
 
 启动验收还需确认已有项目列表及详情正常，不能仅检查 HTTP 200。不得在服务运行时覆盖数据目录；遇到项目突然消失，先按[本机服务数据一致性与故障恢复](docs/LOCAL_SERVICE_RECOVERY.md)排查，不要重新 init 或重新添加项目。
 
@@ -106,7 +110,7 @@ npm run install:skills:codex
 
 ## 本地验证
 
-要求 Node.js 24.15：
+要求 Node.js 24，最低 24.15.0（`>=24.15.0 <25`）：
 
 ```powershell
 npm test
