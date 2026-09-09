@@ -57,6 +57,8 @@
 
 2026-09-09 于本分支复验：`npm test` **449/449**（507.73 秒）、`npm run test:phase0` **97/97**，全部通过，无失败或跳过。独立审查线程（只读）按需求完整性、逻辑正确性、边界情况、代码质量、测试覆盖、实际运行六维复核；其提出的两项必须修复（delivery 前缀缺口、finish 路由上限）与 pushInsteadOf 绕过已修复并补测，一项“终轮 401 未消费”经核实为误报（两条响应路径都会读取 body）。版本保持 `0.1.0-alpha.39`，schema 不变。
 
+返工轮（同日，复审第二轮回馈）：① 多推送地址漏检——`git remote get-url --push` 只返回首个 pushurl，仓库可在后续 pushurl 藏自授权自定义 helper（实测首个远端已收到提交、helper 已执行后 push 才报错）；修复为 `--push --all` 在任何推送前逐一校验全部实际目的地。② 合法相对路径远端被误拒——`isLocalPath` 以服务进程 cwd 判断裸相对路径，与 git 按 worktree 解析的行为不一致；修复为 `validateRemoteUrlSecurity`/`isLocalPath`/`normalizeRemoteIdentity`/`readDeliveryLocation` 全链路传入 worktree cwd。两项均按“回归先红后绿”执行，新增两条回归覆盖提交与集成双路径；返工后 `npm test` **451/451**（447.37 秒）、`npm run test:phase0` **97/97**、`git diff --check` 通过。
+
 审计证实但记录为残留/后续项：push 超时只杀死直接 git 子进程，ssh 等孙进程可完成传输导致“报失败但远端已更新”（需进程组方案）；saveDelivery 复制→rename 覆盖 index 窗口内用户并发暂存可被静默回滚（工作区文件无损）；MCP 声明支持 2025-03-26 协议但拒绝批次数组（如需兼容须实现批处理分发）；stdio 行读取无单行长度上限；会话身份 (host, id) 由宿主元数据声明、本机进程可伪造，本地信任模型内为既有边界，跨信任域部署前必须重评；`web/src/assignment-copy-flow.mjs` 重试成功后旧失败提示未清理（既有 P3，未动）；`core.sshCommand=ssh` 会覆盖仓库本地自定义 ssh 命令（与既有中和全局配置的路线一致）。
 
 审计同时证伪以下怀疑，不改代码：目标环境（Windows/Node 24.15）execFile 超时返回 `code=null/signal=SIGTERM`，与退出码 1 可区分；Git 2.50 中仓库本地 `url.*.insteadOf`/`pushInsteadOf` 不会劫持 fetch 校验层可见的 URL（push 侧已由 `--push` 校验覆盖）；`_meta.threadId` 非字符串硬失败是测试覆盖的显式 fail-closed 契约。
