@@ -2,6 +2,22 @@
 
 UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户在多个 Git 项目和多个 AI Agent 之间切换时，直接看见：现在谁在做什么、代码处于什么状态、哪里需要处理、下一步怎么继续。
 
+## 让 Agent 帮你安装
+
+把本仓库地址发给 Codex，并说：
+
+> 帮我按照 docs/AGENT_INSTALL.md 安装 UGK Cockpit，包括全部技能、MCP 连接和本机服务。验证完成后，带我开始使用。
+
+已有本仓库的 Windows 用户，也可以在程序目录执行：
+
+```powershell
+npm run setup:codex
+```
+
+安装器将准备工作台、安装包含全部技能和 MCP 的 Codex 插件，并复用已经正常运行的服务。若当前聊天需要重新连接才能加载工具，会明确提示；实际调用验证通过后才算可以使用。之后直接说“帮我打开 Cockpit”或“这个工具怎么用”即可。
+
+首版支持 Windows + Codex，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
+
 2026-09-06 已按工作台试用反馈调整项目卡片、宽屏比例、时间线摘要、返回导航及 Logo，并修复提示语与加载占位重叠。完整问题清单和验证结果见 [工作台试用反馈](docs/WORKBENCH_FEEDBACK.md)。
 
 ## 当前版本
@@ -70,13 +86,13 @@ stdio 入口通过服务已有的本机 MCP 认证通道获取凭据，不读取
 npm run mcp
 ```
 
-Codex、ZCode 或 Antigravity 的 stdio 配置应执行 `node <仓库绝对路径>\src\mcp\main.mjs`（例如 `node E:\AII\ugk-cockpit\src\mcp\main.mjs`）。本仓库只提供配置片段，不会自动修改用户级 Agent 配置。
+手动接入 Codex、ZCode 或 Antigravity 时，stdio 配置执行 `node <仓库绝对路径>\src\mcp\main.mjs`。新的 Codex 安装入口通过宿主原生插件命令注册 MCP，无需用户填写程序路径；其他宿主仍需按各自配置方式接入。
 
 ## 配套 Skills
 
 仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有其他持有人时，用户可返回原聊天，或到工作台授权转交并将完整指令交给目标聊天；`ugk_work_takeover` 仅消费该授权。平台持久保存可靠宿主聊天身份；历史连接身份只读保留，不能根据同目录或时间相近认领。context 查询不改变业务会话、归属、租约、心跳或 revision，旧回执不恢复当前权限。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
-安装到当前用户的 Codex：
+推荐使用上方完整插件安装入口；插件还包含统一的 `$cockpit` 使用助手。仅需传统独立 Skills 安装时：
 
 ```powershell
 npm run install:skills:codex

@@ -11,8 +11,9 @@ import {
 
 const repositoryRoot = path.resolve('.');
 
-test('Cockpit skill packages expose the six approved user actions', () => {
+test('Cockpit skill packages expose the guide and six approved user actions', () => {
   assert.deepEqual(COCKPIT_SKILL_NAMES, [
+    'cockpit',
     'cockpit-init',
     'cockpit-progress',
     'cockpit-relay',

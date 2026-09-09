@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const COCKPIT_SKILL_NAMES = [
+  'cockpit',
   'cockpit-init',
   'cockpit-progress',
   'cockpit-relay',

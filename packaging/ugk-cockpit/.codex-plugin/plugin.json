@@ -1,0 +1,19 @@
+{
+  "name": "ugk-cockpit",
+  "version": "0.1.0",
+  "description": "在对话中开始使用 UGK Cockpit，管理项目进展与工作接力。",
+  "author": {
+    "name": "UGK Cockpit"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "UGK Cockpit",
+    "shortDescription": "通过对话使用项目工作台、记录进展与接力。",
+    "longDescription": "包含使用引导、六个工作技能和本机 MCP 桥接程序；连接本机 Cockpit 工作台。",
+    "developerName": "UGK Cockpit",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": ["帮我开始使用 Cockpit。", "帮我打开 Cockpit 工作台。"]
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -10,6 +10,8 @@
     "serve": "npm run build:web && node src/main.mjs",
     "mcp": "node src/mcp/main.mjs",
     "install:skills:codex": "node scripts/install-cockpit-skills.mjs",
+    "setup:codex": "node scripts/setup-codex.mjs",
+    "build:plugin": "node scripts/build-codex-plugin.mjs",
     "dev:web": "vite",
     "build:web": "vite build",
     "test": "node --test --test-concurrency=1",
