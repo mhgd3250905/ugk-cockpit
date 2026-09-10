@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyServiceData } from './verify-service-data.mjs';
 import { COCKPIT_SKILL_NAMES, defaultCodexSkillsRoot } from './install-cockpit-skills.mjs';
+import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const serviceUrl = 'http://127.0.0.1:41737/';
@@ -119,7 +120,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
   const deps = {
     platform: process.platform, version: process.versions.node, run, probe, start,
     dataDirectory: resolveDataDirectory,
-    outputRoot: () => path.join(process.env.LOCALAPPDATA, 'UGK Cockpit', 'plugin-packages'),
+    outputRoot: () => resolvePluginOutputRoot('plugin-packages'),
     inspectLegacy: inspectLegacyInstallation,
     verify: verifyServiceData,
     webReady: () => existsSync(path.join(root, 'dist', 'web', 'index.html')),

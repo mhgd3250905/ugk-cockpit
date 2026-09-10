@@ -1,14 +1,24 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setupCodex } from './setup-codex.mjs';
 import { COCKPIT_SKILL_NAMES } from './install-cockpit-skills.mjs';
+import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
+
+// POSIX executables usually have no extension at all. Probing only `zcode.exe`
+// and `zcode.cjs` made the documented remedy — pointing ZCODE_CLI_PATH at the
+// installed binary — fail again with the same message.
+function zcodeCandidateNames() {
+  return process.platform === 'win32'
+    ? ['zcode.exe', 'zcode.cjs']
+    : ['zcode', 'zcode.cjs', 'zcode.js'];
+}
 
 export function resolveZcodeCli(env = process.env) {
   const explicit = env.ZCODE_CLI_PATH;
   const candidates = explicit ? [explicit] : (env.PATH ?? env.Path ?? '').split(path.delimiter)
-    .flatMap((directory) => [path.join(directory, 'zcode.exe'), path.join(directory, 'zcode.cjs')]);
+    .flatMap((directory) => zcodeCandidateNames().map((name) => path.join(directory, name)));
   if (!explicit && process.platform === 'win32') {
     try {
       const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -18,16 +28,22 @@ export function resolveZcodeCli(env = process.env) {
       if (locations.length === 1) candidates.push(path.join(path.dirname(locations[0]), 'resources/glm/zcode.cjs'));
     } catch { /* Explicit CLI path remains the fallback. */ }
   }
-  let file = candidates.find((candidate) => path.isAbsolute(candidate) && existsSync(candidate));
+  let file = candidates.find((candidate) => path.isAbsolute(candidate) && existsSync(candidate) && statSync(candidate).isFile());
   // A desktop ZCode.exe on PATH is not the CLI. Prefer its bundled CLI entry.
   if (file && path.extname(file).toLowerCase() === '.exe') {
     const bundled = path.join(path.dirname(file), 'resources/glm/zcode.cjs');
     if (existsSync(bundled)) file = bundled;
   }
-  if (!file || !['.exe', '.cjs', '.js'].includes(path.extname(file).toLowerCase())) {
+  const extension = file ? path.extname(file).toLowerCase() : '';
+  const allowed = process.platform === 'win32' ? ['.exe', '.cjs', '.js'] : ['', '.exe', '.cjs', '.js', '.mjs', '.sh'];
+  if (!file || !allowed.includes(extension)) {
     throw new Error('Set ZCODE_CLI_PATH to the installed native ZCode CLI executable or zcode.cjs entry.');
   }
-  return path.extname(file).toLowerCase() === '.exe' ? { file, args: [] } : { file: process.execPath, args: [file] };
+  // A JS entry needs an interpreter; a native binary or launcher script is
+  // executed directly.
+  return ['.cjs', '.js', '.mjs'].includes(extension)
+    ? { file: process.execPath, args: [file] }
+    : { file, args: [] };
 }
 
 // The native app-server speaks strict NDJSON request/response envelopes. Plugin requests do
@@ -101,7 +117,7 @@ export async function setupZcode(options = {}, dependencies = {}) {
     standaloneMcp: legacy.mcp, nextAction: 'Review and back up the existing standalone Cockpit installation before switching to the plugin. Existing configuration was not changed.' };
   const preflight = await deps.service({ dryRun: true });
   if (options.dryRun) return { status: 'plan', dataDirectory: preflight?.dataDirectory, steps: ['prepare plugin', 'verify service', 'register native ZCode marketplace and plugin', 'verify tools in current host'] };
-  const bundle = await deps.build({ outputRoot: options.outputRoot ?? path.join(process.env.LOCALAPPDATA, 'UGK Cockpit', 'zcode-plugin-packages') });
+  const bundle = await deps.build({ outputRoot: options.outputRoot ?? resolvePluginOutputRoot('zcode-plugin-packages') });
   const service = await deps.service();
   const client = deps.connect({ cli });
   const workspacePath = path.resolve(options.workspacePath ?? process.cwd());

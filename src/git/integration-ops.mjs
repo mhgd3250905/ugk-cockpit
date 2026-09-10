@@ -1,5 +1,6 @@
 import { git } from './probe.mjs';
-import { assertSafePushTarget } from './delivery-ops.mjs';
+import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
+import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -13,6 +14,10 @@ function options(overrides = {}) {
 }
 
 export async function fastForwardMain(worktreePath, sourceCommit, overrides = {}) {
+  // A fast-forward updates the working tree, so repository-local smudge filters
+  // would run here before any remote is contacted. Fail closed first.
+  const hostile = await findHostileRepositoryConfiguration(worktreePath, overrides);
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
   await git(
     worktreePath,
     ['-c', `core.hooksPath=${EMPTY_HOOKS_PATH}`, 'merge', '--ff-only', sourceCommit],

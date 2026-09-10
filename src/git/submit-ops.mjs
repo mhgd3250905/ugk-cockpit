@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { git } from './probe.mjs';
-import { assertSafePushTarget } from './delivery-ops.mjs';
+import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
+import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -35,26 +36,16 @@ export async function hasUncommittedChanges(worktreePath, overrides = {}) {
 }
 
 export async function rejectUnsupportedSubmitFeatures(worktreePath, overrides = {}) {
-  const gitOptions = { ...options(overrides), acceptExitCodes: [0, 1] };
-  const [stagedEntries, localFilters, attributeFilters] = await Promise.all([
+  const [stagedEntries, hostile] = await Promise.all([
     git(worktreePath, ['ls-files', '--stage'], options(overrides)),
-    git(worktreePath, ['config', '--local', '--get-regexp', '^filter\\..*\\.(clean|process)$'], gitOptions),
-    git(
-      worktreePath,
-      ['grep', '--untracked', '-I', '-n', '-E', 'filter[[:space:]]*=', '--', '*.gitattributes'],
-      gitOptions,
-    ),
+    findHostileRepositoryConfiguration(worktreePath, overrides),
   ]);
   if (stagedEntries.stdout.split(/\r?\n/).some((line) => line.startsWith('160000 '))) {
     const error = new Error('Submodules are not supported by managed submission yet.');
     error.code = 'SUBMODULE_UNSUPPORTED';
     throw error;
   }
-  if (localFilters.stdout || attributeFilters.stdout) {
-    const error = new Error('Git clean/process filters, including LFS, are not supported by managed submission yet.');
-    error.code = 'GIT_FILTER_UNSUPPORTED';
-    throw error;
-  }
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
 }
 
 export async function stageAllChanges(worktreePath, overrides = {}) {

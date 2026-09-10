@@ -145,6 +145,24 @@ function retryableAttemptError(db, attempt, code, message, extra = {}, options =
   };
 }
 
+/**
+ * @returns {string|null} the error code when the caller no longer owns the work.
+ */
+function checkSubmissionOwnership(db, { context, sessionId, expectedRevision }) {
+  if (context.revision !== expectedRevision) return 'REVISION_CONFLICT';
+  if (context.status !== 'active' || context.run?.lifecycle !== 'active') return 'SESSION_NOT_ACTIVE';
+  // One active write lease per worktree: if another session now holds it, this
+  // caller must not touch the repository even while its own run still looks
+  // active.
+  const lease = db.prepare(`
+    SELECT run_id, generation FROM write_leases WHERE worktree_id = ?
+  `).get(context.worktreeId);
+  if (lease && (lease.run_id !== sessionId || lease.generation !== context.run?.leaseGeneration)) {
+    return 'SESSION_NOT_ACTIVE';
+  }
+  return null;
+}
+
 export async function submitDevelopmentSpace(db, request = {}, options = {}) {
   const { commandId, sessionId, expectedRevision } = request;
   const summary = typeof request.summary === 'string' ? request.summary.trim() : '';
@@ -170,14 +188,16 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
   const context = readSessionContext(db, sessionId);
   if (!context.ok) return failCommand(db, commandId, context, options);
   let attempt = readSubmissionAttempt(db, commandId);
-  if (!attempt && (
-    context.status !== 'active'
-    || context.run?.lifecycle !== 'active'
-    || context.revision !== expectedRevision
-  )) {
+  // Ownership is re-proved on every entry, not only when the attempt is first
+  // created: a retry performs exactly the same commit and push, so a session
+  // that has since been superseded or taken over must not be able to finish a
+  // submission it started. Skipping the check on retry let a stale caller push
+  // to the remote and register a submission after losing the work.
+  const ownership = checkSubmissionOwnership(db, { context, sessionId, expectedRevision });
+  if (ownership) {
     return failCommand(db, commandId, {
       ok: false,
-      code: context.revision !== expectedRevision ? 'REVISION_CONFLICT' : 'SESSION_NOT_ACTIVE',
+      code: ownership,
       sessionId,
       currentRevision: context.revision,
       expectedRevision,

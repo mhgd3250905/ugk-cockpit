@@ -1118,10 +1118,16 @@ function migrateDatabase(db) {
   }
 }
 
+// 150ms 是刻意选小的上限，不是笔误。服务是单线程的：SQLite 的忙等会同步占住
+// 事件循环，等待期间连 /health 都无法响应。写冲突因此必须快速失败并以可重试的
+// DATABASE_BUSY 呈现（契约见 test/phase0/http-service.test.mjs 的争用用例），
+// 而不是把整个服务停住等锁。不要为了减少报错而调大这个值。
+export const BUSY_TIMEOUT_MS = 150;
+
 export function openCockpitDatabase(filePath, { migrate = true } = {}) {
   mkdirSync(dirname(filePath), { recursive: true });
   const db = new DatabaseSync(filePath, {
-    timeout: 150,
+    timeout: BUSY_TIMEOUT_MS,
     allowExtension: false,
     defensive: true,
   });

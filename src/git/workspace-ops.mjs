@@ -2,8 +2,19 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { git, safeGitEnvironment, SAFE_GIT_PREFIX } from './probe.mjs';
+import { DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
+import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// `worktree add` and `switch` both check files out, so a repository-local
+// smudge filter — or a filter bound by `.git/info/attributes`, which no working
+// tree scan can see — would run with the user's privileges. Creating or reusing
+// a managed workspace must therefore fail closed before touching Git.
+async function assertWorkspaceRepositoryAllowed(repoPath, overrides = {}) {
+  const hostile = await findHostileRepositoryConfiguration(repoPath, overrides);
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+}
 
 export function generateStableBranchName(opaqueOrProjectId, maybeCommandId) {
   if (typeof opaqueOrProjectId === 'object' && opaqueOrProjectId !== null) {
@@ -89,6 +100,7 @@ export async function createGitWorktree(repoPath, {
     throw error;
   }
 
+  await assertWorkspaceRepositoryAllowed(repoPath);
   try {
     const result = await execFileAsync(
       'git',
@@ -131,6 +143,7 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
     throw error;
   }
 
+  await assertWorkspaceRepositoryAllowed(worktreePath);
   try {
     const result = await execFileAsync(
       'git',

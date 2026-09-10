@@ -297,3 +297,73 @@ test('COMMIT_IDENTITY_MISSING is preserved by submitDevelopmentSpace without bei
   const attempt = readSubmissionAttempt(f.db, 'submit-identity-missing');
   assert.equal(attempt.lastErrorCode, 'COMMIT_IDENTITY_MISSING');
 });
+
+// 重试会执行与首次完全相同的提交与推送，因此归属必须在每次进入时重新证明：
+// 已被接管或结束的会话，不能凭旧的 commandId 把改动推送到远端并登记送审。
+async function abortedPushAttempt(t) {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.spacePath, 'feature.txt'), 'done\n');
+  const request = {
+    commandId: 'submit-retry-ownership',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '重试归属边界',
+  };
+  const first = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => {
+      throw Object.assign(new Error('network down'), { code: 'PUSH_FAILED' });
+    },
+  });
+  assert.equal(first.ok, false);
+  assert.equal(readSubmissionAttempt(f.db, request.commandId).state, 'local_saved');
+  return { f, request };
+}
+
+test('a retry after the session was superseded cannot push or register a submission', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  // 另一次接管推进了 revision 并结束了原会话。
+  f.db.prepare(`UPDATE runs SET lifecycle = 'superseded', revision = 7 WHERE id = ?`).run(f.sessionId);
+  f.db.prepare(`UPDATE assignments SET revision = 7 WHERE session_id = ?`).run(f.sessionId);
+
+  let pushes = 0;
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.code, 'REVISION_CONFLICT');
+  assert.equal(pushes, 0);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 0);
+});
+
+test('a retry is refused when another session now holds the write lease', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  const lease = f.db.prepare('SELECT * FROM write_leases WHERE worktree_id = ?').get(f.sourceWorktreeId);
+  assert.ok(lease, 'fixture 应已为会话建立写租约');
+  const timestamp = new Date().toISOString();
+  f.db.prepare(`
+    INSERT INTO runs (id, worktree_id, mode, lifecycle, health, revision, lease_generation,
+                      agent_claim, goal, created_at)
+    VALUES (?, ?, 'write', 'active', 'healthy', 2, ?, 'Other', 'Taken over', ?)
+  `).run('session-other', f.sourceWorktreeId, (lease.generation ?? 0) + 1, timestamp);
+  f.db.prepare('UPDATE write_leases SET run_id = ?, generation = ? WHERE worktree_id = ?')
+    .run('session-other', (lease.generation ?? 0) + 1, f.sourceWorktreeId);
+
+  let pushes = 0;
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.code, 'SESSION_NOT_ACTIVE');
+  assert.equal(pushes, 0);
+});
+
+test('a workspace without a write lease is not blocked by the ownership check', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  // 没有写租约行的历史工作副本不应被新增的租约校验挡住。
+  f.db.prepare('DELETE FROM write_leases WHERE worktree_id = ?').run(f.sourceWorktreeId);
+
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => {},
+  });
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+});

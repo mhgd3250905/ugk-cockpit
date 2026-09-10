@@ -824,7 +824,18 @@ function App() {
       }
     }
 
-    const timer = setInterval(pollProjectDetail, 4000);
+    // 单次请求已有超时，但仍要防止慢响应叠加：上一轮未结束就不再发起新的
+    // 轮询，否则请求会排队占满浏览器单源并发，写操作一起被堵住。
+    let pollInFlight = false;
+    const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        await pollProjectDetail();
+      } finally {
+        pollInFlight = false;
+      }
+    }, 4000);
     return () => clearInterval(timer);
   }, [activeDetailProjectId]);
 
@@ -849,7 +860,10 @@ function App() {
   const dashboardPollSeqRef = useRef(0);
   useEffect(() => {
     refresh();
+    let pollInFlight = false;
     const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       // 序号守卫：慢响应晚于新响应到达时不得用旧数据覆盖新数据。
       const sequence = ++dashboardPollSeqRef.current;
       try {
@@ -859,6 +873,8 @@ function App() {
         setIsStale(false);
       } catch {
         if (sequence === dashboardPollSeqRef.current) setIsStale(true);
+      } finally {
+        pollInFlight = false;
       }
     }, 4000);
     return () => clearInterval(timer);

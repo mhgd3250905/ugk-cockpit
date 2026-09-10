@@ -138,7 +138,15 @@ function attachTimelineLane(item, resolver) {
  * - 'integration': Main-project integration receipts with an integrated commit
  * - 'work_line_closed' / 'work_line_reopened': User-authored work-line state records
  */
+// The HTTP layer clamps paging, but the timeline is also reachable from other
+// core callers; an unbounded page would build every event object at once.
+const MAX_TIMELINE_LIMIT = 100;
+
 export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = {}) {
+  const requestedLimit = Number(limit);
+  const requestedOffset = Number(offset);
+  const pageLimit = Math.max(0, Math.min(Number.isFinite(requestedLimit) ? requestedLimit : 30, MAX_TIMELINE_LIMIT));
+  const pageOffset = Math.max(0, Number.isFinite(requestedOffset) ? requestedOffset : 0);
   const laneResolver = timelineLaneResolver(db, projectId);
   const handoffRows = db.prepare(`
     SELECT h.id, h.sequence, h.assignment_id, h.project_id, h.worktree_id,
@@ -609,23 +617,10 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
     ...workLineEventItems,
   ].map((item) => attachTimelineLane(item, laneResolver));
 
-  // Sort only for display order. A branch name changing between adjacent
-  // events is not evidence of a checkout, ancestry, or a cross-worktree
-  // transition.
-  allItems.sort((a, b) => {
-    const timeA = new Date(a.timestamp).getTime();
-    const timeB = new Date(b.timestamp).getTime();
-    if (timeA !== timeB) return timeA - timeB;
-    const revA = Number(a.revision ?? 0);
-    const revB = Number(b.revision ?? 0);
-    if (revA !== revB) return revA - revB;
-    const seqA = Number(a.sequence ?? 0);
-    const seqB = Number(b.sequence ?? 0);
-    if (seqA !== seqB) return seqA - seqB;
-    return String(a.id).localeCompare(String(b.id));
-  });
-
-  // Reverse chronological sort (newest first)
+  // Reverse chronological sort (newest first). A branch name changing between
+  // adjacent events is not evidence of a checkout, ancestry, or a cross-worktree
+  // transition. The trailing id comparison keeps the order total, so paging is
+  // reproducible instead of depending on the storage order.
   allItems.sort((a, b) => {
     const timeA = new Date(a.timestamp).getTime();
     const timeB = new Date(b.timestamp).getTime();
@@ -640,8 +635,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
   });
 
   const total = allItems.length;
-  const paged = allItems.slice(offset, offset + limit);
-  const hasMore = offset + paged.length < total;
+  const paged = allItems.slice(pageOffset, pageOffset + pageLimit);
+  const hasMore = pageOffset + paged.length < total;
   const counts = new Map();
   for (const item of allItems) {
     counts.set(item.laneKey, (counts.get(item.laneKey) ?? 0) + 1);
@@ -653,8 +648,8 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
 
   return {
     total,
-    offset,
-    limit,
+    offset: pageOffset,
+    limit: pageLimit,
     hasMore,
     lanes,
     items: paged,

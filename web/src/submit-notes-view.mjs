@@ -162,8 +162,16 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
   // Polling every 4.5s keeps filter, page, and uncommitted draftRemarks
   useEffect(() => {
     if (!projectId || !api) return;
-    const timer = setInterval(() => {
-      fetchNotes(true);
+    // 与总览轮询一致：上一轮未结束就不再发起，避免慢响应把请求堆满。
+    let pollInFlight = false;
+    const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        await fetchNotes(true);
+      } finally {
+        pollInFlight = false;
+      }
     }, 4500);
     return () => clearInterval(timer);
   }, [fetchNotes, projectId, api]);

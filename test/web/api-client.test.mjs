@@ -176,3 +176,33 @@ test('API client treats a non-JSON response as a connection failure with the sta
     return true;
   });
 });
+
+test('API client abandons a request the service never answers instead of hanging forever', async () => {
+  let seenSignal = null;
+  const api = createClient({
+    // 服务接受了连接却永不返回：主机休眠或 handler 挂死时的半开连接。
+    // 真实 fetch 会在 signal 中止时以 AbortError 拒绝，这里同样模拟。
+    fetchImpl: async (path, options) => {
+      seenSignal = options.signal;
+      return new Promise((resolve, reject) => {
+        options.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+        });
+      });
+    },
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+
+  // 自行设界：一旦回归，本用例必须失败而不是把整个测试进程挂住。
+  const guard = setTimeout(() => {}, 2000);
+  const outcome = await Promise.race([
+    api('/api/v1/dashboard', { method: 'GET', timeoutMs: 20 })
+      .then(() => ({ settled: true }), (error) => ({ error })),
+    new Promise((resolve) => { setTimeout(() => resolve({ hung: true }), 1500); }),
+  ]);
+  clearTimeout(guard);
+  assert.equal(outcome.hung, undefined, 'a request the service never answers must not hang the UI');
+  assert.equal(seenSignal?.aborted, true, 'the deadline must actually abort the fetch');
+  assert.equal(outcome.error?.code, 'SERVICE_UNAVAILABLE');
+});
