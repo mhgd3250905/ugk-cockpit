@@ -46,6 +46,25 @@ function cleanup(root) {
   rmSync(path.dirname(root), { recursive: true, force: true });
 }
 
+// Windows keeps a directory handle in a just-exited git child for a moment;
+// renaming a repository right after the service probed it can transiently hit
+// EPERM. A bounded retry keeps the fixture deterministic without weakening the
+// behavior under test.
+function renameSyncWithRetry(from, to, attempts = 10) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (error) {
+      if (error?.code !== 'EPERM') throw error;
+      lastError = error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  throw lastError;
+}
+
 function fakeObservation(candidate, { coherence = 'coherent', state = 'clean' } = {}) {
   return {
     canonicalPath: candidate,
@@ -1018,7 +1037,7 @@ test('replacing a repository at the same path cannot complete the old run', asyn
       goal: 'repository replacement test',
     }),
   })).json();
-  renameSync(root, path.join(container, 'original-repository'));
+  renameSyncWithRetry(root, path.join(container, 'original-repository'));
   mkdirSync(root);
   initializeRepository(root, 'replacement');
 

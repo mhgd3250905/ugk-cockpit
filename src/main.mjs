@@ -49,8 +49,10 @@ try {
       process.exit(exitCode);
     }
   };
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  // Node passes the signal name as the first listener argument; wrap so stop
+  // always sees its exit-code parameter instead of e.g. 'SIGINT'.
+  process.once('SIGINT', () => stop());
+  process.once('SIGTERM', () => stop());
   // Last-resort guard: an escaped async error must not kill the service
   // silently. Log what happened, then shut down through the normal path.
   process.on('unhandledRejection', (reason) => {
