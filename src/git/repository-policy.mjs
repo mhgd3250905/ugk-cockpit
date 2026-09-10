@@ -36,8 +36,15 @@ const BASE_CONFIG_SCOPES = ['--local', '--worktree'];
 
 async function configScopes(cwd, overrides) {
   const scopes = [['--local', '--includes']];
-  const enabled = await git(cwd, ['config', '--local', '--get', 'extensions.worktreeConfig'], gitOptions(overrides));
-  if (/^true$/i.test(enabled.stdout.trim())) scopes.push(['--worktree', '--includes']);
+  // Git accepts `true`, `yes`, `on`, `1` and an empty value as boolean true.
+  // Comparing against the literal string would miss `1` and `yes`, and the
+  // driver in config.worktree would then load unprotected. `--bool` applies
+  // git's own normalisation; the include expansion matters because the flag
+  // can be set from an included file too.
+  const enabled = await git(
+    cwd, ['config', '--local', '--includes', '--bool', '--get', 'extensions.worktreeConfig'], gitOptions(overrides),
+  );
+  if (enabled.stdout.trim() === 'true') scopes.push(['--worktree', '--includes']);
   return scopes;
 }
 

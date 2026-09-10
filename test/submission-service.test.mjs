@@ -407,3 +407,63 @@ test('a retry still succeeds after the same owner recorded progress', async (t) 
   assert.equal(pushes, 1);
   assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 1);
 });
+
+// 首次提交此前只校验 revision：run 已 abandoned、租约已释放时，新 command 仍能
+// 建提交、推送并登记成功。活性与租约必须在两条路径上都生效。
+test('a first submission is refused when the run is abandoned and the lease released', async (t) => {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.spacePath, 'feature.txt'), 'done\n');
+  f.db.prepare("UPDATE runs SET lifecycle = 'abandoned' WHERE id = ?").run(f.sessionId);
+  f.db.prepare('DELETE FROM write_leases WHERE worktree_id = ?').run(f.sourceWorktreeId);
+
+  let commits = 0;
+  let pushes = 0;
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-abandoned-first',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '已放弃的会话不得提交',
+  }, {
+    createSubmissionCommit: async () => { commits += 1; },
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'SESSION_NOT_ACTIVE');
+  assert.equal(commits, 0);
+  assert.equal(pushes, 0);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 0);
+  assert.equal(git(f.spacePath, ['rev-parse', 'HEAD']), f.baseHead);
+});
+
+// 策略拒绝发生在仓库锁之后；锁必须在返回前释放，而不是等到 TTL 到期。
+test('a repository policy refusal releases the repository lock immediately', async (t) => {
+  const f = await fixture(t);
+  const refused = Object.assign(new Error('policy'), { code: 'GIT_FILTER_UNSUPPORTED' });
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-policy-lock',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '策略拒绝后释放锁',
+  }, {
+    assertRepositoryAllowed: async () => { throw refused; },
+    lockTtlMs: 600_000,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'GIT_FILTER_UNSUPPORTED');
+  const locks = f.db.prepare('SELECT * FROM repository_locks').all();
+  assert.equal(locks.length, 0, '拒绝返回时不得遗留仓库锁');
+
+  // 同一个仓库随后必须能立即再次取得锁。
+  const retry = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-policy-lock-retry',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '策略拒绝后释放锁（重试）',
+  }, {
+    assertRepositoryAllowed: async () => {},
+    hasUncommittedChanges: async () => false,
+  });
+  assert.notEqual(retry.code, 'REPOSITORY_LOCKED');
+});

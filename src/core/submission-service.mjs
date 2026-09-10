@@ -160,9 +160,12 @@ function retryableAttemptError(db, attempt, code, message, extra = {}, options =
  * @returns {string|null} the error code when the caller no longer owns the work.
  */
 function checkSubmissionOwnership(db, { context, sessionId, expectedRevision, attempt }) {
-  if (!attempt) {
-    return context.revision !== expectedRevision ? 'REVISION_CONFLICT' : null;
-  }
+  // The first pass is the caller's own statement of the revision it owns, so
+  // that value is a compare-and-swap...
+  if (!attempt && context.revision !== expectedRevision) return 'REVISION_CONFLICT';
+  // ...but liveness and the write lease hold on both passes. Skipping them on
+  // the first pass let an abandoned run whose lease was already released still
+  // create a commit, push it and register a submission.
   if (context.status !== 'active' || context.run?.lifecycle !== 'active') return 'SESSION_NOT_ACTIVE';
   // One active write lease per worktree: if another session now holds it, this
   // caller must not touch the repository even while its own run still looks
@@ -174,7 +177,9 @@ function checkSubmissionOwnership(db, { context, sessionId, expectedRevision, at
   if (lease && (lease.run_id !== sessionId || lease.generation !== context.run?.leaseGeneration)) {
     return 'SESSION_NOT_ACTIVE';
   }
-  return attempt.sessionId === sessionId ? null : 'SESSION_NOT_ACTIVE';
+  // A retry carries its own durable ownership record.
+  if (attempt) return attempt.sessionId === sessionId ? null : 'SESSION_NOT_ACTIVE';
+  return null;
 }
 
 export async function submitDevelopmentSpace(db, request = {}, options = {}) {
@@ -250,18 +255,16 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
   }
 
   const probe = options.probe ?? probeGitWorktree;
-  // `git status` inside the probe already runs clean filters, so the repository
-  // configuration is validated before the first probe — a gate placed after it
-  // would come too late to prevent execution.
   try {
+    // `git status` inside the probe already runs clean filters, so the repository
+    // configuration is validated before the first probe — a gate placed after it
+    // would come too late to prevent execution. The check lives inside this
+    // try/finally so a refusal releases the repository lock immediately instead
+    // of holding it until the TTL expires.
     await Promise.all([
       (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(context.canonicalPath),
       (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(project.canonical_path),
     ]);
-  } catch (error) {
-    return failCommand(db, commandId, { ok: false, code: error.code ?? 'SUBMIT_PROBE_FAILED', message: error.message }, options);
-  }
-  try {
     if (!attempt) {
       let sourceObservation;
       let targetObservation;

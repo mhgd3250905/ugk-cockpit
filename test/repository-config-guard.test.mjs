@@ -246,3 +246,26 @@ test('the guard runs before the first probe of a hostile main location', async (
   );
   assert.equal(existsSync(marker), false, '探测之前必须已经拒绝');
 });
+
+// Git 的布尔值不止 `true`：`1`、`yes`、`on` 同样启用 worktree 配置。按字面量
+// 比较会让这些仓库的 config.worktree 驱动完全不受保护。
+for (const enabled of ['true', '1', 'yes', 'on']) {
+  test(`worktreeConfig=${enabled} enables worktree-scoped config detection`, async (t) => {
+    const { repo } = createFixture(t, `ugk-guard-wtcfg-${enabled}-`);
+    gitSync(repo, ['config', 'extensions.worktreeConfig', enabled]);
+    gitSync(repo, ['config', '--worktree', 'filter.wt.smudge', markerCommand(path.join(repo, 'never.txt'))]);
+
+    assert.equal(gitSyncQuiet(repo, ['config', '--local', '--includes', '--get-regexp', '^filter\\.'], ''), '');
+    assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'filter' });
+  });
+}
+
+test('worktreeConfig enabled through an included file is honoured', async (t) => {
+  const { repo } = createFixture(t, 'ugk-guard-wtcfg-include-');
+  const included = path.join(repo, 'worktree-flag.config');
+  writeFileSync(included, '[extensions]\n\tworktreeConfig = 1\n');
+  gitSync(repo, ['config', '--local', 'include.path', slashes(included)]);
+  gitSync(repo, ['config', '--worktree', 'filter.wt.smudge', markerCommand(path.join(repo, 'never.txt'))]);
+
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'filter' });
+});
