@@ -1,9 +1,9 @@
-import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { backupBeforeMigration } from './core/backup.mjs';
 import { SUPPORTED_SCHEMA_VERSION } from './core/database.mjs';
 import { acquireInstanceLock } from './core/single-instance.mjs';
+import { loadOrCreateToken } from './core/token-file.mjs';
 import { createCockpitHttpServer } from './service/http-server.mjs';
 
 function dataDirectory() {
@@ -16,22 +16,6 @@ function dataDirectory() {
   const base = process.env.LOCALAPPDATA;
   if (!base) throw new Error('LOCALAPPDATA is required on Windows.');
   return path.join(base, 'UGK Cockpit');
-}
-
-function loadOrCreateToken(filePath) {
-  try {
-    return readFileSync(filePath, 'utf8').trim();
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-  const token = randomBytes(32).toString('base64url');
-  writeFileSync(filePath, `${token}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  try {
-    chmodSync(filePath, 0o600);
-  } catch {
-    // Windows ACL inheritance remains the primary protection on this host.
-  }
-  return token;
 }
 
 const dataDir = dataDirectory();
