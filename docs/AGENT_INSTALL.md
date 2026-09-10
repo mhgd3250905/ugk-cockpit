@@ -34,6 +34,8 @@ npm run setup:zcode -- --start-only
 
 Codex 和 ZCode 的安装及 `--start-only` 结果提供 `dataDirectory`，表示服务实际使用的数据目录。Windows 默认位置为 `%LOCALAPPDATA%\UGK Cockpit`，设置了自定义目录时以返回路径为准；程序目录、插件目录与数据目录用途不同。
 
+alpha.41 修复插件输出目录解析对 Windows 环境变量的无条件依赖。可用绝对路径 `UGK_PLUGIN_OUTPUT_ROOT` 指定插件输出根目录；它不改变服务数据目录。ZCode CLI 路径解析支持 POSIX 无扩展名程序及经 Node 启动的 JS 入口。上述兼容性修复不代表完整非 Windows 安装、原生选择器或宿主调用已完成现场验收；当前承诺的自动安装范围仍是 Windows Codex / ZCode。
+
 ## 脚本存活检查
 
 可执行以下免认证检查；也可将安装结果中 `serviceUrl` 的路径替换为 `/health`：
@@ -55,6 +57,8 @@ curl.exe http://127.0.0.1:41737/health
 ## 维护者验收
 
 构建入口 `node scripts/build-codex-plugin.mjs <输出目录>` 与 `node scripts/build-zcode-plugin.mjs <输出目录>` 从相同的仓库技能和 MCP 源码生成对应宿主的独立插件；不复制数据库、凭据、Git 或 node_modules。两宿主使用各自的输出目录，不能共用同一个安装源。插件内容版本来自 `VERSION` 和内容摘要，同内容重复构建可复用，不覆盖被改动的产物。清单源位于 `packaging/ugk-cockpit`，其本身不是可直接安装的成品。
+
+清单模板的 `0.1.0` 是占位值；构建器用 `VERSION` 替换并附加宿主与内容摘要。发布版本更新应修改版本事实源，不手动修改生成插件或把模板值当成已安装版本。
 
 ZCode 使用 `.zcode-plugin/plugin.json` 声明插件，marketplace 使用其兼容的 `.claude-plugin/marketplace.json` 与相对路径字符串来源。安装器调用 ZCode 原生插件接口，不伪造缓存与安装记录。ZCode 会给插件 MCP 添加宿主自己的命名空间；验收时按工具能力找到 `ugk_work_context`，不要因展示名称与 Codex 不同就重复添加独立 MCP。
 
@@ -84,4 +88,4 @@ ZCode 新聊天中对已安装插件的实际工具调用仍待验收。本轮�
 
 上述两次本地验收后，Codex 与 ZCode 安装实现已推送；`v0.1.0-alpha.40` 预发布指向 `b31618c51dbc7752d0d6302ca6059dbe3539a9af`。用户反馈另一台 Windows 机器上的 ZCode 安装成功，全部七个技能与 MCP 已安装，自动定位宿主和预览步骤可用；这是用户转述的异机结果，不作为开发方已独立验证该聊天全部业务操作的证明。
 
-alpha.40 修正 Node 版本范围及实际数据目录输出，并新增工作台使用指南和对话式技能说明。全量 478/478、Phase 0 97/97、安装及版本专项 24/24、网页构建和桌面交互验证通过。本机正式服务随后重启至 alpha.40，7 个已有项目及全部详情正常，用户确认指南页面无问题。未迁移本机已有手工技能或批量重启宿主；其他机器仍需更新程序及插件并完成当前聊天调用验收。
+alpha.40 修正 Node 版本范围及实际数据目录输出，并新增工作台使用指南和对话式技能说明。Windows / Node.js 24.15.0 下全量 478/478、Phase 0 97/97、安装及版本专项 24/24、网页构建和桌面交互验证通过。本机正式服务随后重启至 alpha.40，7 个已有项目及全部详情正常，用户确认指南页面无问题。未迁移本机已有手工技能或批量重启宿主；其他机器仍需更新程序及插件并完成当前聊天调用验收。
