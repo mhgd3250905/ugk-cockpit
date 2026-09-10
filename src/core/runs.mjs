@@ -637,12 +637,15 @@ export function takeoverWriteRun(db, request) {
   });
 }
 
-// User-confirmed escape hatch for an orphaned write lease: the previous
-// writer's process is gone without a finish, so the owner declares the run
-// abandoned. Mirrors finalizeFinish's lease release (terminal run + lease
-// delete) with the same revision/lease-generation fencing as heartbeat, but
-// creates no receipt because the code state was never re-observed. The
-// confirmation and every outcome land in the command journal, matching the
+// User-confirmed escape hatch for an orphaned write lease on an *unmanaged*
+// legacy run: the previous writer's process is gone without a finish, and no
+// assignment, conversation binding, or transfer record exists for the session,
+// so the owner declares the run abandoned. Managed work chains must go through
+// the workbench transfer protocol instead of this release. Mirrors
+// finalizeFinish's lease release (terminal run + lease delete) with the same
+// revision/lease-generation fencing as heartbeat, but creates no receipt
+// because the code state was never re-observed. The confirmation, the managed
+// refusal, and every outcome land in the command journal, matching the
 // takeover precedent.
 export function releaseOrphanedWriteRun(db, request, { faultInjector } = {}) {
   const { commandId, runId, expectedRevision, leaseGeneration, userConfirmed } = request;
@@ -666,6 +669,12 @@ export function releaseOrphanedWriteRun(db, request, { faultInjector } = {}) {
         code: 'RUN_LEASE_CONFIRMATION_REQUIRED',
         message: '释放残留的写入锁需要你明确确认。',
       };
+    } else if (db.prepare('SELECT 1 AS managed FROM assignments WHERE session_id = ?').get(runId)) {
+      // conversation_bindings and conversation_transfers both reference
+      // assignments(session_id) under foreign_keys=ON, so one assignment row
+      // means the session sits in a managed chain (possibly with a pending or
+      // frozen transfer) that only the workbench transfer protocol may resolve.
+      response = { ok: false, code: 'RUN_LEASE_MANAGED_SESSION', runId };
     } else {
       const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
       if (!run || run.lifecycle !== 'active') {

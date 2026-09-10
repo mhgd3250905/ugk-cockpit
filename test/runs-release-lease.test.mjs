@@ -1,12 +1,24 @@
-// 孤儿写租约恢复：Agent 崩溃未 finish 后，用户可经工作台授权释放租约，
-// 恢复该代码位置的开始/复用/移除。覆盖核心 fencing/确认日志/崩溃重放语义
-// 与 HTTP 路由门禁（路径授权、确认要求、MCP token 拒绝）。
+// 孤儿写租约恢复：Agent 崩溃未 finish 后，用户可经工作台授权释放"无工作链
+// 登记"的旧运行记录，恢复该代码位置的开始/复用/移除；受管理的工作会话
+// （assignment/聊天绑定/转交记录）必须走工作台转交协议，释放被拒绝且原状
+// 保留。覆盖核心 fencing/确认日志/崩溃重放语义与 HTTP 路由门禁。
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
+import { withCommandActor } from '../src/core/command-journal.mjs';
+import {
+  bindConversation,
+  readConversationOwner,
+} from '../src/core/conversation-bindings.mjs';
+import {
+  cancelConversationTransfer,
+  consumeConversationTransfer,
+  issueConversationTransfer,
+  readTransferState,
+} from '../src/core/conversation-transfers.mjs';
 import {
   finishRun,
   heartbeatWriteRun,
@@ -153,6 +165,135 @@ test('releaseOrphanedWriteRun：崩溃后释放租约并解除阻塞，fencing �
   db.close();
 });
 
+// 受管理工作链回归（统筹复审复现场景）：工作台签发转交后 assignment/run
+// 各推进一版；此前仅释放 run + 删租约会让转交卡死（消费/取消/重签全部
+// SESSION_NOT_ACTIVE）。现在带工作链登记的会话必须走转交协议，释放被拒。
+const TRANSFER_OPTIONS = { authorizationKey: 'test-only-persistent-secret', now: 1000000 };
+
+function seedManagedWork(db, runId, worktreeId) {
+  db.prepare(`
+    INSERT INTO projects (
+      id, name, stage, worktree_id, status, status_reason,
+      last_observed_at, created_at, updated_at
+    ) VALUES ('p', 'fixture', 'development', ?, 'active', '', 'now', 'now', 'now')
+  `).run(worktreeId);
+  db.prepare(`
+    INSERT INTO assignments (
+      id, project_id, worktree_id, agent_id, task_id, scope_json,
+      status, revision, session_id, created_at, updated_at
+    ) VALUES ('a', 'p', ?, 'agent', 'task', '{}', 'active', 1, ?, 'now', 'now')
+  `).run(worktreeId, runId);
+}
+
+test('受管理会话拒绝释放，待转交状态保持可取消、可接手', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-managed-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  // 场景一：签发转交后，取消授权仍可用。
+  const db = openCockpitDatabase(path.join(root, 'cancel.db'));
+  const started = startWriteRun(db, {
+    commandId: 'start-mgd',
+    runId: 'run-mgd',
+    ...START,
+    goal: 'managed writer',
+    baseline: baseline('a'),
+  });
+  seedManagedWork(db, 'run-mgd', 'worktree-release');
+  bindConversation(db, 'chat-A', {
+    sessionId: 'run-mgd',
+    worktreeId: 'worktree-release',
+    acceptedRevision: 1,
+  }, { owner: { bindingKind: 'host', host: 'zcode', locator: 'chat-A' } });
+  const issued = withCommandActor({ kind: 'user' }, () => issueConversationTransfer(db, {
+    sessionId: 'run-mgd',
+    expectedRevision: started.revision,
+    clientRequestId: 'issue',
+  }, TRANSFER_OPTIONS));
+  assert.equal(issued.revision, started.revision + 1);
+  assert.equal(readTransferState(db, 'run-mgd', TRANSFER_OPTIONS).frozen, true);
+
+  // 释放被拒：旧聊天冻结、转交挂起、租约与 run 全部原状。
+  const refused = releaseOrphanedWriteRun(db, releaseRequest({
+    commandId: 'release-managed',
+    runId: 'run-mgd',
+    expectedRevision: started.revision,
+    leaseGeneration: started.leaseGeneration,
+  }));
+  assert.equal(refused.code, 'RUN_LEASE_MANAGED_SESSION');
+  assert.equal(
+    db.prepare('SELECT lifecycle FROM runs WHERE id = ?').get('run-mgd').lifecycle,
+    'active',
+  );
+  assert.equal(db.prepare('SELECT count(*) AS n FROM write_leases').get().n, 1);
+  assert.equal(
+    db.prepare("SELECT state FROM conversation_transfers WHERE session_id = 'run-mgd'").get().state,
+    'pending',
+  );
+  assert.equal(readConversationOwner(db, 'run-mgd').conversationKey, 'chat-A');
+
+  // 转交链路未被破坏：取消授权照常成功并恢复原持有人。
+  const cancelled = withCommandActor({ kind: 'user' }, () => cancelConversationTransfer(db, {
+    sessionId: 'run-mgd',
+    expectedRevision: issued.revision,
+    clientRequestId: 'cancel',
+    restorePreviousOwner: true,
+  }, TRANSFER_OPTIONS));
+  assert.equal(cancelled.revision, issued.revision + 1);
+  assert.equal(readConversationOwner(db, 'run-mgd').conversationKey, 'chat-A');
+  assert.equal(readTransferState(db, 'run-mgd'), null);
+  db.close();
+
+  // 场景二：签发转交后，新聊天仍可凭码接手（可接手性）。
+  const db2 = openCockpitDatabase(path.join(root, 'consume.db'));
+  const started2 = startWriteRun(db2, {
+    commandId: 'start-mgd2',
+    runId: 'run-mgd2',
+    ...START,
+    goal: 'managed writer two',
+    baseline: baseline('a'),
+  });
+  seedManagedWork(db2, 'run-mgd2', 'worktree-release');
+  bindConversation(db2, 'chat-A', {
+    sessionId: 'run-mgd2',
+    worktreeId: 'worktree-release',
+    acceptedRevision: 1,
+  }, { owner: { bindingKind: 'host', host: 'zcode', locator: 'chat-A' } });
+  const issued2 = withCommandActor({ kind: 'user' }, () => issueConversationTransfer(db2, {
+    sessionId: 'run-mgd2',
+    expectedRevision: started2.revision,
+    clientRequestId: 'issue',
+  }, TRANSFER_OPTIONS));
+  assert.equal(
+    releaseOrphanedWriteRun(db2, releaseRequest({
+      commandId: 'release-managed-2',
+      runId: 'run-mgd2',
+      expectedRevision: started2.revision,
+      leaseGeneration: started2.leaseGeneration,
+    })).code,
+    'RUN_LEASE_MANAGED_SESSION',
+  );
+  const accepted = withCommandActor({ kind: 'ai', host: 'zcode', conversationId: 'chat-C' }, () => consumeConversationTransfer(db2, {
+    sessionId: 'run-mgd2',
+    conversationKey: 'C',
+    binding: { bindingKind: 'host', host: 'zcode', locator: 'chat-C' },
+    clientRequestId: 'consume',
+    transferCode: issued2.transferCode,
+  }, TRANSFER_OPTIONS));
+  assert.equal(accepted.revision, issued2.revision + 1);
+  assert.equal(readConversationOwner(db2, 'run-mgd2').conversationKey, 'C');
+  // 接手后依然不可直接释放，新聊天应走正常结束流程释放租约。
+  assert.equal(
+    releaseOrphanedWriteRun(db2, releaseRequest({
+      commandId: 'release-managed-3',
+      runId: 'run-mgd2',
+      expectedRevision: started2.revision,
+      leaseGeneration: started2.leaseGeneration,
+    })).code,
+    'RUN_LEASE_MANAGED_SESSION',
+  );
+  db2.close();
+});
+
 test('releaseOrphanedWriteRun：崩溃窗口内租约不丢失，同一命令可安全重放', (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-crash-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -234,6 +375,33 @@ test('POST /api/v1/runs/release-lease：路径授权、用户确认、fencing �
     baseline: baseline('a'),
   });
   assert.equal(outside.ok, true);
+  // 第三个崩溃残留 run-managed：在授权根内但登记了工作链（assignment），
+  // HTTP 层必须拒绝释放并引导走工作台转交协议。
+  const managedDir = path.join(fixtureRoot, 'wt-managed');
+  mkdirSync(managedDir, { recursive: true });
+  const managed = startWriteRun(setupDb, {
+    commandId: 'setup-managed',
+    runId: 'run-managed',
+    ...START,
+    worktreeId: 'worktree-managed',
+    canonicalPath: managedDir,
+    repositoryIdentity: 'repo-release',
+    goal: 'managed writer',
+    baseline: baseline('a'),
+  });
+  assert.equal(managed.ok, true);
+  setupDb.prepare(`
+    INSERT INTO projects (
+      id, name, stage, worktree_id, status, status_reason,
+      last_observed_at, created_at, updated_at
+    ) VALUES ('p', 'fixture', 'development', ?, 'active', '', 'now', 'now', 'now')
+  `).run('worktree-managed');
+  setupDb.prepare(`
+    INSERT INTO assignments (
+      id, project_id, worktree_id, agent_id, task_id, scope_json,
+      status, revision, session_id, created_at, updated_at
+    ) VALUES ('a', 'p', ?, 'agent', 'task', '{}', 'active', 1, 'run-managed', 'now', 'now')
+  `).run('worktree-managed');
   setupDb.close();
 
   const base = `http://127.0.0.1:${service.port}`;
@@ -291,6 +459,21 @@ test('POST /api/v1/runs/release-lease：路径授权、用户确认、fencing �
   assert.equal(outsideAttempt.status, 403);
   assert.equal((await outsideAttempt.json()).code, 'PATH_NOT_AUTHORIZED');
 
+  // 登记过工作链的会话拒绝直接释放（HTTP 层同样生效），并引导转交协议。
+  const managedAttempt = await fetch(`${base}/api/v1/runs/release-lease`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      commandId: 'http-release-managed',
+      runId: 'run-managed',
+      expectedRevision: managed.revision,
+      leaseGeneration: managed.leaseGeneration,
+      userConfirmed: true,
+    }),
+  });
+  assert.equal(managedAttempt.status, 409);
+  assert.equal((await managedAttempt.json()).code, 'RUN_LEASE_MANAGED_SESSION');
+
   // fencing 不匹配 → 409 STALE_WRITE_LEASE。
   const stale = await fetch(`${base}/api/v1/runs/release-lease`, {
     method: 'POST',
@@ -318,7 +501,7 @@ test('POST /api/v1/runs/release-lease：路径授权、用户确认、fencing �
   assert.equal(released.ok, true);
   assert.equal(released.status, 'abandoned');
 
-  // 释放后 run-inside 的租约消失，run-outside 的租约不受影响。
+  // 释放后 run-inside 的租约消失，run-outside 与 run-managed 的租约不受影响。
   const verifyDb = openCockpitDatabase(path.join(root, 'cockpit.db'));
   assert.equal(
     verifyDb.prepare('SELECT count(*) AS n FROM write_leases WHERE run_id = ?').get('run-inside').n,
@@ -326,6 +509,10 @@ test('POST /api/v1/runs/release-lease：路径授权、用户确认、fencing �
   );
   assert.equal(
     verifyDb.prepare('SELECT count(*) AS n FROM write_leases WHERE run_id = ?').get('run-outside').n,
+    1,
+  );
+  assert.equal(
+    verifyDb.prepare('SELECT count(*) AS n FROM write_leases WHERE run_id = ?').get('run-managed').n,
     1,
   );
   verifyDb.close();

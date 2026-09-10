@@ -337,6 +337,12 @@ const PUBLIC_ERRORS = {
     impact: '原 AI 工作会话没有被结束，代码没有变化。',
     requiredAction: '请先确认原来的 AI 已经停止，再带确认标记重新执行释放。',
   },
+  RUN_LEASE_MANAGED_SESSION: {
+    status: 409,
+    message: '这个工作会话已经登记过工作链或转交记录，不能直接释放写入锁。',
+    impact: '写入锁、工作链和待转交记录都保持原样，代码没有被修改。',
+    requiredAction: '请在工作台为它签发转交，由新聊天接手后正常结束；或先取消待转交记录。',
+  },
   STALE_WRITE_LEASE: {
     status: 409,
     message: '这次 AI 工作会话已经被接管。',

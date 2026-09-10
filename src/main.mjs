@@ -1,19 +1,9 @@
-import { randomBytes } from 'node:crypto';
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { backupBeforeMigration } from './core/backup.mjs';
 import { SUPPORTED_SCHEMA_VERSION } from './core/database.mjs';
 import { acquireInstanceLock } from './core/single-instance.mjs';
+import { loadOrCreateToken } from './core/token-file.mjs';
 import { createCockpitHttpServer } from './service/http-server.mjs';
 
 function dataDirectory() {
@@ -26,37 +16,6 @@ function dataDirectory() {
   const base = process.env.LOCALAPPDATA;
   if (!base) throw new Error('LOCALAPPDATA is required on Windows.');
   return path.join(base, 'UGK Cockpit');
-}
-
-function loadOrCreateToken(filePath) {
-  try {
-    return readFileSync(filePath, 'utf8').trim();
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-  const token = randomBytes(32).toString('base64url');
-  // Write to a temporary file and rename, so a crash mid-write can never
-  // leave a truncated token that would brick the next service start.
-  const temporaryPath = `${filePath}.${process.pid}.tmp`;
-  const descriptor = openSync(temporaryPath, 'wx', 0o600);
-  try {
-    writeSync(descriptor, `${token}\n`, null, 'utf8');
-    fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
-  }
-  try {
-    renameSync(temporaryPath, filePath);
-  } catch (error) {
-    try { unlinkSync(temporaryPath); } catch {}
-    throw error;
-  }
-  try {
-    chmodSync(filePath, 0o600);
-  } catch {
-    // Windows ACL inheritance remains the primary protection on this host.
-  }
-  return token;
 }
 
 const dataDir = dataDirectory();
