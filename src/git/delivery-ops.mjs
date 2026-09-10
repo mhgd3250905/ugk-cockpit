@@ -160,9 +160,15 @@ export async function assertSafePushTarget(worktreePath, remote, overrides = {})
 // Mirror semantics are never what this product wants — it pushes one named
 // branch and never all refs — so the key is reset to match the refspec the
 // caller already fixed, rather than treated as hostile configuration the way a
-// `url.*.pushInsteadOf` rewrite is. `remote` has passed assertSafeRemoteName by
-// the time this is used, so it cannot break out of the config key.
+// `url.*.pushInsteadOf` rewrite is.
+//
+// The remote name is validated here rather than trusted from the caller: the
+// value is interpolated into a `-c` key, so an unvalidated name could inject
+// other config keys or break out of the key entirely. Both current call sites
+// already go through assertSafePushTarget, which calls assertSafeRemoteName;
+// doing it again is cheap and keeps the contract local to the function.
 export function mirrorResetArguments(remote) {
+  assertSafeRemoteName(remote);
   return ['-c', `remote.${remote}.mirror=false`];
 }
 

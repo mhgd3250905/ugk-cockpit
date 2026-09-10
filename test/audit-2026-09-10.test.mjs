@@ -17,6 +17,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -24,9 +25,10 @@ import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
 import { startWriteRun } from '../src/core/runs.mjs';
 import { PROGRESS_STATUSES } from '../src/core/assignments-contract.mjs';
-import { SAFE_GIT_PREFIX } from '../src/git/probe.mjs';
+import { SAFE_GIT_PREFIX, safeGitEnvironment } from '../src/git/probe.mjs';
 import { mirrorResetArguments } from '../src/git/delivery-ops.mjs';
 import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
+import { pushIntegratedMain } from '../src/git/integration-ops.mjs';
 import { findHostileRepositoryConfiguration } from '../src/git/repository-policy.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 
@@ -43,6 +45,12 @@ function gitSync(cwd, args) {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
+}
+
+// `include.path` 在 Git for Windows 上同样接受反斜杠，但写成 POSIX 形式可以避免
+// 配置文件里的转义歧义。
+function slashes(value) {
+  return value.split(path.sep).join('/');
 }
 
 function createFixture(t, prefix) {
@@ -133,10 +141,134 @@ test('SAFE_GIT_PREFIX neutralises the generic transport keys', () => {
   }
 });
 
-// ------------------------------------------------------------------- mirror
+// 上面的用例只断言 argv 内容。这里用真实进程证明复位确实生效：仓库本地的
+// http.proxy 会让未加固的 Git 去连接该代理，而经过 SAFE_GIT_PREFIX 的同一命令
+// 根本不再使用代理。观察点是 Git 自己的诊断文本（代理地址是否被尝试），而不是
+// 一个真实的代理服务：连接到一个已确认关闭的端口会立刻失败，既不需要 TLS
+// 夹具，也不会因为 Git 重试而挂住。TLS 证书校验那一支需要可信夹具证书才能正向
+// 观察"连接成功"，因此只对"重定向"这支做行为验证，其余键由检测侧覆盖。
+test('SAFE_GIT_PREFIX actually stops a repo-local proxy from being used', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-proxy-neutralise-');
+  // Reserve a port, then release it, so nothing is listening on it.
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
+  const closedPort = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  gitSync(repo, ['remote', 'set-url', 'origin', 'https://example.invalid/secret/repo.git']);
+  gitSync(repo, ['config', '--local', 'http.proxy', `http://127.0.0.1:${closedPort}`]);
+
+  const run = (args) => {
+    try {
+      execFileSync('git', args, {
+        cwd: repo,
+        encoding: 'utf8',
+        windowsHide: true,
+        env: safeGitEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
+      });
+      return '';
+    } catch (error) {
+      return `${error.stdout ?? ''}${error.stderr ?? ''}`;
+    }
+  };
+
+  // 对照组：不加固时，仓库本地配置让 Git 经代理连接。curl 的诊断写作
+  // "Failed to connect to <host> port 443 via <proxy>"——代理端口本身不出现在
+  // 文本里，因此以 "via <proxy host>" 作为"确实用了代理"的判据。
+  const control = run(['ls-remote', 'origin']);
+  assert.match(
+    control,
+    /via 127\.0\.0\.1/,
+    'the control run must actually route through the proxy, or this test proves nothing',
+  );
+
+  // 加固组：同一命令加上产品使用的前缀后不得再使用代理；错误应来自目标主机本身。
+  const guarded = run([...SAFE_GIT_PREFIX, 'ls-remote', 'origin']);
+  assert.doesNotMatch(
+    guarded,
+    /via 127\.0\.0\.1/,
+    'the http.proxy reset must stop the proxy from being used, not merely appear in argv',
+  );
+  assert.match(guarded, /example\.invalid/, 'the guarded run must still fail against the real target');
+});
+
+// 与 filter 模式同理：--local 取不到 config.worktree，必须按仓库作用域展开。
+test('a transport key in the worktree scope is detected when the extension is on', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-wt-');
+  gitSync(repo, ['config', 'extensions.worktreeConfig', 'true']);
+  gitSync(repo, ['config', '--worktree', 'http.sslVerify', 'false']);
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+// 驱动与传输键都能藏在 include 文件里；只有带上 --includes 才看得见。
+test('a transport key hidden in an included config file is detected', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-include-');
+  const included = path.join(repo, 'hostile-transport.config');
+  writeFileSync(included, '[http]\n\tsslVerify = false\n');
+  gitSync(repo, ['config', '--local', 'include.path', slashes(included)]);
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+// 值感知：仓库显式加固自己的传输不应被当成敌意配置，而被削弱的必须被拒绝。
+// 只按键名匹配会把 sslVerify=true 这类加固设置一并否决。
+test('transport detection distinguishes hardening values from weakened ones', async (t) => {
+  for (const [key, value, expected, label] of [
+    ['http.sslVerify', 'true', null, 'explicit verification stays allowed'],
+    ['http.sslVerify', 'false', { kind: 'transport' }, 'verification removed'],
+    ['http.sslVerify', 'maybe', { kind: 'transport' }, 'unparseable fails closed'],
+    ['http.followRedirects', 'false', null, 'redirects off is hardening'],
+    ['http.followRedirects', 'initial', null, 'git default'],
+    ['http.followRedirects', 'true', { kind: 'transport' }, 'redirects on every request'],
+    ['http.schannelCheckRevoke', 'true', null, 'revocation checking kept on'],
+    ['http.schannelCheckRevoke', 'false', { kind: 'transport' }, 'revocation checking disabled'],
+    ['http.sslVersion', 'tlsv1.2', null, 'TLS minimum raised'],
+    ['http.sslVersion', 'sslv3', { kind: 'transport' }, 'TLS downgraded'],
+    ['http.sslCipherList', 'RC4-SHA', { kind: 'transport' }, 'cipher suite forced'],
+    ['http.cookieFile', 'cookies.txt', { kind: 'transport' }, 'cookie store'],
+  ]) {
+    const { repo } = createFixture(t, 'ugk-audit-transport-value-');
+    gitSync(repo, ['config', '--local', key, value]);
+    assert.deepEqual(
+      await findHostileRepositoryConfiguration(repo),
+      expected,
+      `${key}=${value}: ${label}`,
+    );
+  }
+});
+
+// --------------------------------------------------------------- mirror
 
 test('mirrorResetArguments resets only the named remote', () => {
   assert.deepEqual(mirrorResetArguments('origin'), ['-c', 'remote.origin.mirror=false']);
+});
+
+// 这个字符串会拼进 `-c` 键，未校验的名字可以注入其它配置键，因此函数自己必须
+// 拒绝不安全的名字，而不是依赖调用方先做检查。
+test('mirrorResetArguments refuses a remote name that could break the config key', () => {
+  for (const remote of ['--foo', 'a=b', 'origin; rm -rf /', 'a\nb', '', null, 'has/slash']) {
+    assert.throws(
+      () => mirrorResetArguments(remote),
+      (error) => error.code === 'UNSAFE_REMOTE_NAME',
+      `remote ${JSON.stringify(remote)} must be refused`,
+    );
+  }
+});
+
+// 集成推流走的是另一条 push 路径，同样固定推一个显式 refspec。
+test('a mirror-configured remote also integrates exactly the requested branch', async (t) => {
+  const { repo, bare } = createFixture(t, 'ugk-audit-mirror-integrate-');
+  gitSync(repo, ['checkout', '-q', '-b', 'cockpit/work/mirrorinteg01']);
+  gitSync(repo, ['config', '--local', 'remote.origin.mirror', 'true']);
+
+  await pushIntegratedMain(repo, { remote: 'origin', branch: 'cockpit/work/mirrorinteg01' });
+
+  assert.equal(
+    gitSync(bare, ['rev-parse', '--verify', 'refs/heads/cockpit/work/mirrorinteg01']),
+    gitSync(repo, ['rev-parse', 'HEAD']),
+    'the branch must actually reach the remote',
+  );
 });
 
 // `git clone --mirror` 会把 remote.<name>.mirror=true 写进配置，而 Git 在处理

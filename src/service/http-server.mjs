@@ -2381,12 +2381,17 @@ function isLoopbackAddress(address) {
 
 function allowedOrigin(origin, port) {
   if (!origin) return true;
-  // Must stay in step with ALLOWED_HOST_NAMES. A Host the service accepts but
-  // an Origin it rejects makes the whole API unusable under that loopback
-  // spelling: the page loads and receives its session cookie, then every
-  // /api/v1 call is refused with ORIGIN_REJECTED and a message blaming a
-  // foreign web page. `[::1]` was exactly that case — allowed as a Host since
-  // the host check was written, never allowed as an Origin.
+  // The Host allow-list accepts a superset of these spellings (it lowercases and
+  // tolerates a missing port), so this comparison is deliberately exact and
+  // case-sensitive rather than symmetric with it — browsers serialise a
+  // lowercased host with the port, which is the shape that matters here.
+  //
+  // `[::1]` was the one spelling the two lists disagreed about, so a page served
+  // over IPv6 loopback loaded and received its session cookie and then had every
+  // /api/v1 call refused with ORIGIN_REJECTED and a message blaming a foreign web
+  // page. Both shipped entry points bind 127.0.0.1, so this is a consistency
+  // fix rather than a production outage: it matters for a future `::1` bind and
+  // for anyone reaching the service through an IPv6 loopback forwarder.
   return origin === `http://127.0.0.1:${port}`
     || origin === `http://localhost:${port}`
     || origin === `http://[::1]:${port}`;
@@ -3124,6 +3129,11 @@ export async function createCockpitHttpServer({
         sendError(response, 'AUTH_REQUIRED');
         return;
       }
+      // Resolved once per authenticated request and reused for the whole
+      // request, so a legacy /api/v1/runs/* route cannot authorise its path
+      // against one snapshot of the granted folders and re-authorise the
+      // observed worktree against a different one.
+      const requestAuthorizedRoots = effectiveAuthorizedRoots();
       const conversationBinding = identity
         ? {
           key,
@@ -4762,7 +4772,7 @@ export async function createCockpitHttpServer({
         validateStartBody(body);
         const runId = body.runId ?? id('run', body.commandId);
         const commandPayload = { ...body, runId };
-        const binding = findGrant(body.worktreePath, effectiveAuthorizedRoots());
+        const binding = findGrant(body.worktreePath, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const begun = beginCommand(db, {
           commandId: body.commandId,
@@ -4783,7 +4793,7 @@ export async function createCockpitHttpServer({
           .get(binding.candidateReal)?.lifecycle_epoch ?? 0;
         const observation = { ...await probe(binding.candidateReal), lifecycleEpoch };
         revalidateAuthorizedPath(binding);
-        authorizeObservation(observation, effectiveAuthorizedRoots());
+        authorizeObservation(observation, requestAuthorizedRoots);
         const result = startWriteRun(db, {
           commandId: body.commandId,
           commandPayload,
@@ -4825,7 +4835,7 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        const binding = findGrant(row.canonical_path, effectiveAuthorizedRoots());
+        const binding = findGrant(row.canonical_path, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const commandPayload = { ...body, runId };
         const begun = beginCommand(db, {
@@ -4847,7 +4857,7 @@ export async function createCockpitHttpServer({
           expectedBaselineHead: row.baseline_head,
         });
         revalidateAuthorizedPath(binding);
-        authorizeObservation(observation, effectiveAuthorizedRoots());
+        authorizeObservation(observation, requestAuthorizedRoots);
         assertConversationWrite(key, body.sessionId);
         const result = finishRun(db, {
           commandId: body.commandId,
@@ -4884,7 +4894,7 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        const binding = findGrant(row.canonical_path, effectiveAuthorizedRoots());
+        const binding = findGrant(row.canonical_path, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const result = releaseOrphanedWriteRun(db, {
           commandId: body.commandId,
