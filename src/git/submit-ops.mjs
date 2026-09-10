@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { git } from './probe.mjs';
-import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
+import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES, mirrorResetArguments } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -128,7 +128,7 @@ export async function pushSubmissionBranch(worktreePath, { remote, branch, ...ov
   await assertSafePushTarget(worktreePath, remote, overrides);
   await git(
     worktreePath,
-    ['push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],
+    [...mirrorResetArguments(remote), 'push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],
     options(overrides),
   );
 }

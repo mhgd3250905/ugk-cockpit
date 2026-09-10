@@ -1,5 +1,5 @@
 import { git } from './probe.mjs';
-import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
+import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES, mirrorResetArguments } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -29,7 +29,7 @@ export async function pushIntegratedMain(worktreePath, { remote, branch, ...over
   await assertSafePushTarget(worktreePath, remote, overrides);
   await git(
     worktreePath,
-    ['push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],
+    [...mirrorResetArguments(remote), 'push', '--set-upstream', remote, `refs/heads/${branch}:refs/heads/${branch}`],
     options(overrides),
   );
 }

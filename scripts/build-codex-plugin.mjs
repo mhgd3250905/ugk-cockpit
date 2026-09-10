@@ -35,7 +35,7 @@ export function buildPluginPackage({ outputRoot, sourceRoot = repositoryRoot, ho
   }
   collect('skills');
   collect('src/mcp');
-  for (const name of ['VERSION', 'src/version.mjs', 'src/core/delivery-contract.mjs', 'src/core/submit-notes-contract.mjs']) {
+  for (const name of ['VERSION', 'src/version.mjs', 'src/core/delivery-contract.mjs', 'src/core/submit-notes-contract.mjs', 'src/core/assignments-contract.mjs']) {
     files.set(name, readFileSync(path.join(sourceRoot, name)));
   }
   const manifest = JSON.parse(readFileSync(path.join(sourceRoot, 'packaging/ugk-cockpit', manifestPath), 'utf8'));

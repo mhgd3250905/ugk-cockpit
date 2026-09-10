@@ -12,6 +12,7 @@ import { git } from './probe.mjs';
 //   diff.<driver>.command|textconv         -> runs on `git diff` / `log -p`
 //   url.*.insteadOf|pushInsteadOf          -> silently rewrites a push target
 //   remote.*.uploadpack|receivepack|proxy  -> runs on fetch / push
+//   http.* transport keys                  -> see HOSTILE_TRANSPORT_CONFIG_PATTERN
 //
 // Cockpit cannot prove a hostile driver is absent, so it fails closed before
 // any Git operation that could invoke one.
@@ -19,6 +20,39 @@ export const HOSTILE_LOCAL_CONFIG_PATTERN =
   '^(filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(command|textconv))$';
 export const HOSTILE_ANY_SCOPE_CONFIG_PATTERN =
   '^(url\\..*\\.(insteadof|pushinsteadof)|remote\\..*\\.(uploadpack|receivepack|proxy))$';
+
+// The `http.*` / `https.*` family is the transport configuration git consults
+// for an http(s) remote, and git reads it from the repository-local scope like
+// any other key. Three sub-classes matter, and all three are reachable with an
+// ordinary repository:
+//
+//   proxy, curloptResolve                  -> redirect the connection itself
+//   sslVerify, sslCAInfo, sslCert,         -> remove the check on who
+//     sslCAPath, pinnedPubkey, sslVersion     terminates TLS
+//   extraHeader                            -> injects request headers, and
+//                                             the credentialed push carries
+//                                             the user's real Git token
+//
+// Rejecting is correct rather than rewriting: unlike `remote.<name>.mirror`
+// (a benign setting Cockpit can neutralise, see submit-ops.mjs), a repository
+// that disables certificate validation or pins a private CA is a security
+// decision the user has to make deliberately, so silencing it would hide a
+// real problem. `sslVerify` in particular is commonly set globally by users
+// behind a corporate proxy; global and system scope are already discarded for
+// every Cockpit Git call (GIT_CONFIG_GLOBAL / GIT_CONFIG_NOSYSTEM in
+// safeGitEnvironment), so only a repository-owned setting can reach this
+// pattern and the user's own global preference is never affected.
+//
+// The url-scoped spelling `http.<url>.<key>` overrides the generic key for a
+// matching URL and is read from the same scope, so the pattern accepts both.
+// `http.postBuffer`, `http.version`, `http.userAgent`, `http.lowSpeedLimit`
+// and friends are deliberately left out: they tune transfer performance
+// without moving bytes to a different peer, and rejecting them would lock out
+// ordinary repositories.
+export const HOSTILE_TRANSPORT_CONFIG_PATTERN =
+  '^(https?\\.|https?\\..*\\.)'
+  + '(proxy|sslverify|sslcainfo|sslcapath|sslcert|sslkey|sslversion|sslbackend'
+  + '|pinnedpubkey|curloptresolve|extraheader|followredirects)$';
 
 // Drivers must be defined in a repository-owned config file. Scoping matters in
 // both directions:
@@ -129,20 +163,35 @@ function firstKey(stdout) {
  * Inspect the repository configuration and attribute sources that can make Git
  * execute attacker-chosen commands or redirect a push destination.
  *
- * @returns {Promise<null | {kind: 'filter' | 'remote' | 'attributes'}>}
+ * @returns {Promise<null | {kind: 'filter' | 'remote' | 'transport' | 'attributes'}>}
  */
 export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
   const scopes = await configScopes(cwd, overrides);
-  const [driverResults, redirectResult] = await Promise.all([
+  const [driverResults, redirectResult, transportResults] = await Promise.all([
     Promise.all(scopes.map((scope) => git(
       cwd, ['config', ...scope, '--get-regexp', HOSTILE_LOCAL_CONFIG_PATTERN], gitOptions(overrides),
     ))),
-    // A URL rewrite is just as dangerous from any scope, and this pattern can
-    // never match the command-line LFS entries, so all scopes are queried here.
+    // A URL rewrite is just as dangerous from any scope. This query is
+    // deliberately unscoped because SAFE_GIT_PREFIX passes no `url.*` or
+    // `remote.*` key of its own, so it cannot match Cockpit's own -c values.
     git(cwd, ['config', '--includes', '--get-regexp', HOSTILE_ANY_SCOPE_CONFIG_PATTERN], gitOptions(overrides)),
+    // Transport settings must be queried per repository-owned scope, for the
+    // same reason the filter pattern is: `git config --get-regexp` also reports
+    // command-line `-c` values, and SAFE_GIT_PREFIX now passes
+    // `http.proxy=` / `http.sslVerify=true` / `http.extraHeader=` on every call
+    // to neutralise those generic keys. An unscoped query therefore matched
+    // Cockpit's own resets and reported every clean repository as hostile
+    // (measured: `git config --list` shows the three -c entries, and the
+    // unscoped get-regexp returns them). `--local`/`--worktree` exclude
+    // command-line values while still catching repository-owned ones, and the
+    // url-scoped `http.<url>.<key>` spelling is read from the same scopes.
+    Promise.all(scopes.map((scope) => git(
+      cwd, ['config', ...scope, '--get-regexp', HOSTILE_TRANSPORT_CONFIG_PATTERN], gitOptions(overrides),
+    ))),
   ]);
   if (driverResults.some((result) => firstKey(result.stdout))) return { kind: 'filter' };
   if (firstKey(redirectResult.stdout)) return { kind: 'remote' };
+  if (transportResults.some((result) => firstKey(result.stdout))) return { kind: 'transport' };
 
   const attribute = await findFilterAttributeFile(cwd, overrides);
   if (attribute) return { kind: 'attributes' };
@@ -157,6 +206,7 @@ export const REPOSITORY_CONFIG_ERROR_CODES = {
   filter: 'GIT_FILTER_UNSUPPORTED',
   attributes: 'GIT_FILTER_UNSUPPORTED',
   remote: 'UNSAFE_REMOTE_URL',
+  transport: 'UNSAFE_REMOTE_URL',
 };
 
 export async function assertRepositoryAllowed(cwd, overrides = {}) {
@@ -172,6 +222,9 @@ export function repositoryConfigurationError(kind, { messages }) {
     filter: 'Git clean/smudge/process filters, including LFS, are not supported.',
     attributes: 'Git clean/smudge/process filters, including LFS, are not supported.',
     remote: 'Remote overrides are not supported.',
+    // Names the setting family, never the value: a repository controls both,
+    // and this text reaches the UI.
+    transport: 'Transport settings that redirect a Git connection or disable TLS verification are not supported.',
   }[kind];
   return Object.assign(new Error(detail), { code: messages[kind] });
 }

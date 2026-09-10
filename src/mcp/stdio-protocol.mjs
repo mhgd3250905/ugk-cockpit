@@ -4,9 +4,9 @@ import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { sanitizeIntegrationErrorPayload } from './service-client.mjs';
 import { normalizeReferences } from '../core/submit-notes-contract.mjs';
+import { PROGRESS_STATUSES } from '../core/assignments-contract.mjs';
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
-const PROGRESS_STATUSES = ['working', 'in_progress'];
 const STRUCTURED_TOOL_NAMES = new Set([
   'ugk_integration_begin',
   'ugk_integration_review',

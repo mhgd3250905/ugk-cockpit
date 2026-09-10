@@ -146,6 +146,26 @@ export async function assertSafePushTarget(worktreePath, remote, overrides = {})
   for (const url of urls) validateRemoteUrlSecurity(url, { cwd: worktreePath });
 }
 
+// `remote.<name>.mirror = true` is what `git clone --mirror` writes into the
+// clone's config, and git applies it to every push of that remote *before* it
+// looks at the refspec: `builtin/push.c` ORs TRANSPORT_PUSH_MIRROR (and FORCE)
+// in from the config, then dies with "--mirror can't be combined with
+// refspecs" because this product always pushes an explicit refspec. Measured on
+// git 2.51: the managed push exited 128 with exactly that fatal error and
+// nothing reached the remote, while the identical push succeeded once the key
+// was reset. The failure surfaced as a permanently retryable PUSH_FAILED with
+// no hint that repository configuration was the cause, so a mirror-configured
+// repository could never submit or integrate.
+//
+// Mirror semantics are never what this product wants — it pushes one named
+// branch and never all refs — so the key is reset to match the refspec the
+// caller already fixed, rather than treated as hostile configuration the way a
+// `url.*.pushInsteadOf` rewrite is. `remote` has passed assertSafeRemoteName by
+// the time this is used, so it cannot break out of the config key.
+export function mirrorResetArguments(remote) {
+  return ['-c', `remote.${remote}.mirror=false`];
+}
+
 export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
   if (typeof url !== 'string' || !url.trim()) {
     const error = new Error('Remote URL is empty or invalid.');
