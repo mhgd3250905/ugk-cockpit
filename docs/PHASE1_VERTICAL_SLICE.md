@@ -18,6 +18,8 @@
 4. **非终态进度状态枚举只存在于 MCP 桥**，HTTP 边界接受核心未拒绝的任意字符串，包括仅由 init 路径写入的 `adopted`：持 scoped token 的直接调用者可伪造一条"接入"事件并推高 assignment 与 run 的 revision。现由 `src/core/assignments-contract.mjs` 提供唯一定义，两处网关共同引用。
 5. **`main.mjs` 从不传 `authorizedRoots`，导致旧 `/api/v1/runs/*` 路由在生产环境对每个请求返回 `PATH_NOT_AUTHORIZED`**，上一轮交付的"用户确认释放残留写租约"路径只在注入夹具根的测试里可达。现授权根取注入列表与持久授予事实（`projects.authorized_root`、开发空间 worktree 路径）的并集，仍对未授予路径 fail closed。
 
+**本轮验证证据**（2026-09-10，Windows / Node.js 24.16.0）：新增回归 `test/audit-2026-09-10.test.mjs` **17/17**；`node --test --test-concurrency=1 test/repository-config-guard.test.mjs test/runs-release-lease.test.mjs test/codex-plugin.test.mjs test/zcode-plugin.test.mjs test/delivery-ops.test.mjs test/integration-service.test.mjs` **60/60**；`npm run test:phase0` **97/97**；`npm run build:web` 通过；全量 `npm test` **537/538**，唯一失败为上述既存夹具清理 `EPERM`（已确认基线同样失败）。台账既有证据命令（5 个文件的 40/40）可精确重现。
+
 **对既有记录的更正**（交叉核对结果）：
 
 - `docs/CONVERSATION_DURABILITY.md:5` 与 `docs/PHASE1_VERTICAL_SLICE.md` 的 alpha.41 段落、README"当前版本"段落都称未登记工作链的旧运行记录"可经用户确认释放残留写入锁"；PR #8 段落并称该路由"worktree 路径授权与 start/finish 同构"。该说法在 alpha.41 上不成立：该鉴权与始终为空的 `authorizedRoots` 组合使 `/api/v1/runs/start`、`/finish`、`/release-lease` 三个路由在生产环境不可达，且 UI 无按钮、浏览器不调用。本分支已修正授权来源；但正式服务仍运行 alpha.41，**在部署本分支之前，该恢复路径对用户依旧不可用**，上述文档的这句只有在升级之后才成立。相关措辞未改（它们描述的是已发布版本），以本段为准。
@@ -32,6 +34,7 @@
 - `remote.<name>.serverOption` 与 `remote.<name>.proxyAuthMethod` 与已验证的 `receivepack`/`uploadpack` 同族，但**未能复现其命令执行**（`remote.<name>.vcs=ssh` 只让 Git 去找不存在的 `git-remote-ssh` 助手），因此不加未经验证的拦截。
 - 传输族仍未穷举（如 `http.sslTry`）；`http.<url>.*` 的 url 部分语义未逐一核对。
 - 工作台仍无残留租约/围栏的释放按钮。
+- **全量 `npm test` 在本机有一项既存失败，与本分支无关**：`test/submission-service.test.mjs:374` 在 `after` 钩子清理夹具时以 `EPERM` 删除临时目录失败（断言本身未失败）。已核对：该失败在基线 `46bed0d` 上同样复现（连续两次），本分支未引入；加 `maxRetries`/`retryDelay`（本仓库 delivery-ops、project-edit 夹具既有写法）**无效**，说明句柄不是延迟释放而是被进程持有；测试进程退出后手工删除同一目录成功。**未查明具体占用手柄**，因此不宣称成因。全仓有 128 处夹具清理没有该重试参数，本机观察到的是其中一处。
 
 ### alpha.41：两轮审计修复合并与版本整理（2026-09-10）
 
