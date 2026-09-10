@@ -641,9 +641,11 @@ export function takeoverWriteRun(db, request) {
 // writer's process is gone without a finish, so the owner declares the run
 // abandoned. Mirrors finalizeFinish's lease release (terminal run + lease
 // delete) with the same revision/lease-generation fencing as heartbeat, but
-// creates no receipt because the code state was never re-observed.
-export function releaseOrphanedWriteRun(db, request) {
-  const { commandId, runId, expectedRevision, leaseGeneration } = request;
+// creates no receipt because the code state was never re-observed. The
+// confirmation and every outcome land in the command journal, matching the
+// takeover precedent.
+export function releaseOrphanedWriteRun(db, request, { faultInjector } = {}) {
+  const { commandId, runId, expectedRevision, leaseGeneration, userConfirmed } = request;
   const begun = beginCommand(db, {
     commandId,
     kind: 'run.release',
@@ -657,39 +659,50 @@ export function releaseOrphanedWriteRun(db, request) {
     const current = readCommand(db, commandId);
     const replay = terminalCommandResult(current);
     if (replay) return replay;
-    const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
     let response;
-    if (!run || run.lifecycle !== 'active') {
-      response = { ok: false, code: 'RUN_NOT_FOUND', runId };
-    } else if (
-      run.revision !== expectedRevision
-      || run.lease_generation !== leaseGeneration
-    ) {
-      response = { ok: false, code: 'STALE_WRITE_LEASE', runId };
-    } else {
-      const releasedAt = now();
-      const updated = db.prepare(`
-        UPDATE runs
-        SET lifecycle = 'abandoned', revision = revision + 1, finished_at = ?
-        WHERE id = ? AND lifecycle = 'active' AND revision = ? AND lease_generation = ?
-      `).run(releasedAt, runId, expectedRevision, leaseGeneration);
-      if (updated.changes !== 1) {
-        throw new Error('Run CAS failed while releasing the write lease.');
-      }
-      db.prepare('DELETE FROM write_leases WHERE run_id = ? AND generation = ?')
-        .run(runId, leaseGeneration);
+    if (userConfirmed !== true) {
       response = {
-        ok: true,
-        commandId,
-        runId,
-        status: 'abandoned',
-        revision: expectedRevision + 1,
+        ok: false,
+        code: 'RUN_LEASE_CONFIRMATION_REQUIRED',
+        message: '释放残留的写入锁需要你明确确认。',
       };
+    } else {
+      const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
+      if (!run || run.lifecycle !== 'active') {
+        response = { ok: false, code: 'RUN_NOT_FOUND', runId };
+      } else if (
+        run.revision !== expectedRevision
+        || run.lease_generation !== leaseGeneration
+      ) {
+        response = { ok: false, code: 'STALE_WRITE_LEASE', runId };
+      } else {
+        const releasedAt = now();
+        const updated = db.prepare(`
+          UPDATE runs
+          SET lifecycle = 'abandoned', revision = revision + 1, finished_at = ?
+          WHERE id = ? AND lifecycle = 'active' AND revision = ? AND lease_generation = ?
+        `).run(releasedAt, runId, expectedRevision, leaseGeneration);
+        if (updated.changes !== 1) {
+          throw new Error('Run CAS failed while releasing the write lease.');
+        }
+        faultInjector?.('release.after_run_cas');
+        db.prepare('DELETE FROM write_leases WHERE run_id = ? AND generation = ?')
+          .run(runId, leaseGeneration);
+        faultInjector?.('release.after_lease_release');
+        response = {
+          ok: true,
+          commandId,
+          runId,
+          status: 'abandoned',
+          revision: expectedRevision + 1,
+        };
+      }
     }
     db.prepare(`
       UPDATE commands SET state = ?, response_json = ?, updated_at = ?
       WHERE id = ? AND state = 'received'
     `).run(response.ok ? 'committed' : 'failed', canonicalJson(response), now(), commandId);
+    faultInjector?.('release.after_command_commit_before_transaction_commit');
     return response;
   });
 }

@@ -6,6 +6,8 @@
 
 ## 实施状态
 
+2026-09-10 外部审查修复轮（分支 `fix/audit-p0-lease-and-rebinding`）：全量 `npm test` **482/482**，Phase 0 **97/97**，`npm run build:web` 通过；两轮独立只读审查，第二轮通过。实测验证并修复两项 P0：一是 HTTP 服务此前不校验 Host 头，DNS rebinding 域可取得首页会话 Cookie 并读取项目数据，现所有请求在接触任何响应体、Cookie 或凭据面之前按本机地址白名单（`127.0.0.1`/`localhost`/`[::1]` 且端口匹配监听端口）校验，域外 Host 一律 421 `HOST_REJECTED`；二是 Agent 崩溃未 finish 时写租约此前成为永久孤儿，工作副本被 `WRITE_LEASE_CONFLICT`/`SPACE_HAS_ACTIVE_WORK` 永久阻塞且无恢复路径，新增用户确认的 `releaseOrphanedWriteRun` 与 `POST /api/v1/runs/release-lease`：run 置 `abandoned` 并删除租约，revision 与 lease_generation 双重 fencing，`userConfirmed` 与各结果落命令日志，worktree 路径授权与 start/finish 同构，MCP token 不可调用，崩溃窗口由事务回滚保证、同命令可安全重放。同轮加固：api-token 改临时文件 + fsync + rename 原子写，probe `git()` 补默认 5s/2MB 超时与输出上限，unsafe host 错误不再回显 URL。沿用 schema 27，无数据迁移，不改变既有认证边界。遗留：工作台 UI 的释放入口待下一迭代；工作副本被阻塞时暂可通过本机 API 释放。
+
 2026-09-09 alpha.40 发布前验收：全量 `npm test` **478/478**，Phase 0 **97/97**，安装器及版本专项 **24/24** 通过。生产网页构建、入口 Skill 格式校验、差异检查通过；独立只读审核无阻断。桌面浏览器验证指南入口、返回总览、刷新保留路由、全部七项内容、复制成功与失败反馈以及明暗主题显示。浏览器使用独立开发端口，不以该预览的项目列表或连接状态作为已有服务数据验收；当时没有重启正式服务或更改数据库。旧插件需更新并由宿主重新加载才能获得新版对话指引。本版本沿用 schema 27，不新增数据迁移。
 
 发布与部署已完成：`v0.1.0-alpha.40` 标签和 GitHub 预发布指向 `b31618c51dbc7752d0d6302ca6059dbe3539a9af`，推送后远端 main 与标签目标一致。随后按用户要求使用原数据目录重启本机正式服务，备份验证、7 个已有项目和全部详情核对通过，服务返回 alpha.40；用户确认使用指南页面正常。详见[本机升级验收](LOCAL_SERVICE_RECOVERY.md)。

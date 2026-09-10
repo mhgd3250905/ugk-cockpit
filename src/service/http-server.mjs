@@ -2941,10 +2941,6 @@ export async function createCockpitHttpServer({
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
-      if (!allowedHost(request.headers.host, currentPort)) {
-        sendError(response, 'HOST_REJECTED');
-        return;
-      }
       const requestedDiagnosticId = request.headers['x-ugk-diagnostic-id'];
       const diagnosticId = typeof requestedDiagnosticId === 'string'
         && DIAGNOSTIC_ID_PATTERN.test(requestedDiagnosticId)
@@ -2959,6 +2955,13 @@ export async function createCockpitHttpServer({
         identitySource: 'none',
         identityRecognized: false,
       };
+      // Checked after the diagnostic context exists so rejected foreign-Host
+      // requests stay observable, but before any response body, cookie, or
+      // credential surface.
+      if (!allowedHost(request.headers.host, currentPort)) {
+        sendError(response, 'HOST_REJECTED');
+        return;
+      }
       let key = null;
       let identity = null;
       if (request.headers['x-ugk-conversation']) {
@@ -4815,18 +4818,28 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/runs/release-lease') {
         const body = await readJson(request);
         validateReleaseLeaseBody(body);
-        if (body.userConfirmed !== true) {
-          sendError(response, 'RUN_LEASE_CONFIRMATION_REQUIRED', {
+        // Same path authorization as runs/start and runs/:runId/finish: the
+        // caller may only release a lease inside an authorized root.
+        const row = db.prepare(`
+          SELECT worktrees.canonical_path
+          FROM runs JOIN worktrees ON worktrees.id = runs.worktree_id
+          WHERE runs.id = ?
+        `).get(body.runId);
+        if (!row) {
+          sendError(response, 'RUN_NOT_FOUND', {
             commandId: body.commandId,
             extra: { run_id: body.runId },
           });
           return;
         }
+        const binding = findGrant(row.canonical_path, authorizedRoots);
+        revalidateAuthorizedPath(binding);
         const result = releaseOrphanedWriteRun(db, {
           commandId: body.commandId,
           runId: body.runId,
           expectedRevision: body.expectedRevision,
           leaseGeneration: body.leaseGeneration,
+          userConfirmed: body.userConfirmed,
         }, { faultInjector });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {

@@ -327,4 +327,6 @@ test('http-server: DNS rebinding 防护——Host 白名单之外的请求整体
   assert.match(ok.body, /<!doctype html|<html/i);
   const localhostOk = await rawRequest(service.port, '/health', { hostHeader: `localhost:${service.port}` });
   assert.equal(localhostOk.status, 200);
+  const ipv6Ok = await rawRequest(service.port, '/health', { hostHeader: `[::1]:${service.port}` });
+  assert.equal(ipv6Ok.status, 200);
 });
