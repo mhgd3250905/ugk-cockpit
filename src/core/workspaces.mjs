@@ -32,6 +32,7 @@ import {
   revalidateEmptyDirectory,
 } from './path-guard.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
+import { assertRepositoryAllowedForProbe } from '../git/repository-policy.mjs';
 import {
   checkBranchExists,
   createGitWorktree,
@@ -331,6 +332,21 @@ export async function createDevelopmentWorkspace(db, request = {}, options = {})
   }
 
   try {
+    // A probe of a hostile repository executes attacker-chosen clean filters
+    // (git status hashes worktree content through them), so the repository
+    // configuration gate runs before the first probe, not only before writes.
+    try {
+      await (options.assertRepositoryAllowed ?? assertRepositoryAllowedForProbe)(mainRepoPath);
+    } catch (err) {
+      const res = {
+        ok: false,
+        code: err.code ?? 'PROBE_FAILED',
+        message: err.message,
+      };
+      failCommand(db, commandId, res);
+      grantStore.unclaim(grantId, commandId);
+      return res;
+    }
     const probeFn = options.probe ?? probeGitWorktree;
     let mainObservation;
     try {
@@ -1123,6 +1139,19 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
     };
 
     const probe = options.probe ?? probeGitWorktree;
+    // Gate before the first probe: git status on a hostile repository runs
+    // attacker-chosen clean filters while observing the worktree.
+    try {
+      await (options.assertRepositoryAllowed ?? assertRepositoryAllowedForProbe)(space.canonicalPath);
+      await (options.assertRepositoryAllowed ?? assertRepositoryAllowedForProbe)(project.canonical_path);
+    } catch (error) {
+      return failOrUnknown({
+        ok: false,
+        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        spaceId: space.spaceId,
+        message: error.message,
+      });
+    }
     let workspaceObservation;
     try {
       workspaceObservation = await probe(space.canonicalPath);
@@ -1392,6 +1421,19 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     }
 
     const probe = options.probe ?? probeGitWorktree;
+    // Gate before the first probe: git status on a hostile repository runs
+    // attacker-chosen clean filters while observing the worktree.
+    try {
+      await (options.assertRepositoryAllowed ?? assertRepositoryAllowedForProbe)(space.canonicalPath);
+      await (options.assertRepositoryAllowed ?? assertRepositoryAllowedForProbe)(project.canonical_path);
+    } catch (error) {
+      return failOrUnknown({
+        ok: false,
+        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        spaceId: space.spaceId,
+        message: error.message,
+      });
+    }
     let workspaceObservation;
     try {
       workspaceObservation = await probe(space.canonicalPath);

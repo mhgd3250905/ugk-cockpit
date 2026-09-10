@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 27;
+export const SUPPORTED_SCHEMA_VERSION = 28;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1081,6 +1081,27 @@ END;
             entry.command.created_at,
           );
         }
+      }
+    },
+  },
+  {
+    version: 28,
+    name: 'workspace-lifecycle-reservation-owner-identity',
+    apply(db) {
+      const tableExists = (name) => Boolean(db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      ).get(name));
+      if (!tableExists('workspace_lifecycle_reservations')) return;
+      const columns = new Set(
+        db.prepare('PRAGMA table_info(workspace_lifecycle_reservations)').all().map((row) => row.name),
+      );
+      // Boot-relative start time of the process that created the reservation.
+      // A live PID alone cannot prove the creator is alive (Windows reuses
+      // PIDs quickly), which used to fence the repository forever after a
+      // crash; the start time distinguishes a PID reincarnation from the
+      // recorded owner. NULL rows (pre-28) stay conservative.
+      if (!columns.has('owner_started_at')) {
+        db.exec('ALTER TABLE workspace_lifecycle_reservations ADD COLUMN owner_started_at INTEGER;');
       }
     },
   },

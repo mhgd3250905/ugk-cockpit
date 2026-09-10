@@ -412,10 +412,14 @@ if (-not (Test-Path -LiteralPath $mainEntry)) {
 
 $mainEntry = (Resolve-Path -LiteralPath $mainEntry).Path
 
-$stdOutLog = Join-Path $LogDirectory 'service.log'
-$stdErrLog = Join-Path $LogDirectory 'service.err.log'
+# Start-Process redirects truncate their target, so a fixed service.log would
+# destroy the previous run's log on every relaunch — exactly when crash
+# history matters. Give each run its own files and keep the newest few.
+$runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$stdOutLog = Join-Path $LogDirectory "service-$runStamp.log"
+$stdErrLog = Join-Path $LogDirectory "service-$runStamp.err.log"
 $timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Add-Content -LiteralPath $stdOutLog -Value "`r`n=== [${timestamp}] UGK Cockpit launcher starting (repo: ${RepoDirectory}) ==="
+$launcherHeader = "`r`n=== [${timestamp}] UGK Cockpit launcher starting (repo: ${RepoDirectory}) ==="
 
 Write-Status 'START' 'Starting UGK Cockpit background service...'
 
@@ -430,6 +434,17 @@ $startParams = @{
 }
 
 $serviceProc = Start-Process @startParams
+# The redirect truncated the fresh file at spawn; append the header afterwards.
+Add-Content -LiteralPath $stdOutLog -Value $launcherHeader
+
+# Keep the most recent runs' logs; older ones are only crash history.
+$previousLogs = @(Get-ChildItem -LiteralPath $LogDirectory -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^service-\d{8}-\d{6}\.(log|err\.log)$' } |
+  Sort-Object Name -Descending)
+if ($previousLogs.Count -gt 10) {
+  $previousLogs | Select-Object -Skip 10 | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 $newPid = $serviceProc.Id
 
 Write-Status 'INFO' "Service spawned in background (PID: $newPid, WindowStyle: Hidden)."

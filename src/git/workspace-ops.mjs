@@ -40,6 +40,21 @@ export function isStableWorkspaceBranch(branch) {
   return typeof branch === 'string' && /^cockpit\/work\/[a-zA-Z0-9_-]+$/.test(branch);
 }
 
+// baseCommit sits in the trailing revision position of `git worktree add` /
+// `git switch`, where git still parses leading-dash tokens as OPTIONS (e.g. a
+// "--force" there would be consumed as a flag, not a revision). The callers
+// always mean a full object id reported by `git rev-parse HEAD`, so accept
+// exactly that and nothing else.
+export const GIT_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function assertGitObjectId(baseCommit) {
+  if (typeof baseCommit !== 'string' || !GIT_OBJECT_ID_PATTERN.test(baseCommit)) {
+    const error = new Error('baseCommit must be a full git object id (40 or 64 hex characters).');
+    error.code = 'INVALID_BASE_COMMIT';
+    throw error;
+  }
+}
+
 export async function checkBranchExists(repoPath, branchName, { timeoutMs = 5000, maxBuffer = 1024 * 1024 } = {}) {
   const result = await git(
     repoPath,
@@ -99,6 +114,7 @@ export async function createGitWorktree(repoPath, {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+  assertGitObjectId(baseCommit);
 
   await assertWorkspaceRepositoryAllowed(repoPath);
   try {
@@ -142,6 +158,7 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+  assertGitObjectId(baseCommit);
 
   await assertWorkspaceRepositoryAllowed(worktreePath);
   try {

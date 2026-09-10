@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import { withImmediateTransaction } from './database.mjs';
 
 const ACTIVE_ASSIGNMENT_STATES = ['pending', 'accepted', 'active'];
@@ -37,6 +38,36 @@ function processIsAlive(pid) {
   }
 }
 
+// Boot-relative start time of this process. Two processes can hold the same
+// PID one after the other (Windows reuses PIDs within minutes), but never the
+// same PID *and* start time, so a stored (pid, start) pair identifies the
+// creator generation without platform-specific process APIs. The value is
+// computed once per process: os.uptime() quantization would otherwise let two
+// readings drift apart and misclassify this very process as a PID reuse.
+const CURRENT_PROCESS_START = Math.max(0, Math.round((os.uptime() - process.uptime()) * 1000));
+
+export function currentProcessStartTime() {
+  return CURRENT_PROCESS_START;
+}
+
+function reservationOwnerStartedAt(row) {
+  // Number(null) === 0, so the null check must come first: rows without a
+  // recorded start time must stay conservative, not match start time 0.
+  if (row?.owner_started_at === null || row?.owner_started_at === undefined) return null;
+  const value = Number(row.owner_started_at);
+  return Number.isFinite(value) ? value : null;
+}
+
+// True when the reservation was recorded by THIS process generation and its
+// PID is still alive — i.e. the executor may genuinely still be running.
+function reservationOwnerCouldBeExecuting(row) {
+  if (!processIsAlive(row.owner_pid)) return false;
+  const startedAt = reservationOwnerStartedAt(row);
+  // Rows recorded before owner identity existed: stay conservative.
+  if (startedAt === null) return true;
+  return row.owner_pid === process.pid && startedAt === currentProcessStartTime();
+}
+
 function mapReservation(row) {
   if (!row) return null;
   return {
@@ -51,6 +82,7 @@ function mapReservation(row) {
     expectedRevision: row.expected_revision,
     expectedStatus: row.expected_status,
     ownerPid: row.owner_pid,
+    ownerStartedAt: row.owner_started_at,
     ownerToken: row.owner_token,
     startedAt: row.started_at,
     updatedAt: row.updated_at,
@@ -298,12 +330,15 @@ export function readWorkspaceLifecycleEpoch(db, worktreeId) {
 /**
  * Reserve a workspace lifecycle operation after all durable admission checks.
  * The row has no TTL. A different command may not replace it; only the same
- * command may reclaim it after the recorded executor process is gone.
+ * command may reclaim it after the recorded executor process generation is
+ * gone (a live PID whose start time differs from the recorded one is a reused
+ * PID, not the original executor).
  */
 export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
   const timestamp = iso(nowMillis(options));
   const ownerToken = request.ownerToken ?? randomUUID();
   const ownerPid = request.ownerPid ?? process.pid;
+  const ownerStartedAt = request.ownerStartedAt ?? currentProcessStartTime();
   const allowedStatuses = request.allowedStatuses ?? [];
 
   return withImmediateTransaction(db, () => {
@@ -315,16 +350,17 @@ export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
       if (sameOwner(current, { ...request, ownerToken })) {
         return inProgress(current);
       }
-      if (processIsAlive(current.owner_pid)) {
+      if (reservationOwnerCouldBeExecuting(current)) {
         return inProgress(current);
       }
       const reclaimed = db.prepare(`
         UPDATE workspace_lifecycle_reservations
-        SET owner_pid = ?, owner_token = ?, state = 'executing', updated_at = ?,
+        SET owner_pid = ?, owner_started_at = ?, owner_token = ?, state = 'executing', updated_at = ?,
             last_error_code = NULL
         WHERE repository_identity = ? AND command_id = ? AND owner_pid = ? AND owner_token = ?
       `).run(
         ownerPid,
+        ownerStartedAt,
         ownerToken,
         timestamp,
         request.repositoryIdentity,
@@ -378,8 +414,8 @@ export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
       INSERT INTO workspace_lifecycle_reservations (
         repository_identity, worktree_id, project_id, space_id, command_id,
         operation, state, epoch, expected_revision, expected_status,
-        owner_pid, owner_token, started_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'executing', ?, ?, ?, ?, ?, ?, ?)
+        owner_pid, owner_started_at, owner_token, started_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'executing', ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       request.repositoryIdentity,
       request.worktreeId,
@@ -391,6 +427,7 @@ export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
       request.expectedRevision,
       target.space.status,
       ownerPid,
+      ownerStartedAt,
       ownerToken,
       timestamp,
       timestamp,
@@ -526,7 +563,7 @@ export function releaseWorkspaceLifecycleExecutor(db, request = {}, options = {}
     if (!sameOwner(row, request)) return ownershipFailure(row, request);
     db.prepare(`
       UPDATE workspace_lifecycle_reservations
-      SET owner_pid = 0, owner_token = ?, updated_at = ?
+      SET owner_pid = 0, owner_started_at = NULL, owner_token = ?, updated_at = ?
       WHERE repository_identity = ? AND command_id = ? AND owner_token = ?
     `).run(
       `released:${randomUUID()}`,

@@ -133,8 +133,9 @@ test('schema 26 history upgrades repeatedly without changing existing work, leas
   for (let pass = 0; pass < 2; pass += 1) {
     const upgraded = openCockpitDatabase(f.dbPath);
     try {
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 27);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 28);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 27').get().n, 1);
+      assert.equal(upgraded.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 28').get().n, 1);
       for (const entry of before) assert.deepEqual(upgraded.prepare(entry.query).all(), entry.rows, entry.query);
       assert.equal(upgraded.prepare('PRAGMA foreign_key_check').all().length, 0);
       assert.equal(upgraded.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');

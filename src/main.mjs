@@ -36,13 +36,30 @@ try {
     port: 41737,
   });
   process.stdout.write(`UGK Cockpit Phase 0 service: http://${service.host}:${service.port}\n`);
+  let stopping = false;
   const stop = async () => {
-    await service.close();
-    lock.release();
-    process.exit(0);
+    if (stopping) return;
+    stopping = true;
+    try {
+      await service.close();
+    } finally {
+      // A failed close must not skip releasing the instance lock; otherwise
+      // the next start has to go through stale-lock recovery for nothing.
+      lock.release();
+      process.exit(0);
+    }
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  // Last-resort guard: an escaped async error must not kill the service
+  // silently. Log what happened, then shut down through the normal path.
+  process.on('unhandledRejection', (reason) => {
+    process.stderr.write(`[ugk-cockpit] unhandled rejection: ${reason?.stack ?? reason}\n`);
+  });
+  process.on('uncaughtException', (error) => {
+    process.stderr.write(`[ugk-cockpit] uncaught exception: ${error?.stack ?? error}\n`);
+    stop();
+  });
 } catch (error) {
   lock.release();
   throw error;

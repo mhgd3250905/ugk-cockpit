@@ -68,6 +68,8 @@ import {
   recordSessionIntegrationReview,
 } from '../core/integration-service.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
+import { assertRepositoryAllowedForProbe } from '../git/repository-policy.mjs';
+import { GIT_OBJECT_ID_PATTERN } from '../git/workspace-ops.mjs';
 import { closeFolderPicker, selectFolder } from '../platform/select-folder.mjs';
 import {
   createSubmitNote,
@@ -943,9 +945,15 @@ const PUBLIC_ERRORS = {
   },
   GIT_FILTER_UNSUPPORTED: {
     status: 409,
-    message: '当前版本暂不支持包含 Git filter 或 LFS 的自动送审。',
-    impact: '没有暂存、提交或上传文件。',
+    message: '这个仓库的 Git 配置包含 clean/smudge/process 过滤器（含 LFS），当前版本暂不支持自动处理。',
+    impact: '没有读取、暂存、提交或上传任何文件。',
     requiredAction: '请保留现状，改用人工 Git 流程并等待平台后续支持。',
+  },
+  UNSAFE_REMOTE_URL: {
+    status: 409,
+    message: '这个仓库的 Git 配置包含会改写远端地址或远端命令的设置，当前版本暂不支持自动处理。',
+    impact: '没有读取、暂存、提交、推送或修改任何文件。',
+    requiredAction: '请先在仓库配置中移除 url.*.insteadOf / remote.*.uploadpack / receivepack 等设置，再重新操作。',
   },
   SUBMODULE_UNSUPPORTED: {
     status: 409,
@@ -2475,6 +2483,7 @@ export async function createCockpitHttpServer({
   async function prepareFolderSelection(selectedPath, principalHash) {
     if (!selectedPath) return { ok: true, cancelled: true };
     const binding = authorizeExistingPath(selectedPath, selectedPath);
+    await assertRepositoryAllowedForProbe(binding.candidateReal);
     let observation;
     try {
       observation = await probe(binding.candidateReal);
@@ -2565,6 +2574,7 @@ export async function createCockpitHttpServer({
     const binding = authorizeExistingPath(expectedCanonicalPath, authorizedRoot);
     const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE id = ?')
       .get(targetWorktreeId)?.lifecycle_epoch ?? 0;
+    await assertRepositoryAllowedForProbe(binding.candidateReal);
     const observation = { ...await probe(
       binding.candidateReal,
       expected?.baselineHead ? { expectedBaselineHead: expected.baselineHead } : undefined,
@@ -3277,6 +3287,7 @@ export async function createCockpitHttpServer({
             return;
         }
         const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
+        await assertRepositoryAllowedForProbe(binding.candidateReal);
         const observation = await probe(binding.candidateReal);
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, [binding.rootReal]);
@@ -3351,6 +3362,10 @@ export async function createCockpitHttpServer({
         requireString(body, 'commandId');
         requireString(body, 'grantId');
         requireString(body, 'expectedBaseHead');
+        if (!GIT_OBJECT_ID_PATTERN.test(body.expectedBaseHead)) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
         if (body.name !== undefined && (typeof body.name !== 'string' || !body.name.trim())) {
           sendError(response, 'INVALID_REQUEST');
           return;
@@ -3412,7 +3427,13 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
-        if (action === 'reuse') requireString(body, 'expectedBaseHead');
+        if (action === 'reuse') {
+          requireString(body, 'expectedBaseHead');
+          if (!GIT_OBJECT_ID_PATTERN.test(body.expectedBaseHead)) {
+            sendError(response, 'INVALID_REQUEST');
+            return;
+          }
+        }
 
         const result = action === 'reuse'
           ? await reuseDevelopmentWorkspace(db, {
@@ -4735,6 +4756,7 @@ export async function createCockpitHttpServer({
         }
         const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE canonical_path = ?')
           .get(binding.candidateReal)?.lifecycle_epoch ?? 0;
+        await assertRepositoryAllowedForProbe(binding.candidateReal);
         const observation = { ...await probe(binding.candidateReal), lifecycleEpoch };
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, authorizedRoots);
@@ -4797,6 +4819,7 @@ export async function createCockpitHttpServer({
           });
           return;
         }
+        await assertRepositoryAllowedForProbe(binding.candidateReal);
         const observation = await probe(binding.candidateReal, {
           expectedBaselineHead: row.baseline_head,
         });

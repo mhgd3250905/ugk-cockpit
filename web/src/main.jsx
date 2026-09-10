@@ -350,9 +350,28 @@ function navigateToProjectList() {
   if (window.location.hash) window.location.hash = '';
 }
 
+// Touching window.localStorage can throw (e.g. "block all cookies"), which at
+// module scope would white-screen the whole console. Fall back to an in-memory
+// stand-in: the api client only uses it to remember its client id.
+function safeBrowserStorage() {
+  try {
+    const probe = '__ugk_storage_probe__';
+    window.localStorage.setItem(probe, probe);
+    window.localStorage.removeItem(probe);
+    return window.localStorage;
+  } catch {
+    const memory = new Map();
+    return {
+      getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+      setItem: (key, value) => { memory.set(key, String(value)); },
+      removeItem: (key) => { memory.delete(key); },
+    };
+  }
+}
+
 const api = createApiClient({
   fetchImpl: (...args) => fetch(...args),
-  storage: localStorage,
+  storage: safeBrowserStorage(),
   randomUUID: () => crypto.randomUUID(),
   origin: window.location.origin,
 });
