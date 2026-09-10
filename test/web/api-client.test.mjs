@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CLIENT_ID_KEY, createApiClient } from '../../web/src/api.js';
+import { createServer } from 'node:http';
+import { CLIENT_ID_KEY, createApiClient, FOLDER_SELECT_TIMEOUT_MS } from '../../web/src/api.js';
 
 function response(status, body = {}) {
   return {
@@ -205,4 +206,60 @@ test('API client abandons a request the service never answers instead of hanging
   assert.equal(outcome.hung, undefined, 'a request the service never answers must not hang the UI');
   assert.equal(seenSignal?.aborted, true, 'the deadline must actually abort the fetch');
   assert.equal(outcome.error?.code, 'SERVICE_UNAVAILABLE');
+});
+
+test('the native folder picker keeps waiting while the user is still choosing', async (t) => {
+  void t;
+  const server = createServer((request, response) => {
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ ok: true, cancelled: false, canonicalPath: 'C:/repo' }));
+    }, 400);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const origin = `http://127.0.0.1:${port}`;
+  const api = createApiClient({
+    origin,
+    // 真实 fetch 需要绝对地址；会话续期传的是相对路径 '/'。
+    fetchImpl: (path, options) => fetch(new URL(path, origin), options),
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+
+  // 服务端允许 120 秒等待原生选择器，客户端的预算必须更长，否则用户还在
+  // 选择时请求就被掐断。这里用缩放后的延迟验证同一机制。
+  assert.ok(FOLDER_SELECT_TIMEOUT_MS >= 125_000, '目录选择预算必须覆盖服务端的 120 秒');
+  const result = await api('/api/v1/folders/select', {
+    method: 'POST',
+    body: '{}',
+    timeoutMs: 2_000,
+  });
+  assert.equal(result.ok, true);
+  server.closeAllConnections?.();
+  server.close();
+});
+
+test('a request that outlives its budget still fails with the connection contract', async () => {
+  const server = createServer(() => { /* never respond */ });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const origin = `http://127.0.0.1:${port}`;
+  const api = createApiClient({
+    origin,
+    // 真实 fetch 需要绝对地址；会话续期传的是相对路径 '/'。
+    fetchImpl: (path, options) => fetch(new URL(path, origin), options),
+    storage: memoryStorage({ [CLIENT_ID_KEY]: 'browser-stable-client-0001' }),
+    randomUUID: () => 'not-used',
+  });
+  try {
+    await assert.rejects(
+      api('/api/v1/dashboard', { method: 'GET', timeoutMs: 150 }),
+      (error) => error.code === 'SERVICE_UNAVAILABLE',
+    );
+  } finally {
+    // 未响应的保活连接会让测试进程无法退出。
+    server.closeAllConnections?.();
+    server.close();
+  }
 });

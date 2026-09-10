@@ -2,45 +2,40 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   fsyncSync,
-  ftruncateSync,
   openSync,
   readFileSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs';
 
 const INCOMPLETE_LOCK_GRACE_MS = 5_000;
 const MAX_ACQUIRE_ATTEMPTS = 8;
-// A live PID alone does not prove the owner is Cockpit: operating systems
-// recycle PIDs, so a lock left behind by a crash can keep pointing at an
-// unrelated long-lived process and block startup forever. The owner therefore
-// refreshes a heartbeat, and a lock whose heartbeat has stopped is treated as
-// abandoned even while some process still owns the PID.
-const HEARTBEAT_INTERVAL_MS = 30_000;
-const HEARTBEAT_STALE_MS = 5 * 60_000;
-// Locks written before heartbeats existed carry no refresh evidence. After that
-// much time a surviving PID is far more likely to be a recycled one than a
-// Cockpit instance that never restarted.
-const LEGACY_LOCK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-function ownerAgeMs(owner, lockPath) {
-  const created = Date.parse(owner?.createdAt ?? '');
-  if (Number.isFinite(created)) return Date.now() - created;
-  return fileAgeMs(lockPath);
-}
-
-function ownerAlive(owner, lockPath) {
-  if (!processExists(owner.pid)) return false;
-  if (typeof owner.heartbeatAt !== 'string') {
-    const age = ownerAgeMs(owner, lockPath);
-    return age !== null && age < LEGACY_LOCK_MAX_AGE_MS;
+// A live PID alone does not prove the owner is Cockpit, because operating
+// systems recycle PIDs. Elapsed time proves even less: a healthy instance may
+// run for weeks, and a clock jump or a suspended machine makes any deadline
+// guess wrong. Stealing a lock from a running instance is far worse than
+// refusing to start, so reclaiming requires positive evidence that the process
+// now holding the PID is not the one that took the lock.
+//
+// Where the platform exposes a boot-relative process start time it can be
+// compared exactly; where it does not, there is no reliable identity to compare
+// and a live PID stays authoritative (the pre-existing behaviour).
+function processIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform !== 'linux') return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // The command name may contain spaces and is wrapped in parentheses; the
+    // start time is field 22, i.e. the 20th field after the closing paren.
+    const rest = stat.slice(stat.lastIndexOf(')') + 1).trimStart();
+    const starttime = rest.split(' ')[19];
+    return starttime && /^\d+$/.test(starttime) ? starttime : null;
+  } catch {
+    return null;
   }
-  const refreshed = Date.parse(owner.heartbeatAt);
-  if (!Number.isFinite(refreshed)) return true;
-  return Date.now() - refreshed < HEARTBEAT_STALE_MS;
 }
 
 function processExists(pid) {
@@ -69,6 +64,16 @@ function fileAgeMs(filePath) {
     if (error?.code === 'ENOENT') return null;
     throw error;
   }
+}
+
+function ownerAlive(owner) {
+  if (!processExists(owner?.pid)) return false;
+  // Reclaim only on a positive mismatch. An unknown identity on either side
+  // leaves the lock in place.
+  const current = processIdentity(owner.pid);
+  const recorded = typeof owner.processIdentity === 'string' ? owner.processIdentity : null;
+  if (current === null || recorded === null) return true;
+  return current === recorded;
 }
 
 function instanceConflict(state) {
@@ -129,7 +134,7 @@ function reclaimStaleLock(lockPath, pid) {
     if (!owner) {
       const age = fileAgeMs(lockPath);
       if (age !== null && age < INCOMPLETE_LOCK_GRACE_MS) return 'busy';
-    } else if (ownerAlive(owner, lockPath)) {
+    } else if (ownerAlive(owner)) {
       throw instanceConflict('running');
     }
     const stalePath = `${lockPath}.${randomUUID()}.stale`;
@@ -150,41 +155,23 @@ function reclaimStaleLock(lockPath, pid) {
   }
 }
 
-export function acquireInstanceLock(lockPath, { pid = process.pid, heartbeatMs = HEARTBEAT_INTERVAL_MS } = {}) {
+export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
   const ownerToken = randomUUID();
   for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
     try {
       const fd = openSync(lockPath, 'wx');
-      const createdAt = new Date().toISOString();
-      // The fd is held for the whole lifetime, so a refresh must explicitly
-      // rewrite from offset 0 after truncating; the file offset never resets.
-      // 先整段写入再截断到新长度：反过来做会留下一段文件为空的窗口，并发的
-      // 启动者会读到空锁文件。
-      const writeHeartbeat = (heartbeatAt) => {
-        const payload = Buffer.from(JSON.stringify({ pid, ownerToken, createdAt, heartbeatAt }), 'utf8');
-        let written = 0;
-        while (written < payload.length) {
-          written += writeSync(fd, payload, written, payload.length - written, written);
-        }
-        ftruncateSync(fd, written);
-        fsyncSync(fd);
-      };
-      writeHeartbeat(createdAt);
-      // Unref'd so the timer can never keep a shutting-down process alive.
-      const heartbeat = setInterval(() => {
-        try {
-          writeHeartbeat(new Date().toISOString());
-        } catch {
-          clearInterval(heartbeat);
-        }
-      }, heartbeatMs);
-      heartbeat.unref?.();
+      writeFileSync(fd, JSON.stringify({
+        pid,
+        ownerToken,
+        createdAt: new Date().toISOString(),
+        processIdentity: processIdentity(pid),
+      }), 'utf8');
+      fsyncSync(fd);
       let released = false;
       return {
         release() {
           if (released) return;
           released = true;
-          clearInterval(heartbeat);
           try {
             closeSync(fd);
           } catch (error) {
@@ -202,7 +189,7 @@ export function acquireInstanceLock(lockPath, { pid = process.pid, heartbeatMs =
       if (error?.code !== 'EEXIST') throw error;
       const owner = readJsonFile(lockPath);
       if (owner?.vanished) continue;
-      if (owner && ownerAlive(owner, lockPath)) throw instanceConflict('running');
+      if (owner && ownerAlive(owner)) throw instanceConflict('running');
       if (!owner) {
         const age = fileAgeMs(lockPath);
         if (age === null) continue;

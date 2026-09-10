@@ -9,7 +9,7 @@ import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
 import { fastForwardMain, pushIntegratedMain } from '../src/git/integration-ops.mjs';
 import { checkUnsupportedFeatures } from '../src/git/delivery-ops.mjs';
 import { createGitWorktree, generateStableBranchName } from '../src/git/workspace-ops.mjs';
-import { findHostileRepositoryConfiguration } from '../src/git/repository-policy.mjs';
+import { assertRepositoryAllowed, findHostileRepositoryConfiguration } from '../src/git/repository-policy.mjs';
 
 // POSIX 的系统临时目录本身可能是符号链接；产品路径授权按契约拒绝穿越链接
 // 的路径，夹具必须建立在真实路径下。
@@ -24,6 +24,16 @@ function gitSync(cwd, args) {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
+}
+
+// `git config --get-regexp` 无匹配时退出码为 1，execFileSync 会抛错。
+function gitSyncQuiet(cwd, args) {
+  try {
+    return gitSync(cwd, args);
+  } catch (error) {
+    if (error.status === 1) return '';
+    throw error;
+  }
 }
 
 function slashes(value) {
@@ -198,4 +208,41 @@ test('attributes adopted through the common directory are detected from a linked
     'fixture 必须真的让链接副本采用该属性',
   );
   assert.deepEqual(await findHostileRepositoryConfiguration(linked), { kind: 'attributes' });
+});
+
+test('a driver hidden in an included config file is detected', async (t) => {
+  const { repo } = createFixture(t, 'ugk-guard-include-');
+  // include.path 默认不被 `--get-regexp` 展开，驱动可以完全藏在这里。
+  const included = path.join(repo, 'hostile.config');
+  writeFileSync(included, '[filter "evil"]\n\tsmudge = node -e ""\n');
+  // include.path 相对路径由 git 按被包含文件所在目录解析，这里用绝对路径更稳妥。
+  gitSync(repo, ['config', '--local', 'include.path', slashes(included)]);
+  assert.ok(gitSyncQuiet(repo, ['config', '--get-regexp', '^filter\\.']).includes('filter.evil'),
+    'fixture 必须让 git 真的读到被包含文件里的驱动');
+
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'filter' });
+});
+
+test('a driver in the worktree-scoped config is detected', async (t) => {
+  const { repo } = createFixture(t, 'ugk-guard-worktree-cfg-');
+  gitSync(repo, ['config', 'extensions.worktreeConfig', 'true']);
+  gitSync(repo, ['config', '--worktree', 'filter.wt.smudge', markerCommand(path.join(repo, 'never.txt'))]);
+
+  // --local 永远看不到 config.worktree 的内容。
+  assert.equal(gitSyncQuiet(repo, ['config', '--local', '--get-regexp', '^filter\\.']), '');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'filter' });
+});
+
+test('the guard runs before the first probe of a hostile main location', async (t) => {
+  const { repo } = createFixture(t, 'ugk-guard-before-probe-');
+  const marker = path.join(repo, 'pwned-by-probe.txt');
+  writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+  gitSync(repo, ['config', '--local', 'filter.evil.clean', markerCommand(marker)]);
+
+  // 探针本身运行 `git status`，足以触发 clean 过滤器：闸门必须更早。
+  await assert.rejects(
+    () => assertRepositoryAllowed(repo),
+    (error) => error.code === 'GIT_FILTER_UNSUPPORTED',
+  );
+  assert.equal(existsSync(marker), false, '探测之前必须已经拒绝');
 });

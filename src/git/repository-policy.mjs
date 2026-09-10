@@ -8,20 +8,38 @@ import { git } from './probe.mjs';
 // pointed at a repository it did not author. Git reads classes of settings that
 // turn ordinary operations into command execution or redirect a destination:
 //
-//   filter.<driver>.clean|smudge|process   -> runs on `git add` / checkout
+//   filter.<driver>.clean|smudge|process   -> runs on `git add` / checkout / status
 //   diff.<driver>.command|textconv         -> runs on `git diff` / `log -p`
 //   url.*.insteadOf|pushInsteadOf          -> silently rewrites a push target
 //   remote.*.uploadpack|receivepack|proxy  -> runs on fetch / push
 //
-// The first two only fire through a driver that the local config defines, so
-// that query is scoped to `--local`. A URL rewrite is just as dangerous coming
-// from any scope — the original delivery check deliberately queried every scope,
-// and narrowing it would let a global pushInsteadOf redirect a push that the URL
-// validator never sees.
+// Cockpit cannot prove a hostile driver is absent, so it fails closed before
+// any Git operation that could invoke one.
 export const HOSTILE_LOCAL_CONFIG_PATTERN =
   '^(filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(command|textconv))$';
 export const HOSTILE_ANY_SCOPE_CONFIG_PATTERN =
   '^(url\\..*\\.(insteadof|pushinsteadof)|remote\\..*\\.(uploadpack|receivepack|proxy))$';
+
+// Drivers must be defined in a repository-owned config file. Scoping matters in
+// both directions:
+//   * `--local` / `--worktree` keep command-line `-c` values (SAFE_GIT_PREFIX
+//     passes empty `filter.lfs.*` on every call) and the user's global LFS
+//     setup out of the result — an unscoped query matches those and rejects
+//     perfectly ordinary repositories.
+//   * `--worktree` is a separate scope holding `config.worktree`, which
+//     `--local` never reports. It can only be queried when the repository
+//     enables `extensions.worktreeConfig`; otherwise git aborts with a fatal
+//     error, so the scope is resolved per repository rather than hard-coded.
+//   * `--includes` is required because the default for `--get-regexp` is to
+//     ignore `include.path` / `includeIf`, where a driver can be hidden.
+const BASE_CONFIG_SCOPES = ['--local', '--worktree'];
+
+async function configScopes(cwd, overrides) {
+  const scopes = [['--local', '--includes']];
+  const enabled = await git(cwd, ['config', '--local', '--get', 'extensions.worktreeConfig'], gitOptions(overrides));
+  if (/^true$/i.test(enabled.stdout.trim())) scopes.push(['--worktree', '--includes']);
+  return scopes;
+}
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BUFFER = 2 * 1024 * 1024;
@@ -61,13 +79,22 @@ async function attributeFileCandidates(cwd, overrides) {
   const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
     .map((value) => path.resolve(cwd, value));
 
-  // In a linked worktree git only reads `$GIT_COMMON_DIR/info/attributes`, not
-  // the per-worktree admin directory, so the common dir is the path to check.
-  const common = await git(cwd, ['rev-parse', '--git-common-dir'], gitOptions(overrides));
-  if (common.stdout) paths.push(path.resolve(cwd, common.stdout, 'info', 'attributes'));
+  // Git reads info/attributes from the common directory (shared by every linked
+  // worktree) and, for worktree-scoped state, from the per-worktree admin
+  // directory. Both are outside the working tree, so a file scan cannot see
+  // either; ask git where they are.
+  const [common, worktreeDir] = await Promise.all([
+    git(cwd, ['rev-parse', '--git-common-dir'], gitOptions(overrides)),
+    git(cwd, ['rev-parse', '--git-dir'], gitOptions(overrides)),
+  ]);
+  for (const directory of [common.stdout, worktreeDir.stdout]) {
+    if (directory) paths.push(path.resolve(cwd, directory, 'info', 'attributes'));
+  }
 
-  const custom = await git(cwd, ['config', '--local', '--get', 'core.attributesFile'], gitOptions(overrides));
-  if (custom.stdout) paths.push(resolveConfigPath(cwd, custom.stdout));
+  for (const scope of await configScopes(cwd, overrides)) {
+    const custom = await git(cwd, ['config', ...scope, '--get', 'core.attributesFile'], gitOptions(overrides));
+    if (custom.stdout) paths.push(resolveConfigPath(cwd, custom.stdout));
+  }
   return [...new Set(paths)];
 }
 
@@ -98,16 +125,37 @@ function firstKey(stdout) {
  * @returns {Promise<null | {kind: 'filter' | 'remote' | 'attributes'}>}
  */
 export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
-  const [localKeys, anyScopeKeys] = await Promise.all([
-    git(cwd, ['config', '--local', '--get-regexp', HOSTILE_LOCAL_CONFIG_PATTERN], gitOptions(overrides)),
-    git(cwd, ['config', '--get-regexp', HOSTILE_ANY_SCOPE_CONFIG_PATTERN], gitOptions(overrides)),
+  const scopes = await configScopes(cwd, overrides);
+  const [driverResults, redirectResult] = await Promise.all([
+    Promise.all(scopes.map((scope) => git(
+      cwd, ['config', ...scope, '--get-regexp', HOSTILE_LOCAL_CONFIG_PATTERN], gitOptions(overrides),
+    ))),
+    // A URL rewrite is just as dangerous from any scope, and this pattern can
+    // never match the command-line LFS entries, so all scopes are queried here.
+    git(cwd, ['config', '--includes', '--get-regexp', HOSTILE_ANY_SCOPE_CONFIG_PATTERN], gitOptions(overrides)),
   ]);
-  if (firstKey(localKeys.stdout)) return { kind: 'filter' };
-  if (firstKey(anyScopeKeys.stdout)) return { kind: 'remote' };
+  if (driverResults.some((result) => firstKey(result.stdout))) return { kind: 'filter' };
+  if (firstKey(redirectResult.stdout)) return { kind: 'remote' };
 
   const attribute = await findFilterAttributeFile(cwd, overrides);
   if (attribute) return { kind: 'attributes' };
   return null;
+}
+
+// `git status` alone already runs clean filters, so a probe of a hostile
+// repository executes attacker-chosen commands before any later guard would
+// run. Flows that probe and then write must therefore call this before their
+// first probe, not merely before their first write.
+export const REPOSITORY_CONFIG_ERROR_CODES = {
+  filter: 'GIT_FILTER_UNSUPPORTED',
+  attributes: 'GIT_FILTER_UNSUPPORTED',
+  remote: 'UNSAFE_REMOTE_URL',
+};
+
+export async function assertRepositoryAllowed(cwd, overrides = {}) {
+  const { messages = REPOSITORY_CONFIG_ERROR_CODES, ...gitOverrides } = overrides;
+  const hostile = await findHostileRepositoryConfiguration(cwd, gitOverrides);
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages });
 }
 
 // Existing call sites keep the error codes their contracts and messages already

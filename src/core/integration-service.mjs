@@ -20,6 +20,7 @@ import {
   updateDevelopmentSpaceStatus,
 } from './spaces.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
+import { assertRepositoryAllowed } from '../git/repository-policy.mjs';
 import {
   choosePushRemote,
   isCommitDescendant,
@@ -108,6 +109,13 @@ function validateMainObservation(observation, project) {
     && observation.worktreeIdentity === project.identity_fingerprint;
 }
 
+// `git status` triggers clean filters, so the repository configuration is
+// validated before the very first probe of a code location — after probing, the
+// attacker's command has already run.
+async function assertMainAllowed(project, options = {}) {
+  await assertRepositoryAllowed(project.canonical_path, options);
+}
+
 async function probeMain(project, options = {}) {
   const observation = await (options.probe ?? probeGitWorktree)(project.canonical_path);
   if (!validateMainObservation(observation, project)) {
@@ -165,6 +173,8 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
   }
   let main;
   try {
+    // 探测会执行 clean 过滤器，因此必须先核对仓库配置。
+    await assertMainAllowed(binding.project, options);
     main = await probeMain(binding.project, options);
   } catch (error) {
     return { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' };
@@ -317,6 +327,8 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
   }
   let main;
   try {
+    // 探测会执行 clean 过滤器，因此必须先核对仓库配置。
+    await assertMainAllowed(binding.project, options);
     main = await probeMain(binding.project, options);
   } catch (error) {
     return failCommand(db, commandId, { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' }, options);
@@ -523,6 +535,8 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       return { ok: false, code: attempt.lastErrorCode, humanActionRequired: true };
     }
     if (attempt.state === 'prepared') {
+      // 探测会执行 clean 过滤器，因此必须先核对仓库配置。
+      await assertMainAllowed(binding.project, options);
       const main = await probeMain(binding.project, options);
       if (main.after.hasChanges) return retryableMergeError(db, attempt, 'MAIN_HAS_CHANGES', 'Main has local changes.', options);
       // A prepared attempt may be retried long after its first pass.  The
@@ -594,6 +608,8 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     }
 
     if (attempt.state === 'local_integrated') {
+      // 探测会执行 clean 过滤器，因此必须先核对仓库配置。
+      await assertMainAllowed(binding.project, options);
       const main = await probeMain(binding.project, options);
       if (main.after.head !== attempt.integratedCommit || main.after.hasChanges) {
         updateAttempt(db, commandId, { state: 'attention', last_error_code: 'MAIN_CHANGED_AFTER_INTEGRATION' }, options);

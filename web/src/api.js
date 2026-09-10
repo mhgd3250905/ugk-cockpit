@@ -8,6 +8,24 @@ const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10_000;
 
+// The native folder picker waits for a human: the service allows 120s before it
+// gives up on the helper. A global request deadline shorter than that would
+// abort a selection the user is still making, so these endpoints get a budget
+// that outlives the server's own limit.
+export const FOLDER_SELECT_TIMEOUT_MS = 125_000;
+const LONG_OPERATION_TIMEOUT_MS = {
+  '/api/v1/folders/select': FOLDER_SELECT_TIMEOUT_MS,
+  '/api/v1/folders/select-empty': FOLDER_SELECT_TIMEOUT_MS,
+};
+
+function timeoutFor(path) {
+  try {
+    return LONG_OPERATION_TIMEOUT_MS[new URL(path, 'http://127.0.0.1').pathname] ?? DEFAULT_TIMEOUT_MS;
+  } catch {
+    return DEFAULT_TIMEOUT_MS;
+  }
+}
+
 function deadline(ms) {
   return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(ms) : undefined;
 }
@@ -95,7 +113,7 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
       headers['content-type'] = 'application/json';
     }
 
-    const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, ...rest } = options;
+    const { timeoutMs = timeoutFor(path), signal: callerSignal, ...rest } = options;
     let response;
     try {
       response = await fetchImpl(path, {

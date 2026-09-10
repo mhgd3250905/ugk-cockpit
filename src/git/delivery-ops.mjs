@@ -14,6 +14,7 @@ import { assertSafeRemoteName, SAFE_GIT_PREFIX } from './probe.mjs';
 import {
   findHostileRepositoryConfiguration,
   repositoryConfigurationError,
+  REPOSITORY_CONFIG_ERROR_CODES,
 } from './repository-policy.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -21,11 +22,8 @@ const execFileAsync = promisify(execFile);
 // Every Git write this product performs must fail closed on repository-local
 // configuration that can execute commands or redirect a destination. The codes
 // below are the contracts delivery messages and existing call sites publish.
-export const DELIVERY_CONFIG_ERROR_CODES = {
-  filter: 'GIT_FILTER_UNSUPPORTED',
-  attributes: 'GIT_FILTER_UNSUPPORTED',
-  remote: 'UNSAFE_REMOTE_URL',
-};
+// Alias kept for the existing delivery-side importers; the policy module owns it.
+export const DELIVERY_CONFIG_ERROR_CODES = REPOSITORY_CONFIG_ERROR_CODES;
 
 // One hardened argv prefix for every Git invocation this product makes,
 // including the delivery flow: the explicit per-protocol denies matter because
