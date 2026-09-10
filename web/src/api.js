@@ -1,6 +1,43 @@
 export const CLIENT_ID_KEY = 'ugk-cockpit-client-id';
 
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{16,128}$/;
+// The service is a local process: if it accepted the connection it must answer
+// quickly. Without a deadline a half-open socket (host sleep, a hung handler)
+// leaves the request pending forever, and a fixed-interval poll then stacks
+// until the browser's per-origin connection limit blocks every user action.
+const DEFAULT_TIMEOUT_MS = 15_000;
+const SESSION_TIMEOUT_MS = 10_000;
+
+// The native folder picker waits for a human: the service allows 120s before it
+// gives up on the helper. A global request deadline shorter than that would
+// abort a selection the user is still making, so these endpoints get a budget
+// that outlives the server's own limit.
+export const FOLDER_SELECT_TIMEOUT_MS = 125_000;
+const LONG_OPERATION_TIMEOUT_MS = {
+  '/api/v1/folders/select': FOLDER_SELECT_TIMEOUT_MS,
+  '/api/v1/folders/select-empty': FOLDER_SELECT_TIMEOUT_MS,
+};
+
+function timeoutFor(path) {
+  try {
+    return LONG_OPERATION_TIMEOUT_MS[new URL(path, 'http://127.0.0.1').pathname] ?? DEFAULT_TIMEOUT_MS;
+  } catch {
+    return DEFAULT_TIMEOUT_MS;
+  }
+}
+
+function deadline(ms) {
+  return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(ms) : undefined;
+}
+
+// A caller-supplied signal must not silently disable the deadline: combine them
+// so either one aborts the request.
+function withDeadline(signal, ms) {
+  const timer = deadline(ms);
+  if (!timer) return signal;
+  if (!signal) return timer;
+  return typeof AbortSignal?.any === 'function' ? AbortSignal.any([signal, timer]) : signal;
+}
 
 export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
   let renewalPromise = null;
@@ -36,6 +73,7 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
         credentials: 'same-origin',
         cache: 'no-store',
         headers: { accept: 'text/html' },
+        signal: deadline(SESSION_TIMEOUT_MS),
       })
         .catch((error) => { throw sessionError(error); })
         .finally(() => { renewalPromise = null; });
@@ -75,14 +113,17 @@ export function createApiClient({ fetchImpl, storage, randomUUID, origin }) {
       headers['content-type'] = 'application/json';
     }
 
+    const { timeoutMs = timeoutFor(path), signal: callerSignal, ...rest } = options;
     let response;
     try {
       response = await fetchImpl(path, {
-        ...options,
+        ...rest,
         credentials: 'same-origin',
         headers,
+        signal: withDeadline(callerSignal, timeoutMs),
       });
     } catch (error) {
+      // 超时与连接失败同样进入既有连接错误契约，界面因此始终给出可操作提示。
       throw connectionError(error);
     }
     let body;

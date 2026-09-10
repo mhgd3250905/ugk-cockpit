@@ -11,8 +11,19 @@ import { createDeliveryCache, assertDeliveryCache, discardDeliveryCache } from '
 import { remoteAuthArguments } from './remote-auth.mjs';
 import { acquireDeliveryIndexLock, assertDeliveryIndexLock, releaseDeliveryIndexLock } from './delivery-index-lock.mjs';
 import { assertSafeRemoteName, SAFE_GIT_PREFIX } from './probe.mjs';
+import {
+  findHostileRepositoryConfiguration,
+  repositoryConfigurationError,
+  REPOSITORY_CONFIG_ERROR_CODES,
+} from './repository-policy.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// Every Git write this product performs must fail closed on repository-local
+// configuration that can execute commands or redirect a destination. The codes
+// below are the contracts delivery messages and existing call sites publish.
+// Alias kept for the existing delivery-side importers; the policy module owns it.
+export const DELIVERY_CONFIG_ERROR_CODES = REPOSITORY_CONFIG_ERROR_CODES;
 
 // One hardened argv prefix for every Git invocation this product makes,
 // including the delivery flow: the explicit per-protocol denies matter because
@@ -114,6 +125,13 @@ export function isLocalPath(rawUrl, cwd = null) {
 // credentials, no ssh option hostnames — before any network operation starts.
 export async function assertSafePushTarget(worktreePath, remote, overrides = {}) {
   assertSafeRemoteName(remote);
+  // Belt and braces: every push in the product funnels through this helper, so
+  // the repository-local configuration check lives here as well as in the
+  // per-flow gates. `remote.*.receivepack` / `url.*.pushInsteadOf` are executed
+  // or applied by git itself during transport, after URL validation would have
+  // already succeeded.
+  const hostile = await findHostileRepositoryConfiguration(worktreePath, overrides);
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
   const resolved = await runGit(
     worktreePath,
     ['remote', 'get-url', '--push', '--all', remote],
@@ -441,23 +459,16 @@ export async function checkUnfinishedGitOperations(cwd) {
 }
 
 export async function checkUnsupportedFeatures(cwd) {
-  const [stagedEntries, localFilters, attrFilters] = await Promise.all([
+  const [stagedEntries, hostile] = await Promise.all([
     runGit(cwd, ['ls-files', '--stage'], { acceptExitCodes: [0, 1] }),
-    runGit(cwd, ['config', '--local', '--get-regexp', '^filter\\..*\\.(clean|process)$'], { acceptExitCodes: [0, 1] }),
-    runGit(cwd, ['grep', '--untracked', '-I', '-n', '-E', 'filter[[:space:]]*=', '--', '*.gitattributes'], { acceptExitCodes: [0, 1] }),
+    findHostileRepositoryConfiguration(cwd),
   ]);
   if (stagedEntries.stdout.split(/\r?\n/).some((line) => line.startsWith('160000 '))) {
     const error = new Error('Submodules are not supported by delivery inspection.');
     error.code = 'SUBMODULE_UNSUPPORTED';
     throw error;
   }
-  if (localFilters.stdout || attrFilters.stdout) {
-    const error = new Error('Git clean/process filters and attributes are not supported.');
-    error.code = 'GIT_FILTER_UNSUPPORTED';
-    throw error;
-  }
-  const redirects = await runGit(cwd, ['config', '--get-regexp', '^(url\\..*\\.(insteadof|pushinsteadof)|remote\\..*\\.(uploadpack|receivepack|proxy))$'], { acceptExitCodes: [0, 1] });
-  if (redirects.stdout) throw Object.assign(new Error('Remote overrides are not supported'), { code: 'UNSAFE_REMOTE_URL' });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
 }
 
 export function validateDeliveryFiles(files, changes, sourcePath) {

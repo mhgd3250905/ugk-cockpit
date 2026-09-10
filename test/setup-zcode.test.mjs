@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { setupZcode, createZcodeClient, inspectZcodeLegacy } from '../scripts/setup-zcode.mjs';
+import { setupZcode, createZcodeClient, inspectZcodeLegacy, resolveZcodeCli } from '../scripts/setup-zcode.mjs';
+import { resolvePluginOutputRoot } from '../scripts/plugin-output-root.mjs';
 
 function fixture() {
   const calls = [];
@@ -116,4 +117,46 @@ test('legacy MCP fallback is inspected only when native user servers are empty',
   assert.equal(inspectZcodeLegacy({ home }).mcp, true);
   writeFileSync(path.join(home, '.zcode/cli/config.json'), JSON.stringify({ mcp: { servers: { other: {} } } }));
   assert.equal(inspectZcodeLegacy({ home }).mcp, false);
+});
+
+test('the CLI resolver finds the platform-native executable name', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'zcode-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // POSIX 安装的可执行文件通常没有扩展名，而 Windows 上是 .exe。
+  const name = process.platform === 'win32' ? 'zcode.exe' : 'zcode';
+  const target = path.join(dir, name);
+  writeFileSync(target, '#!/bin/sh\nexit 0\n');
+  if (process.platform !== 'win32') chmodSync(target, 0o755);
+
+  const resolved = resolveZcodeCli({ PATH: dir });
+  assert.equal(resolved.file, target);
+  assert.deepEqual(resolved.args, []);
+});
+
+test('a JS CLI entry is still started through the node interpreter', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'zcode-cjs-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'zcode.cjs');
+  writeFileSync(target, '// entry\n');
+  const resolved = resolveZcodeCli({ PATH: dir });
+  assert.equal(resolved.file, process.execPath);
+  assert.deepEqual(resolved.args, [target]);
+});
+
+test('the plugin output root is resolved without a Windows-only environment variable', () => {
+  const explicit = resolvePluginOutputRoot('plugin-packages', {
+    env: { UGK_PLUGIN_OUTPUT_ROOT: '/tmp/ugk-output' },
+    platform: 'linux',
+  });
+  assert.equal(explicit, path.resolve('/tmp/ugk-output', 'plugin-packages'));
+
+  const posix = resolvePluginOutputRoot('plugin-packages', { env: {}, platform: 'linux' });
+  assert.ok(path.isAbsolute(posix));
+  assert.ok(posix.endsWith(path.join('UGK Cockpit', 'plugin-packages')));
+
+  // 缺少平台位置时必须给出可操作的错误，而不是把 undefined 交给 path.join。
+  assert.throws(
+    () => resolvePluginOutputRoot('plugin-packages', { env: {}, platform: 'win32' }),
+    /UGK_PLUGIN_OUTPUT_ROOT/,
+  );
 });

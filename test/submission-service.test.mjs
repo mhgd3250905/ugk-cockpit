@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -296,4 +296,174 @@ test('COMMIT_IDENTITY_MISSING is preserved by submitDevelopmentSpace without bei
   assert.equal(result.code, 'COMMIT_IDENTITY_MISSING');
   const attempt = readSubmissionAttempt(f.db, 'submit-identity-missing');
   assert.equal(attempt.lastErrorCode, 'COMMIT_IDENTITY_MISSING');
+});
+
+// 重试会执行与首次完全相同的提交与推送，因此归属必须在每次进入时重新证明：
+// 已被接管或结束的会话，不能凭旧的 commandId 把改动推送到远端并登记送审。
+async function abortedPushAttempt(t) {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.spacePath, 'feature.txt'), 'done\n');
+  const request = {
+    commandId: 'submit-retry-ownership',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '重试归属边界',
+  };
+  const first = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => {
+      throw Object.assign(new Error('network down'), { code: 'PUSH_FAILED' });
+    },
+  });
+  assert.equal(first.ok, false);
+  assert.equal(readSubmissionAttempt(f.db, request.commandId).state, 'local_saved');
+  return { f, request };
+}
+
+test('a retry after the session was superseded cannot push or register a submission', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  // 另一次接管推进了 revision 并结束了原会话。
+  f.db.prepare(`UPDATE runs SET lifecycle = 'superseded', revision = 7 WHERE id = ?`).run(f.sessionId);
+  f.db.prepare(`UPDATE assignments SET revision = 7 WHERE session_id = ?`).run(f.sessionId);
+
+  let pushes = 0;
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.code, 'SESSION_NOT_ACTIVE');
+  assert.equal(pushes, 0);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 0);
+});
+
+test('a retry is refused when another session now holds the write lease', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  const lease = f.db.prepare('SELECT * FROM write_leases WHERE worktree_id = ?').get(f.sourceWorktreeId);
+  assert.ok(lease, 'fixture 应已为会话建立写租约');
+  const timestamp = new Date().toISOString();
+  f.db.prepare(`
+    INSERT INTO runs (id, worktree_id, mode, lifecycle, health, revision, lease_generation,
+                      agent_claim, goal, created_at)
+    VALUES (?, ?, 'write', 'active', 'healthy', 2, ?, 'Other', 'Taken over', ?)
+  `).run('session-other', f.sourceWorktreeId, (lease.generation ?? 0) + 1, timestamp);
+  f.db.prepare('UPDATE write_leases SET run_id = ?, generation = ? WHERE worktree_id = ?')
+    .run('session-other', (lease.generation ?? 0) + 1, f.sourceWorktreeId);
+
+  let pushes = 0;
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+  assert.equal(retry.ok, false);
+  assert.equal(retry.code, 'SESSION_NOT_ACTIVE');
+  assert.equal(pushes, 0);
+});
+
+test('a workspace without a write lease is not blocked by the ownership check', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  // 没有写租约行的历史工作副本不应被新增的租约校验挡住。
+  f.db.prepare('DELETE FROM write_leases WHERE worktree_id = ?').run(f.sourceWorktreeId);
+
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => {},
+  });
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+});
+
+// 真实调用链验证：探针里的 `git status` 足以触发 clean 过滤器，因此送审必须在
+// 探测之前就拒绝敌意仓库，而不是等到 rejectUnsupportedSubmitFeatures。
+// 开发空间是主项目的链接工作副本，二者共享 common 目录的配置与属性来源。
+test('a hostile repository is refused before the first probe of the real submit chain', async (t) => {
+  const f = await fixture(t);
+  const marker = path.join(f.root, 'pwned-by-submit-probe.txt');
+  writeFileSync(path.join(f.mainPath, '.git', 'info', 'attributes'), '* filter=evil\n');
+  git(f.mainPath, ['config', '--local', 'filter.evil.clean',
+    `node -e "require('fs').writeFileSync('${marker.split(path.sep).join('/')}','pwned')"`]);
+
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-hostile-probe',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '敌意仓库探测前拦截',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'GIT_FILTER_UNSUPPORTED');
+  assert.equal(existsSync(marker), false, '探测之前必须已经拒绝，过滤器不得被执行');
+  assert.equal(readSubmissionAttempt(f.db, 'submit-hostile-probe'), null);
+});
+
+// 进展会推进 revision，这既不代表失权，也不能让恢复被永久判死：恢复路径以
+// 持久归属（会话仍拥有 run、仍持写租约、attempt 记录的同会话）为准。
+test('a retry still succeeds after the same owner recorded progress', async (t) => {
+  const { f, request } = await abortedPushAttempt(t);
+  // 同一会话记录一次 progress：assignment 与 run 的 revision 都前进。
+  f.db.prepare('UPDATE assignments SET revision = 3 WHERE session_id = ?').run(f.sessionId);
+  f.db.prepare("UPDATE runs SET revision = 3 WHERE id = ? AND lifecycle = 'active'").run(f.sessionId);
+
+  let pushes = 0;
+  const retry = await submitDevelopmentSpace(f.db, request, {
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+  assert.equal(retry.pushed, true);
+  assert.equal(pushes, 1);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 1);
+});
+
+// 首次提交此前只校验 revision：run 已 abandoned、租约已释放时，新 command 仍能
+// 建提交、推送并登记成功。活性与租约必须在两条路径上都生效。
+test('a first submission is refused when the run is abandoned and the lease released', async (t) => {
+  const f = await fixture(t);
+  writeFileSync(path.join(f.spacePath, 'feature.txt'), 'done\n');
+  f.db.prepare("UPDATE runs SET lifecycle = 'abandoned' WHERE id = ?").run(f.sessionId);
+  f.db.prepare('DELETE FROM write_leases WHERE worktree_id = ?').run(f.sourceWorktreeId);
+
+  let commits = 0;
+  let pushes = 0;
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-abandoned-first',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '已放弃的会话不得提交',
+  }, {
+    createSubmissionCommit: async () => { commits += 1; },
+    pushSubmissionBranch: async () => { pushes += 1; },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'SESSION_NOT_ACTIVE');
+  assert.equal(commits, 0);
+  assert.equal(pushes, 0);
+  assert.equal(f.db.prepare('SELECT count(*) AS count FROM submissions').get().count, 0);
+  assert.equal(git(f.spacePath, ['rev-parse', 'HEAD']), f.baseHead);
+});
+
+// 策略拒绝发生在仓库锁之后；锁必须在返回前释放，而不是等到 TTL 到期。
+test('a repository policy refusal releases the repository lock immediately', async (t) => {
+  const f = await fixture(t);
+  const refused = Object.assign(new Error('policy'), { code: 'GIT_FILTER_UNSUPPORTED' });
+  const result = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-policy-lock',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '策略拒绝后释放锁',
+  }, {
+    assertRepositoryAllowed: async () => { throw refused; },
+    lockTtlMs: 600_000,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'GIT_FILTER_UNSUPPORTED');
+  const locks = f.db.prepare('SELECT * FROM repository_locks').all();
+  assert.equal(locks.length, 0, '拒绝返回时不得遗留仓库锁');
+
+  // 同一个仓库随后必须能立即再次取得锁。
+  const retry = await submitDevelopmentSpace(f.db, {
+    commandId: 'submit-policy-lock-retry',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '策略拒绝后释放锁（重试）',
+  }, {
+    assertRepositoryAllowed: async () => {},
+    hasUncommittedChanges: async () => false,
+  });
+  assert.notEqual(retry.code, 'REPOSITORY_LOCKED');
 });

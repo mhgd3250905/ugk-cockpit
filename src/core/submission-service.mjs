@@ -14,6 +14,7 @@ import {
   updateDevelopmentSpaceStatus,
 } from './spaces.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
+import { assertRepositoryAllowed } from '../git/repository-policy.mjs';
 import {
   choosePushRemote,
   createSubmissionCommit,
@@ -145,6 +146,42 @@ function retryableAttemptError(db, attempt, code, message, extra = {}, options =
   };
 }
 
+/**
+ * Ownership must be re-proved on every entry, not only when the attempt is first
+ * created: a retry performs exactly the same commit and push.
+ *
+ * The evidence differs by entry. On the first pass the caller states the
+ * revision it believes it owns, so that value is a compare-and-swap. On a retry
+ * the revision has usually moved on legitimately — recording progress advances
+ * it — so ownership is decided by persistent facts instead: the session still
+ * owns the run, still holds the write lease, and is the session recorded on the
+ * attempt itself. Losing the work still refuses the retry.
+ *
+ * @returns {string|null} the error code when the caller no longer owns the work.
+ */
+function checkSubmissionOwnership(db, { context, sessionId, expectedRevision, attempt }) {
+  // The first pass is the caller's own statement of the revision it owns, so
+  // that value is a compare-and-swap...
+  if (!attempt && context.revision !== expectedRevision) return 'REVISION_CONFLICT';
+  // ...but liveness and the write lease hold on both passes. Skipping them on
+  // the first pass let an abandoned run whose lease was already released still
+  // create a commit, push it and register a submission.
+  if (context.status !== 'active' || context.run?.lifecycle !== 'active') return 'SESSION_NOT_ACTIVE';
+  // One active write lease per worktree: if another session now holds it, this
+  // caller must not touch the repository even while its own run still looks
+  // active. A worktree without a lease row keeps the legacy behaviour of
+  // allowing the write.
+  const lease = db.prepare(`
+    SELECT run_id, generation FROM write_leases WHERE worktree_id = ?
+  `).get(context.worktreeId);
+  if (lease && (lease.run_id !== sessionId || lease.generation !== context.run?.leaseGeneration)) {
+    return 'SESSION_NOT_ACTIVE';
+  }
+  // A retry carries its own durable ownership record.
+  if (attempt) return attempt.sessionId === sessionId ? null : 'SESSION_NOT_ACTIVE';
+  return null;
+}
+
 export async function submitDevelopmentSpace(db, request = {}, options = {}) {
   const { commandId, sessionId, expectedRevision } = request;
   const summary = typeof request.summary === 'string' ? request.summary.trim() : '';
@@ -170,14 +207,16 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
   const context = readSessionContext(db, sessionId);
   if (!context.ok) return failCommand(db, commandId, context, options);
   let attempt = readSubmissionAttempt(db, commandId);
-  if (!attempt && (
-    context.status !== 'active'
-    || context.run?.lifecycle !== 'active'
-    || context.revision !== expectedRevision
-  )) {
+  // Ownership is re-proved on every entry, not only when the attempt is first
+  // created: a retry performs exactly the same commit and push, so a session
+  // that has since been superseded or taken over must not be able to finish a
+  // submission it started. Skipping the check on retry let a stale caller push
+  // to the remote and register a submission after losing the work.
+  const ownership = checkSubmissionOwnership(db, { context, sessionId, expectedRevision, attempt });
+  if (ownership) {
     return failCommand(db, commandId, {
       ok: false,
-      code: context.revision !== expectedRevision ? 'REVISION_CONFLICT' : 'SESSION_NOT_ACTIVE',
+      code: ownership,
       sessionId,
       currentRevision: context.revision,
       expectedRevision,
@@ -217,6 +256,15 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
 
   const probe = options.probe ?? probeGitWorktree;
   try {
+    // `git status` inside the probe already runs clean filters, so the repository
+    // configuration is validated before the first probe — a gate placed after it
+    // would come too late to prevent execution. The check lives inside this
+    // try/finally so a refusal releases the repository lock immediately instead
+    // of holding it until the TTL expires.
+    await Promise.all([
+      (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(context.canonicalPath),
+      (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(project.canonical_path),
+    ]);
     if (!attempt) {
       let sourceObservation;
       let targetObservation;
