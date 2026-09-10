@@ -223,6 +223,62 @@ test('workspace git layer rejects option injection through baseCommit', async (t
   rmSync(worktreeTarget, { recursive: true, force: true });
 });
 
+test('HTTP routes reject a non object id expectedBaseHead before any command starts', async (t) => {
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-http-sha-'));
+  const cleanup = [];
+  t.after(async () => {
+    for (const close of cleanup.reverse()) await close();
+    rmSync(container, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  const service = await createCockpitHttpServer({
+    dbPath: path.join(container, 'cockpit.db'),
+    token: TOKEN,
+  });
+  cleanup.push(() => service.close());
+
+  for (const hostile of ['--force', 'main', '']) {
+    // Space creation route: validation fires before the grant is claimed.
+    const createResponse = await post(service, '/api/v1/projects/fake-project/spaces', {
+      commandId: 'cmd-http-sha', grantId: 'unused-grant', expectedBaseHead: hostile,
+    });
+    assert.equal(createResponse.status, 400, `expectedBaseHead ${JSON.stringify(hostile)} must be rejected`);
+    assert.equal((await createResponse.json()).code, 'INVALID_REQUEST');
+
+    // Reuse route: same pre-command validation.
+    const reuseResponse = await post(service, '/api/v1/projects/fake-project/spaces/space-1/reuse', {
+      commandId: 'cmd-http-sha', expectedRevision: 0, expectedBaseHead: hostile,
+    });
+    assert.equal(reuseResponse.status, 400, `reuse expectedBaseHead ${JSON.stringify(hostile)} must be rejected`);
+    assert.equal((await reuseResponse.json()).code, 'INVALID_REQUEST');
+  }
+  // No command may have been journaled by the rejected requests.
+  const db = openCockpitDatabase(path.join(container, 'cockpit.db'));
+  try {
+    assert.equal(db.prepare('SELECT count(*) AS n FROM commands').get().n, 0);
+  } finally { db.close(); }
+});
+
+test('probe reports honest unknown head relation for a non object id baseline', async (t) => {
+  const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-baseline-'));
+  t.after(() => rmSync(container, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const repo = path.join(container, 'repo');
+  mkdirSync(repo);
+  execFileSync('git', ['init', '-q'], { cwd: repo });
+  execFileSync('git', ['config', 'user.email', 't@t.invalid'], { cwd: repo });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+  writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+  execFileSync('git', ['add', 'a.txt'], { cwd: repo });
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: repo });
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+
+  const hostile = await probeGitWorktree(repo, { expectedBaselineHead: '--is-ancestor' });
+  assert.equal(hostile.headRelation, 'unknown', 'a dash token must never reach merge-base');
+
+  const honest = await probeGitWorktree(repo, { expectedBaselineHead: head });
+  assert.equal(honest.headRelation, 'same');
+});
+
 test('lifecycle reservation reclaim distinguishes a reused PID from the recorded owner', () => {
   const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-lifecycle-'));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));

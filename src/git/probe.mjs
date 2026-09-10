@@ -51,6 +51,11 @@ export function digest(value) {
 // `git push` and silently redirect the push destination.
 const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+// Git keeps parsing options after positional arguments, so any token that may
+// land in a revision position must be a full git object id and nothing else.
+// 40 hex covers SHA-1 repositories, 64 hex SHA-256.
+export const GIT_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 export function assertSafeRemoteName(remote) {
   if (typeof remote !== 'string' || !SAFE_REMOTE_NAME.test(remote)) {
     const error = new Error(`Remote name '${remote}' is not a safe git remote nickname.`);
@@ -167,6 +172,10 @@ async function observe(cwd, options) {
 
 async function headRelation(cwd, baselineHead, finalHead, options) {
   if (!baselineHead) return 'unknown';
+  // baselineHead sits in a revision position of merge-base; a non object id
+  // (e.g. an option-looking token) must never reach git. Report the honest
+  // 'unknown' instead of guessing a topology answer.
+  if (!GIT_OBJECT_ID_PATTERN.test(baselineHead)) return 'unknown';
   if (baselineHead === finalHead) return 'same';
   // Only 0 (ancestor) and 1 (not an ancestor) answer the topology question.
   // Exit 128 means git could not read the history at all (a replaced or

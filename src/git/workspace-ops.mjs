@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { git, safeGitEnvironment, SAFE_GIT_PREFIX } from './probe.mjs';
+import { git, safeGitEnvironment, SAFE_GIT_PREFIX, GIT_OBJECT_ID_PATTERN } from './probe.mjs';
 import { DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
@@ -44,8 +44,8 @@ export function isStableWorkspaceBranch(branch) {
 // `git switch`, where git still parses leading-dash tokens as OPTIONS (e.g. a
 // "--force" there would be consumed as a flag, not a revision). The callers
 // always mean a full object id reported by `git rev-parse HEAD`, so accept
-// exactly that and nothing else.
-export const GIT_OBJECT_ID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+// exactly that and nothing else. The pattern itself lives in probe.mjs.
+export { GIT_OBJECT_ID_PATTERN };
 
 function assertGitObjectId(baseCommit) {
   if (typeof baseCommit !== 'string' || !GIT_OBJECT_ID_PATTERN.test(baseCommit)) {

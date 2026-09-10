@@ -413,8 +413,8 @@ if (-not (Test-Path -LiteralPath $mainEntry)) {
 $mainEntry = (Resolve-Path -LiteralPath $mainEntry).Path
 
 # Start-Process redirects truncate their target, so a fixed service.log would
-# destroy the previous run's log on every relaunch — exactly when crash
-# history matters. Give each run its own files and keep the newest few.
+# destroy the previous run's log on every relaunch, exactly when crash
+# history matters most. Give each run its own files and keep the newest few.
 $runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $stdOutLog = Join-Path $LogDirectory "service-$runStamp.log"
 $stdErrLog = Join-Path $LogDirectory "service-$runStamp.err.log"

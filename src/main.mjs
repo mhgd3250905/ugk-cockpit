@@ -37,7 +37,7 @@ try {
   });
   process.stdout.write(`UGK Cockpit Phase 0 service: http://${service.host}:${service.port}\n`);
   let stopping = false;
-  const stop = async () => {
+  const stop = async (exitCode = 0) => {
     if (stopping) return;
     stopping = true;
     try {
@@ -46,7 +46,7 @@ try {
       // A failed close must not skip releasing the instance lock; otherwise
       // the next start has to go through stale-lock recovery for nothing.
       lock.release();
-      process.exit(0);
+      process.exit(exitCode);
     }
   };
   process.once('SIGINT', stop);
@@ -58,7 +58,7 @@ try {
   });
   process.on('uncaughtException', (error) => {
     process.stderr.write(`[ugk-cockpit] uncaught exception: ${error?.stack ?? error}\n`);
-    stop();
+    stop(1);
   });
 } catch (error) {
   lock.release();
