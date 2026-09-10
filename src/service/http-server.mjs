@@ -56,7 +56,7 @@ import {
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { readWorkLineContexts } from '../core/work-line-context.mjs';
 import { setProjectArchived, setWorkLineClosed, readWorkLineStates } from '../core/manual-records.mjs';
-import { finishRun, startWriteRun } from '../core/runs.mjs';
+import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.mjs';
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { deliveryResponse } from '../core/delivery-messages.mjs';
@@ -289,6 +289,12 @@ const PUBLIC_ERRORS = {
     impact: '代码和 Cockpit 记录都没有被修改。',
     requiredAction: '请只在 UGK Cockpit 本地页面中执行这个操作。',
   },
+  HOST_REJECTED: {
+    status: 421,
+    message: '这个请求指向的地址不是本机服务地址，已整体拒绝。',
+    impact: '代码和 Cockpit 记录都没有被修改。',
+    requiredAction: '请通过 http://127.0.0.1 或 http://localhost 访问本机服务。',
+  },
   REQUEST_TOO_LARGE: {
     status: 413,
     message: '这次提交的内容过大，无法安全处理。',
@@ -324,6 +330,12 @@ const PUBLIC_ERRORS = {
     message: '这次 AI 工作会话刚刚发生了变化。',
     impact: '本次操作没有覆盖新的状态。',
     requiredAction: '请刷新当前会话，确认最新状态后重试。',
+  },
+  RUN_LEASE_CONFIRMATION_REQUIRED: {
+    status: 409,
+    message: '释放残留的写入锁需要你明确确认。',
+    impact: '原 AI 工作会话没有被结束，代码没有变化。',
+    requiredAction: '请先确认原来的 AI 已经停止，再带确认标记重新执行释放。',
   },
   STALE_WRITE_LEASE: {
     status: 409,
@@ -1462,6 +1474,21 @@ function validateStartBody(body) {
   }
 }
 
+function validateReleaseLeaseBody(body) {
+  requireString(body, 'commandId');
+  requireString(body, 'runId');
+  if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
+    const error = new Error('Invalid expectedRevision');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+  if (!Number.isInteger(body.leaseGeneration) || body.leaseGeneration < 1) {
+    const error = new Error('Invalid leaseGeneration');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
 function validateFinishBody(body) {
   requireString(body, 'commandId');
   if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
@@ -2341,6 +2368,35 @@ function allowedOrigin(origin, port) {
   return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
 }
 
+const ALLOWED_HOST_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+// Rejects requests whose Host header points anywhere other than this local
+// service, so a DNS-rebound domain cannot reach /health, static assets, or the
+// anonymous MCP bootstrap before any other check runs.
+function allowedHost(hostHeader, port) {
+  if (typeof hostHeader !== 'string' || hostHeader.length === 0 || hostHeader.length > 255) {
+    return false;
+  }
+  let hostName = hostHeader;
+  let hostPort = null;
+  if (hostName.startsWith('[')) {
+    const closing = hostName.indexOf(']');
+    if (closing === -1) return false;
+    const remainder = hostName.slice(closing + 1);
+    if (remainder !== '' && !remainder.startsWith(':')) return false;
+    hostPort = remainder === '' ? null : remainder.slice(1);
+    hostName = hostName.slice(0, closing + 1);
+  } else {
+    const separator = hostName.lastIndexOf(':');
+    if (separator !== -1) {
+      hostPort = hostName.slice(separator + 1);
+      hostName = hostName.slice(0, separator);
+    }
+  }
+  if (!ALLOWED_HOST_NAMES.has(hostName.toLowerCase())) return false;
+  return hostPort === null || (/^\d+$/.test(hostPort) && Number(hostPort) === port);
+}
+
 function toSnapshot(probe) {
   return {
     head: probe.after.head,
@@ -2885,6 +2941,10 @@ export async function createCockpitHttpServer({
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
+      if (!allowedHost(request.headers.host, currentPort)) {
+        sendError(response, 'HOST_REJECTED');
+        return;
+      }
       const requestedDiagnosticId = request.headers['x-ugk-diagnostic-id'];
       const diagnosticId = typeof requestedDiagnosticId === 'string'
         && DIAGNOSTIC_ID_PATTERN.test(requestedDiagnosticId)
@@ -4748,6 +4808,30 @@ export async function createCockpitHttpServer({
         else sendError(response, result.code, {
           commandId: body.commandId,
           extra: { run_id: runId, receipt_id: result.receiptId ?? null },
+        });
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/v1/runs/release-lease') {
+        const body = await readJson(request);
+        validateReleaseLeaseBody(body);
+        if (body.userConfirmed !== true) {
+          sendError(response, 'RUN_LEASE_CONFIRMATION_REQUIRED', {
+            commandId: body.commandId,
+            extra: { run_id: body.runId },
+          });
+          return;
+        }
+        const result = releaseOrphanedWriteRun(db, {
+          commandId: body.commandId,
+          runId: body.runId,
+          expectedRevision: body.expectedRevision,
+          leaseGeneration: body.leaseGeneration,
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          commandId: body.commandId,
+          extra: { run_id: result.runId ?? null },
         });
         return;
       }

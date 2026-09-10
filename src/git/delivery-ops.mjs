@@ -211,7 +211,9 @@ export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
       const colonIndex = hostPort.indexOf(':');
       const host = colonIndex === -1 ? '' : hostPort.slice(0, colonIndex);
       if (!host || host.startsWith('-')) {
-        const error = new Error(`Remote URL has an unsafe host: ${trimmed}`);
+        // Error text must never echo the URL: malformed forms can carry embedded
+        // credentials that would otherwise reach logs, diagnostics and attempts.
+        const error = new Error('Remote URL has an unsafe host.');
         error.code = 'UNSAFE_REMOTE_URL';
         throw error;
       }

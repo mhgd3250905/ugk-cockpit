@@ -1,5 +1,15 @@
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
 import path from 'node:path';
 import { backupBeforeMigration } from './core/backup.mjs';
 import { SUPPORTED_SCHEMA_VERSION } from './core/database.mjs';
@@ -25,7 +35,22 @@ function loadOrCreateToken(filePath) {
     if (error?.code !== 'ENOENT') throw error;
   }
   const token = randomBytes(32).toString('base64url');
-  writeFileSync(filePath, `${token}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  // Write to a temporary file and rename, so a crash mid-write can never
+  // leave a truncated token that would brick the next service start.
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  const descriptor = openSync(temporaryPath, 'wx', 0o600);
+  try {
+    writeSync(descriptor, `${token}\n`, null, 'utf8');
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  try {
+    renameSync(temporaryPath, filePath);
+  } catch (error) {
+    try { unlinkSync(temporaryPath); } catch {}
+    throw error;
+  }
   try {
     chmodSync(filePath, 0o600);
   } catch {

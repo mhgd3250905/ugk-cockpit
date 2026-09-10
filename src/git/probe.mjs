@@ -72,7 +72,12 @@ export function safeGitEnvironment() {
   return environment;
 }
 
-export async function git(cwd, args, { timeoutMs, maxBuffer, acceptExitCodes = [0], config = [] } = {}) {
+export async function git(cwd, args, {
+  timeoutMs = 5_000,
+  maxBuffer = 2 * 1024 * 1024,
+  acceptExitCodes = [0],
+  config = [],
+} = {}) {
   const configArgs = Array.isArray(config)
     ? config
     : Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${value}`]);

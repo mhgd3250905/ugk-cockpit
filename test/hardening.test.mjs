@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import http from 'node:http';
 import { acquireInstanceLock } from '../src/core/single-instance.mjs';
 import { serveWebAsset } from '../src/service/web-assets.mjs';
 import {
@@ -267,4 +268,63 @@ test('http-server: GET / returns 503 SERVICE_UNAVAILABLE when assets cannot be s
   assert.match(body.message, /本地控制台静态资源暂不可用/);
   assert.equal(body.impact, '代码和已有记录都没有被修改。');
   assert.equal(body.required_action, '请确认前端资源已构建或服务环境完整后重试。');
+});
+
+function rawRequest(port, requestPath, { hostHeader, setHost = true } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = {};
+    if (setHost) headers.host = hostHeader;
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: requestPath,
+      method: 'GET',
+      headers,
+      setHost,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+test('http-server: DNS rebinding 防护——Host 白名单之外的请求整体拒绝', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-host-guard-'));
+  const { createCockpitHttpServer } = await import('../src/service/http-server.mjs');
+  const service = await createCockpitHttpServer({
+    dbPath: path.join(root, 'cockpit.db'),
+    token: 'a'.repeat(32),
+  });
+  t.after(async () => {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const hostile of ['evil.example.com', 'localhost.evil.example.com', `127.0.0.1:1`, '127.0.0.2']) {
+    const rejected = await rawRequest(service.port, '/', { hostHeader: hostile });
+    assert.equal(rejected.status, 421, `host ${hostile} must be rejected`);
+    const body = JSON.parse(rejected.body);
+    assert.equal(body.code, 'HOST_REJECTED');
+  }
+
+  // 恶意 Host 下连受保护的 API 也拿不到数据（修复前可用 Cookie 读取 dashboard）。
+  const apiRejected = await rawRequest(service.port, '/api/v1/dashboard', {
+    hostHeader: 'evil.example.com',
+  });
+  assert.equal(apiRejected.status, 421);
+
+  // HTTP/1.0 风格的无 Host 请求同样拒绝（Node 解析器 400 或服务层 421）。
+  const noHost = await rawRequest(service.port, '/', { setHost: false });
+  assert.ok(noHost.status === 421 || noHost.status === 400, `no-host must be rejected, got ${noHost.status}`);
+
+  // 合法本机 Host 不受影响：首页可访问并种下会话 Cookie。
+  const ok = await rawRequest(service.port, '/', { hostHeader: `127.0.0.1:${service.port}` });
+  assert.equal(ok.status, 200);
+  assert.match(ok.body, /<!doctype html|<html/i);
+  const localhostOk = await rawRequest(service.port, '/health', { hostHeader: `localhost:${service.port}` });
+  assert.equal(localhostOk.status, 200);
 });

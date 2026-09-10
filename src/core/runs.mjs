@@ -636,3 +636,60 @@ export function takeoverWriteRun(db, request) {
     return response;
   });
 }
+
+// User-confirmed escape hatch for an orphaned write lease: the previous
+// writer's process is gone without a finish, so the owner declares the run
+// abandoned. Mirrors finalizeFinish's lease release (terminal run + lease
+// delete) with the same revision/lease-generation fencing as heartbeat, but
+// creates no receipt because the code state was never re-observed.
+export function releaseOrphanedWriteRun(db, request) {
+  const { commandId, runId, expectedRevision, leaseGeneration } = request;
+  const begun = beginCommand(db, {
+    commandId,
+    kind: 'run.release',
+    request,
+    runId,
+  });
+  const terminal = terminalCommandResult(begun.command);
+  if (terminal) return terminal;
+
+  return withImmediateTransaction(db, () => {
+    const current = readCommand(db, commandId);
+    const replay = terminalCommandResult(current);
+    if (replay) return replay;
+    const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(runId);
+    let response;
+    if (!run || run.lifecycle !== 'active') {
+      response = { ok: false, code: 'RUN_NOT_FOUND', runId };
+    } else if (
+      run.revision !== expectedRevision
+      || run.lease_generation !== leaseGeneration
+    ) {
+      response = { ok: false, code: 'STALE_WRITE_LEASE', runId };
+    } else {
+      const releasedAt = now();
+      const updated = db.prepare(`
+        UPDATE runs
+        SET lifecycle = 'abandoned', revision = revision + 1, finished_at = ?
+        WHERE id = ? AND lifecycle = 'active' AND revision = ? AND lease_generation = ?
+      `).run(releasedAt, runId, expectedRevision, leaseGeneration);
+      if (updated.changes !== 1) {
+        throw new Error('Run CAS failed while releasing the write lease.');
+      }
+      db.prepare('DELETE FROM write_leases WHERE run_id = ? AND generation = ?')
+        .run(runId, leaseGeneration);
+      response = {
+        ok: true,
+        commandId,
+        runId,
+        status: 'abandoned',
+        revision: expectedRevision + 1,
+      };
+    }
+    db.prepare(`
+      UPDATE commands SET state = ?, response_json = ?, updated_at = ?
+      WHERE id = ? AND state = 'received'
+    `).run(response.ok ? 'committed' : 'failed', canonicalJson(response), now(), commandId);
+    return response;
+  });
+}
