@@ -22,6 +22,7 @@ import {
   reassignPendingAssignment,
   recordProgress,
 } from '../core/assignments.mjs';
+import { PROGRESS_STATUSES } from '../core/assignments-contract.mjs';
 import { FolderGrantStore, EmptyFolderGrantStore } from '../core/folder-grants.mjs';
 import { createHandoff, readLatestHandoff } from '../core/handoffs.mjs';
 import { createRelay, resumeRelay } from '../core/relays.mjs';
@@ -1566,6 +1567,15 @@ function validateMcpProgressBody(body) {
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
   requireString(body, 'status');
+  // The HTTP boundary owns input trust, so it enforces the status enum itself
+  // rather than relying on the MCP gate having done so: the endpoint is
+  // reachable directly with a scoped token, and the core only rejects the
+  // terminal states, which left 'adopted' and arbitrary labels writeable.
+  if (!PROGRESS_STATUSES.includes(body.status)) {
+    const error = new Error('Progress status must be a non-terminal status.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
   if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1) {
     const error = new Error('Invalid progress request.');
     error.code = 'INVALID_REQUEST';
@@ -2379,7 +2389,20 @@ function isLoopbackAddress(address) {
 
 function allowedOrigin(origin, port) {
   if (!origin) return true;
-  return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}`;
+  // The Host allow-list accepts a superset of these spellings (it lowercases and
+  // tolerates a missing port), so this comparison is deliberately exact and
+  // case-sensitive rather than symmetric with it — browsers serialise a
+  // lowercased host with the port, which is the shape that matters here.
+  //
+  // `[::1]` was the one spelling the two lists disagreed about, so a page served
+  // over IPv6 loopback loaded and received its session cookie and then had every
+  // /api/v1 call refused with ORIGIN_REJECTED and a message blaming a foreign web
+  // page. Both shipped entry points bind 127.0.0.1, so this is a consistency
+  // fix rather than a production outage: it matters for a future `::1` bind and
+  // for anyone reaching the service through an IPv6 loopback forwarder.
+  return origin === `http://127.0.0.1:${port}`
+    || origin === `http://localhost:${port}`
+    || origin === `http://[::1]:${port}`;
 }
 
 const ALLOWED_HOST_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
@@ -2479,6 +2502,34 @@ export async function createCockpitHttpServer({
   const browserSessionToken = randomBytes(32).toString('base64url');
   const mcpSessions = new Map();
   const diagnosticLogger = createDiagnosticLogger({ directory: diagnosticLogDirectory });
+
+  // The folders a user has actually granted are durable database facts: a
+  // project keeps the folder it was registered from, and every development
+  // space keeps its own worktree path. The modern routes already authorize
+  // against those values directly (observeRegisteredProject). The legacy
+  // /api/v1/runs/* routes authorized only against the constructor list, which
+  // main.mjs never populates, so findGrant threw PATH_NOT_AUTHORIZED for every
+  // production request — meaning the documented user-confirmed release path for
+  // a crashed write lease could not be reached outside the test suite, which
+  // always passes its fixture roots in. Union the two sources: the constructor
+  // list stays supported for fixtures and injected deployments, and the durable
+  // rows make these routes work in production. Authorization stays fail-closed,
+  // because a path present in neither source is still refused.
+  function effectiveAuthorizedRoots() {
+    const roots = new Set(authorizedRoots);
+    for (const row of db.prepare("SELECT authorized_root AS root FROM projects WHERE authorized_root <> ''").all()) {
+      roots.add(row.root);
+    }
+    for (const row of db.prepare(`
+      SELECT worktrees.canonical_path AS root
+      FROM development_spaces
+      JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+      WHERE worktrees.canonical_path <> ''
+    `).all()) {
+      roots.add(row.root);
+    }
+    return [...roots];
+  }
 
   async function prepareFolderSelection(selectedPath, principalHash) {
     if (!selectedPath) return { ok: true, cancelled: true };
@@ -3088,6 +3139,11 @@ export async function createCockpitHttpServer({
         sendError(response, 'AUTH_REQUIRED');
         return;
       }
+      // Resolved once per authenticated request and reused for the whole
+      // request, so a legacy /api/v1/runs/* route cannot authorise its path
+      // against one snapshot of the granted folders and re-authorise the
+      // observed worktree against a different one.
+      const requestAuthorizedRoots = effectiveAuthorizedRoots();
       const conversationBinding = identity
         ? {
           key,
@@ -4737,7 +4793,7 @@ export async function createCockpitHttpServer({
         validateStartBody(body);
         const runId = body.runId ?? id('run', body.commandId);
         const commandPayload = { ...body, runId };
-        const binding = findGrant(body.worktreePath, authorizedRoots);
+        const binding = findGrant(body.worktreePath, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const begun = beginCommand(db, {
           commandId: body.commandId,
@@ -4759,7 +4815,7 @@ export async function createCockpitHttpServer({
         await assertRepositoryAllowedForProbe(binding.candidateReal);
         const observation = { ...await probe(binding.candidateReal), lifecycleEpoch };
         revalidateAuthorizedPath(binding);
-        authorizeObservation(observation, authorizedRoots);
+        authorizeObservation(observation, requestAuthorizedRoots);
         const result = startWriteRun(db, {
           commandId: body.commandId,
           commandPayload,
@@ -4801,7 +4857,7 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        const binding = findGrant(row.canonical_path, authorizedRoots);
+        const binding = findGrant(row.canonical_path, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const commandPayload = { ...body, runId };
         const begun = beginCommand(db, {
@@ -4824,7 +4880,7 @@ export async function createCockpitHttpServer({
           expectedBaselineHead: row.baseline_head,
         });
         revalidateAuthorizedPath(binding);
-        authorizeObservation(observation, authorizedRoots);
+        authorizeObservation(observation, requestAuthorizedRoots);
         assertConversationWrite(key, body.sessionId);
         const result = finishRun(db, {
           commandId: body.commandId,
@@ -4861,7 +4917,7 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        const binding = findGrant(row.canonical_path, authorizedRoots);
+        const binding = findGrant(row.canonical_path, requestAuthorizedRoots);
         revalidateAuthorizedPath(binding);
         const result = releaseOrphanedWriteRun(db, {
           commandId: body.commandId,

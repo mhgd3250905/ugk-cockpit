@@ -34,7 +34,7 @@ test('changed package keeps marketplace stable and preserves the old running bri
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'ugk-plugin-update-'));
   try {
     const sourceRoot = path.join(temporary, 'source');
-    for (const name of ['skills', 'src/mcp', 'packaging', 'src/core/delivery-contract.mjs', 'src/core/submit-notes-contract.mjs', 'src/version.mjs', 'VERSION']) {
+    for (const name of ['skills', 'src/mcp', 'packaging', 'src/core/delivery-contract.mjs', 'src/core/submit-notes-contract.mjs', 'src/core/assignments-contract.mjs', 'src/version.mjs', 'VERSION']) {
       const destination = path.join(sourceRoot, name);
       mkdirSync(path.dirname(destination), { recursive: true });
       cpSync(path.resolve(name), destination, { recursive: true });

@@ -39,6 +39,20 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'filter.lfs.smudge=',
   '-c', 'filter.lfs.process=',
   '-c', 'filter.lfs.required=false',
+  // Second line of defence behind the transport check in repository-policy.mjs.
+  // These three keys can redirect the connection, disable certificate
+  // validation, or inject request headers into a push that carries the user's
+  // real Git credentials, and a command-line -c overrides the same generic key
+  // from any config file (measured: with the repo-local keys set the request
+  // reached an untrusted-certificate endpoint and the injected header arrived;
+  // with these resets the same request never left the process).
+  //
+  // The url-scoped spelling `http.<url>.<key>` is NOT covered here — git
+  // resolves the most specific match and a generic -c loses to it (measured).
+  // That spelling is why detection, not neutralisation, is the primary fix.
+  '-c', 'http.proxy=',
+  '-c', 'http.sslVerify=true',
+  '-c', 'http.extraHeader=',
 ];
 
 export function digest(value) {

@@ -6,6 +6,48 @@
 
 ## 实施状态
 
+### 2026-09-10 第三轮外部审查：传输配置、恢复路径与登记更正（未发布）
+
+分支 `fix/audit-2026-09-10-p0-transport-and-lifecycle`，基线 `46bed0d`（alpha.41）。本轮**不发布**：未创建标签、未重启本机服务、未更新宿主插件、未改 `VERSION`。沿用 schema 27，无数据迁移，无新增生产依赖。
+
+实测验证并修复（每条先复现再改，复现证据见下）：
+
+1. **仓库本地的 `http.*` 传输配置此前既不在守卫枚举内，也没有被中和**。仅凭 `.git/config` 即可让 `https` 请求到达不可信证书的对端（无该键时报 `schannel` `SEC_E_UNTRUSTED_ROOT`，有该键时请求被接受），并让仓库自选的请求头出现在线上；同期 `findHostileRepositoryConfiguration` 对该仓库返回 `null`。`remote-auth.mjs` 会为 fetch/push/ls-remote 附加宿主 Git Credential Manager，因此用户只是"添加了这个项目"就可能让带凭据的流量被重定向、取消证书校验或被注入请求头。现按仓库作用域（`--local`/`--worktree`，含 `--includes`）检测 `http.*`/`https.*` 传输族（含 url 作用域写法），并由 `SAFE_GIT_PREFIX` 复位 `http.proxy=` / `http.sslVerify=true` / `http.extraHeader=` 作为第二道防线。url 作用域写法优先于通用 `-c`，因此**检测才是主修复**，复位只是兜底。
+2. **`remote.<name>.mirror=true` 使所有受管推送必然失败**（`git clone --mirror` 会写入该键）。实测退出码 128、`fatal: --mirror can't be combined with refspecs`，远端未收到任何内容；复位该键后同一推送成功。两条推送路径现按显式 refspec 复位该键：产品只推一个具名分支，镜像语义从不是它要的。
+3. **Host 白名单接受 `[::1]` 而 Origin 白名单不接受**：该来源下页面能加载并拿到会话 Cookie，随后每个 `/api/v1` 请求都被判为"其他网页的控制请求"。现按同一组回环拼写匹配。更正记录：两个实际入口都只绑定 `127.0.0.1`，所以这一条是**一致性修复**，不是生产中断修复。
+4. **非终态进度状态枚举只存在于 MCP 桥**，HTTP 边界接受核心未拒绝的任意字符串，包括仅由 init 路径写入的 `adopted`：持 scoped token 的直接调用者可伪造一条"接入"事件并推高 assignment 与 run 的 revision。现由 `src/core/assignments-contract.mjs` 提供唯一定义，两处网关共同引用。
+5. **`main.mjs` 从不传 `authorizedRoots`，导致旧 `/api/v1/runs/*` 路由在生产环境对每个请求返回 `PATH_NOT_AUTHORIZED`**，上一轮交付的"用户确认释放残留写租约"路径只在注入夹具根的测试里可达。现授权根取注入列表与持久授予事实（`projects.authorized_root`、开发空间 worktree 路径）的并集，仍对未授予路径 fail closed。
+
+**2026-09-11 审查返工二（PR #11 复审，一项 P1）**：
+
+- **URL 作用域子节含空格时削弱设置被放行**：`[http "https://example.invalid/a b"] sslVerify = false` 的完整键名本身含空格，此前按键名首个空格切分键值把它读成键 `...a`、值 `b.sslverify false`——既非 `true` 也非 `false`，被放行；而 `SAFE_GIT_PREFIX` 下 `get-urlmatch` 对 `/a%20b/` URL 实测返回 `false`，证书校验被真实关闭（复审复现，旧版守卫返回 `transport`、返工版返回 `null`，确系回归）。现全部传输查询改读 **`-z` 记录格式**（`key LF value NUL`），键值边界无歧义、空格子节不再可能伪装成分隔符；布尔归一化只放行 Git 明确解析出的 `true`（`--bool` 下无值仍报 `true`，上一轮修复的语义不变），`followRedirects` 的 `initial`/`false` 仍放行。新增 6 条含空格子节正反例，其中评审原始复现一条对返工前源码（`8bc1208`）为红。
+- 返工二验证（2026-09-11）：`test/audit-2026-09-10.test.mjs` **30/30**；Phase 0 **97/97**；邻接套件 **60/60**；全量结果见下。
+
+**2026-09-11 审查返工一（PR #11 评审意见，两项 P2）**：
+
+1. **无值布尔配置误拒绝**：`[http] sslVerify`（无值）按 Git 布尔语义是 true（加固），但此前实现把它当空字符串判敌意，正常仓库被 `UNSAFE_REMOTE_URL` 挡在送审/集成/推送之外。现改为让 Git 自己归一化取值：`sslVerify`/`schannelCheckRevoke` 走 `--bool` 专查（无值→`true` 放行、显式空值→`false` 拒绝、git 无法解析的写法直接 fatal→按敌意处理），`followRedirects` 走 `--bool-or-str` 专查（`initial` 与 false 放行，无值=true 及其余拒绝）。不再解析 `--get-regexp` 的打印格式——`probe.git()` 会 trim stdout，显式空值的尾随空格（与无值的唯一区别）在进入解析前就被删掉了，第一版按空白区分的思路在这个代码库里根本立不住（实测确认）。显式空值的 `sslVerify` 仍拒绝（false=关闭校验），键名即敌意的键（`proxy` 等）仍出现即拒绝、不开空值特例。新增 7 条正反例，其中 4 条对返工前源码为红。
+2. **代理行为测试误判**：断言依赖 Git/curl 错误文案中的 "via 127.0.0.1"，在 Git 2.50（文案无 "via"）上把确实访问了代理的对照组判为失败。现改为本地 TCP 监听端点计数连接：对照组（不加固）必须真的连上代理，加固组（带 `SAFE_GIT_PREFIX`）必须零新增连接且命令仍失败，完全不依赖任何错误措辞。附带发现并修正用例自身的缺陷：同步等待（`execFileSync`）会阻塞事件循环，监听端点永远处理不了到达的连接（curl 等不到 CONNECT 响应直到 20s 超时、计数恒为 0），改为异步等待后对照组即时失败、计数正确。
+
+返工验证（2026-09-11，Windows / Node.js 24.16.0 / Git 2.51.2）：`test/audit-2026-09-10.test.mjs` **24/24**；Phase 0 **97/97**；受影响邻接套件（guard/release-lease/plugin×2/delivery-ops/integration-service/submission-service）**73/74**，唯一失败仍是下述既存 `EPERM` 清理问题；全量结果见下。
+
+首轮验证证据（2026-09-10，Windows / Node.js 24.16.0）：新增回归 `test/audit-2026-09-10.test.mjs` **17/17**；`node --test --test-concurrency=1 test/repository-config-guard.test.mjs test/runs-release-lease.test.mjs test/codex-plugin.test.mjs test/zcode-plugin.test.mjs test/delivery-ops.test.mjs test/integration-service.test.mjs` **60/60**；`npm run test:phase0` **97/97**；`npm run build:web` 通过；全量 `npm test` **537/538**，唯一失败为上述既存夹具清理 `EPERM`（已确认基线同样失败）。台账既有证据命令（5 个文件的 40/40）可精确重现。
+
+**对既有记录的更正**（交叉核对结果）：
+
+- `docs/CONVERSATION_DURABILITY.md:5` 与 `docs/PHASE1_VERTICAL_SLICE.md` 的 alpha.41 段落、README"当前版本"段落都称未登记工作链的旧运行记录"可经用户确认释放残留写入锁"；PR #8 段落并称该路由"worktree 路径授权与 start/finish 同构"。该说法在 alpha.41 上不成立：该鉴权与始终为空的 `authorizedRoots` 组合使 `/api/v1/runs/start`、`/finish`、`/release-lease` 三个路由在生产环境不可达，且 UI 无按钮、浏览器不调用。本分支已修正授权来源；但正式服务仍运行 alpha.41，**在部署本分支之前，该恢复路径对用户依旧不可用**，上述文档的这句只有在升级之后才成立。相关措辞未改（它们描述的是已发布版本），以本段为准。
+- `docs/CONVERSATION_DURABILITY.md:13` 的工作空间恢复契约称"原执行已返回或执行进程已退出后，**只能沿原请求恢复**"，并据此不因超时开放新会话。该契约隐含"原请求恢复总是可行"，而下述未修复项表明它可以被无关变化永久阻断；文档未说明这一失败形态，也未给出用户出路。
+- 计数类历史证据（338/389/442/449/451/478/486/513/521 等）各自标注了分支与日期，属历史交付证据，未发现相互冲突；本轮不重算。
+
+独立审查线程（只读，六维度：需求完整性、逻辑正确性、边界、代码质量、测试覆盖、实际运行）提出并已返工的项：值感知判定（只按键名匹配会把 `http.sslVerify=true` 这类**加固**配置一并否决）、补齐同族键（`schannelCheckRevoke`、`sslCipherList`、`cookieFile` 等）、`mirrorResetArguments` 自行校验远端名、授权根按请求只解析一次、以及把断言 argv 的用例改为真实验证复位效果的行为用例。
+
+未修复 / 未证实（本次不宣称已解决）：
+
+- **工作空间生命周期预约可成为整仓永久写入围栏，且无产品内出路**（已用真实核心复现：预约行无 TTL；同一 commandId 重放可被无关变化永久阻断 —— 外部提交推进 main 得 `BASE_HEAD_STALE`、`development_spaces` revision 变化得 `SPACE_REVISION_CONFLICT`；新 commandId 被 `reserveWorkspaceLifecycle` 拒绝；手工删除预约行仍不足以解除，因为 `commands` 流水行会重建围栏）。围栏按仓库标识生效，因此影响整个仓库而非单个工作副本。正确修法是新增"用户确认放弃"的跨模块恢复（预约行 + 流水行 + 空间状态三层）并配套入口，属于安全关键围栏的语义变更，不适合并入本轮 P0 提交；本轮只报告。
+- `remote.<name>.serverOption` 与 `remote.<name>.proxyAuthMethod` 与已验证的 `receivepack`/`uploadpack` 同族，但**未能复现其命令执行**（`remote.<name>.vcs=ssh` 只让 Git 去找不存在的 `git-remote-ssh` 助手），因此不加未经验证的拦截。
+- 传输族仍未穷举（如 `http.sslTry`）；`http.<url>.*` 的 url 部分语义未逐一核对。
+- 工作台仍无残留租约/围栏的释放按钮。
+- **全量 `npm test` 在本机有一项既存失败，与本分支无关**：`test/submission-service.test.mjs:374` 在 `after` 钩子清理夹具时以 `EPERM` 删除临时目录失败（断言本身未失败）。已核对：该失败在基线 `46bed0d` 上同样复现（连续两次），本分支未引入；加 `maxRetries`/`retryDelay`（本仓库 delivery-ops、project-edit 夹具既有写法）**无效**，说明句柄不是延迟释放而是被进程持有；测试进程退出后手工删除同一目录成功。**未查明具体占用手柄**，因此不宣称成因。全仓有 128 处夹具清理没有该重试参数，本机观察到的是其中一处。
+
 ### alpha.41：两轮审计修复合并与版本整理（2026-09-10）
 
 - `0.1.0-alpha.41`：合并 PR #8 与 PR #9，包含本机 HTTP Host 白名单、旧运行记录残留租约的用户确认释放、API token 文件原子写与中断恢复、Git 配置防护补齐、保守的单实例身份判断、安装器路径兼容性、浏览器请求截止时间及轮询防堆积。沿用 schema 27，不增加生产依赖。
