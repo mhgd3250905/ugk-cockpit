@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,6 +13,7 @@ import {
   worktreeIdFor,
 } from '../src/core/projects.mjs';
 import { finishRun, startWriteRun } from '../src/core/runs.mjs';
+import { removeProjectFromDashboard, setProjectArchived } from '../src/core/manual-records.mjs';
 
 function fixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-project-'));
@@ -30,6 +32,60 @@ function observation(overrides = {}) {
     ...overrides,
   };
 }
+
+test('dashboard removal preserves history, uses archive CAS, and replays', (t) => {
+  const db = fixture(t);
+  const project = registerProject(db, { commandId: 'register-remove', name: 'Remove', observation: observation() });
+  const request = { commandId: 'remove-project', projectId: project.projectId, expectedRevision: 0 };
+  const result = removeProjectFromDashboard(db, request);
+  assert.equal(result.ok, true);
+  assert.equal(result.archiveRevision, 1);
+  assert.deepEqual(removeProjectFromDashboard(db, request), result);
+  assert.equal(readDashboard(db).length, 0);
+  assert.equal(readDashboard(db, { archived: true }).length, 0);
+  assert.ok(readProjectContext(db, project.projectId));
+  assert.equal(db.prepare('SELECT count(*) AS count FROM project_observations').get().count, 1);
+  assert.equal(setProjectArchived(db, { commandId: 'stale-archive', projectId: project.projectId,
+    expectedRevision: 0, archived: true }).code, 'PROJECT_ARCHIVE_REVISION_CONFLICT');
+  registerProject(db, { commandId: 'register-remove', name: 'Remove', observation: observation() });
+  assert.equal(readDashboard(db).length, 0, 'old registration replay must not restore membership');
+  const restored = registerProject(db, { commandId: 'register-again', name: 'Remove', observation: observation() });
+  assert.equal(restored.restored, true);
+  assert.equal(readDashboard(db).length, 1);
+  assert.equal(readDashboard(db)[0].archiveRevision, 2);
+  assert.deepEqual(removeProjectFromDashboard(db, request), result);
+  assert.equal(readDashboard(db).length, 1, 'old removal replay must not remove a restored project');
+  db.close();
+});
+
+test('schema 28 projects migrate without replacing owner identity and survive a fresh process', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'cockpit-removal-migration-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'db.sqlite');
+  let db = openCockpitDatabase(file);
+  const project = registerProject(db, { commandId: 'old-register', name: 'Old', observation: observation() });
+  db.exec('ALTER TABLE projects DROP COLUMN removed_at; DELETE FROM schema_migrations WHERE version = 29; PRAGMA user_version = 28;');
+  const historicalMigration = db.prepare('SELECT * FROM schema_migrations WHERE version = 28').get();
+  assert.equal(historicalMigration.name, 'workspace-lifecycle-reservation-owner-identity');
+  assert.ok(db.prepare('PRAGMA table_info(workspace_lifecycle_reservations)').all()
+    .some((column) => column.name === 'owner_started_at'));
+  db.close();
+  db = openCockpitDatabase(file);
+  assert.deepEqual(db.prepare('SELECT * FROM schema_migrations WHERE version = 28').get(), historicalMigration);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 29);
+  assert.equal(readDashboard(db).length, 1);
+  assert.equal(removeProjectFromDashboard(db, { commandId: 'old-remove', projectId: project.projectId, expectedRevision: 0 }).ok, true);
+  db.close();
+  const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
+    import { openCockpitDatabase } from ${JSON.stringify(new URL('../src/core/database.mjs', import.meta.url).href)};
+    import { readDashboard } from ${JSON.stringify(new URL('../src/core/projects.mjs', import.meta.url).href)};
+    const db = openCockpitDatabase(process.argv[1]);
+    console.log(JSON.stringify([readDashboard(db).length, db.prepare('SELECT count(*) AS n FROM project_observations').get().n,
+      db.prepare('PRAGMA table_info(workspace_lifecycle_reservations)').all().some((column) => column.name === 'owner_started_at'),
+      db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 29').get().n]));
+    db.close();`, file], { encoding: 'utf8' });
+  assert.deepEqual(JSON.parse(output.trim()), [0, 1, true, 1]);
+});
 
 test('registering a clean unknown project makes it ready on the dashboard', (t) => {
   const db = fixture(t);

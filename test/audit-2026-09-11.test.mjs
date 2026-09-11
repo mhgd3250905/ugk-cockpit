@@ -371,7 +371,9 @@ test('schema 28 records reservation owner identity and stays repeatable', (t) =>
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
   assert.equal(db.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
-  assert.equal(SUPPORTED_SCHEMA_VERSION, 28);
+  assert.equal(SUPPORTED_SCHEMA_VERSION, 29);
+  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version = 28').get().name,
+    'workspace-lifecycle-reservation-owner-identity');
   const columns = db.prepare('PRAGMA table_info(workspace_lifecycle_reservations)').all().map((row) => row.name);
   assert.ok(columns.includes('owner_started_at'), 'owner_started_at column must exist');
   db.close();

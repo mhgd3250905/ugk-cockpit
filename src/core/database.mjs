@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 28;
+export const SUPPORTED_SCHEMA_VERSION = 29;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1102,6 +1102,16 @@ END;
       // recorded owner. NULL rows (pre-28) stay conservative.
       if (!columns.has('owner_started_at')) {
         db.exec('ALTER TABLE workspace_lifecycle_reservations ADD COLUMN owner_started_at INTEGER;');
+      }
+    },
+  },
+  {
+    version: 29,
+    name: 'project-dashboard-removal',
+    apply(db) {
+      const columns = db.prepare('PRAGMA table_info(projects)').all();
+      if (!columns.some((column) => column.name === 'removed_at')) {
+        db.exec('ALTER TABLE projects ADD COLUMN removed_at TEXT;');
       }
     },
   },

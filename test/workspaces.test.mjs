@@ -1094,6 +1094,21 @@ test('REAL GIT: removing a clean workspace archives its record and releases its 
   });
   assert.equal(created.ok, true, JSON.stringify(created));
 
+  // Historical closed markers may still have an unaccepted invitation.
+  db.prepare(`INSERT INTO work_line_states VALUES (?, ?, 'closed', 1, ?)`)
+    .run('proj-real-1', created.space.worktreeId, new Date().toISOString());
+  db.prepare(`INSERT INTO assignments (id, project_id, worktree_id, agent_id, task_id,
+    scope_json, status, revision, session_id, created_at, updated_at)
+    VALUES ('pending-removal', 'proj-real-1', ?, 'codex', 'task', '{}', 'pending', 0, NULL, ?, ?)`)
+    .run(created.space.worktreeId, new Date().toISOString(), new Date().toISOString());
+  db.prepare(`UPDATE assignments SET status = 'accepted', session_id = 'live-session' WHERE id = 'pending-removal'`).run();
+  const blocked = await removeDevelopmentWorkspace(db, {
+    commandId: 'cmd-remove-active-protection', projectId: 'proj-real-1',
+    spaceId: created.spaceId, expectedRevision: created.space.revision,
+  });
+  assert.equal(blocked.code, 'SPACE_CLOSED_HAS_ACTIVE_WORK');
+  assert.equal(existsSync(targetPath), true);
+  db.prepare(`UPDATE assignments SET status = 'pending', session_id = NULL WHERE id = 'pending-removal'`).run();
   const removed = await removeDevelopmentWorkspace(db, {
     commandId: 'cmd-remove-space',
     projectId: 'proj-real-1',
@@ -1101,6 +1116,7 @@ test('REAL GIT: removing a clean workspace archives its record and releases its 
     expectedRevision: created.space.revision,
   });
   assert.equal(removed.ok, true, JSON.stringify(removed));
+  assert.equal(db.prepare("SELECT status FROM assignments WHERE id = 'pending-removal'").get().status, 'cancelled');
   assert.equal(removed.space.status, 'archived');
   assert.equal(existsSync(targetPath), false);
   assert.equal(await checkBranchExists(repoDir, created.branch), true, 'removal keeps the recovery branch');

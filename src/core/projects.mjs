@@ -155,6 +155,13 @@ export function registerProject(db, request) {
       observation.coherence ?? 'unknown',
       observation.observedAt,
     );
+    // A fresh explicit registration restores dashboard membership. Replayed
+    // registration commands return above and cannot resurrect a removed item.
+    const restored = db.prepare(`
+      UPDATE projects SET removed_at = NULL, archived_at = NULL,
+        archive_revision = archive_revision + 1, updated_at = ?
+      WHERE id = ? AND removed_at IS NOT NULL
+    `).run(timestamp, projectId);
     const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
     const response = {
       ok: true,
@@ -165,6 +172,7 @@ export function registerProject(db, request) {
       status: project.status,
       statusReason: project.status_reason,
       alreadyExists: projectInsert.changes === 0,
+      restored: restored.changes === 1,
     };
     db.prepare(`
       UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?
@@ -300,7 +308,8 @@ export function readDashboard(db, { archived = false } = {}) {
       ORDER BY history.finished_at DESC LIMIT 1
     )
     LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
-    WHERE projects.archived_at IS ${archived === true ? 'NOT NULL' : 'NULL'}
+    WHERE projects.removed_at IS NULL
+      AND projects.archived_at IS ${archived === true ? 'NOT NULL' : 'NULL'}
     ORDER BY
       CASE
         WHEN observations.coherence != 'coherent' OR observations.has_changes = 1 THEN 0
