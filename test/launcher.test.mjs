@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -282,7 +282,7 @@ test('launcher script complies with pure ASCII encoding and formatting contracts
   assert.match(cmdContent, /%REPO_ROOT%scripts\\launch-cockpit\.ps1/i, 'cmd wrapper must call scripts/launch-cockpit.ps1');
 });
 
-test('launcher rejects unknown process occupying target port and preserves it untouched', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+test('launcher rejects unknown process occupying target port and preserves it untouched', { timeout: 30_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const foreignPort = 41740;
   let requestCount = 0;
   const server = createServer((req, res) => {
@@ -314,7 +314,7 @@ test('launcher rejects unknown process occupying target port and preserves it un
   assert.equal(ping.foreignApp, 'unrelated-service');
 });
 
-test('inverse proof: cross-directory mock returning UGK signatures without service.lock binding is NOT stopped', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+test('inverse proof: cross-directory mock returning UGK signatures without service.lock binding is NOT stopped', { timeout: 30_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41741;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-inverse-'));
   const cleanupTargets = [];
@@ -382,7 +382,7 @@ server.listen(${mockPort}, '127.0.0.1');
   assert.equal(ping.status, 'ok');
 });
 
-test('positive proof: mock service WITH valid service.lock binding and HTTP verification is identified and stopped cleanly', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+test('positive proof: mock service WITH valid service.lock binding and HTTP verification is identified and stopped cleanly', { timeout: 30_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41742;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-positive-'));
   const cleanupTargets = [];
@@ -515,7 +515,7 @@ server.listen(${mockPort}, '127.0.0.1');
   cleanupPidFiles.length = 0;
 });
 
-test('launcher cleans up stale service.lock with dead PID before starting new instance', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+test('launcher cleans up stale service.lock with dead PID before starting new instance', { timeout: 30_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const mockPort = 41743;
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-test-stale-'));
   const cleanupPidFiles = [];
@@ -592,7 +592,7 @@ server.listen(${mockPort}, '127.0.0.1');
   cleanupPidFiles.length = 0;
 });
 
-test('root cmd wrapper propagates arguments and exit codes without pausing when -NoPause is given', { timeout: 30_000 }, { skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+test('root cmd wrapper propagates arguments and exit codes without pausing when -NoPause is given', { timeout: 30_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
   const foreignPort = 41749;
   const server = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -614,4 +614,151 @@ test('root cmd wrapper propagates arguments and exit codes without pausing when 
   assert.equal(result.status, 1, `Expected wrapper to propagate failure: ${result.stdout} ${result.stderr}`);
   assert.equal(result.timedOut, false);
   assert.match(result.stdout, /Port 41749 is occupied by an unverified process/);
+});
+
+test('default cmd entry on Windows PowerShell 5.1 starts the service with isolated fixture and passes readiness plus project acceptance', { timeout: 150_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+  // Pick a genuinely free port so the run never touches the production 41737.
+  // src/main.mjs hard-binds 41737, so the fixture uses a service double that
+  // honours the same data-directory contract (api-token file) and serves the
+  // /health, dashboard, and project detail shapes the launcher and acceptance
+  // flow rely on. The real service never runs and no formal data is touched.
+  const port = await new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port: freePort } = probe.address();
+      probe.close(() => resolve(freePort));
+    });
+  });
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-e2e-'));
+  const dataDir = path.join(tempDir, 'data');
+  const logDir = path.join(dataDir, 'logs');
+  mkdirSync(logDir, { recursive: true });
+  mkdirSync(path.join(tempDir, 'app'), { recursive: true });
+  // 11 stale runs. Together with this run (12 stamps) retention must keep the
+  // newest 10 and drop exactly the two oldest stamps. Stamps use the real
+  // yyyyMMdd-HHmmss shape (8 digits, dash, 6 digits).
+  for (let index = 1; index <= 11; index += 1) {
+    const stamp = `20200101-${String(index).padStart(6, '0')}`;
+    writeFileSync(path.join(logDir, `service-${stamp}.log`), `stale ${stamp}\n`, 'utf8');
+    writeFileSync(path.join(logDir, `launcher-${stamp}.log`), `stale launcher ${stamp}\n`, 'utf8');
+  }
+  const mockPath = path.join(tempDir, 'app', 'main.mjs');
+  writeFileSync(mockPath, `
+import { createServer } from 'node:http';
+import { readFileSync, writeFileSync } from 'node:fs';
+const dataDir = ${JSON.stringify(dataDir)};
+let token;
+try { token = readFileSync(dataDir + '/api-token', 'utf8').trim(); } catch {}
+if (!token || token.length < 32) {
+  token = 'fixture-api-token-0000000000000000000000000000';
+  writeFileSync(dataDir + '/api-token', token, 'utf8');
+}
+const server = createServer((req, res) => {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (url.pathname === '/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><html><head><title>UGK Cockpit</title></head><body>UGK Cockpit launcher fixture</body></html>');
+    return;
+  }
+  if (url.pathname === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', version: '0.0.0-fixture' }));
+    return;
+  }
+  if (req.headers.authorization !== 'Bearer ' + token) {
+    res.writeHead(401, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 'UNAUTHORIZED' }));
+    return;
+  }
+  if (url.pathname === '/api/v1/dashboard') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, refreshedAt: new Date().toISOString(), projects: [], archivedProjects: [] }));
+    return;
+  }
+  if (/^\\/api\\/v1\\/projects\\/[^/]+$/.test(url.pathname)) {
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 'PROJECT_NOT_FOUND' }));
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ code: 'NOT_FOUND' }));
+});
+server.listen(${port}, '127.0.0.1');
+`, 'utf8');
+
+  let servicePid = null;
+  t.after(async () => {
+    if (servicePid) await terminateProcessTree(servicePid);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const result = await runCaptured('cmd.exe', ['/d', '/c', launcherCmdPath,
+    '-RepoDirectory', repoRoot,
+    '-DataDirectory', dataDir,
+    '-TestPort', String(port),
+    '-TestMainEntry', mockPath,
+    '-SkipBuild',
+    '-NoPause',
+    '-TimeoutSeconds', '60',
+  ], { cwd: repoRoot, env: { ...process.env, UGK_LAUNCHER_NO_PAUSE: '1' } }, 140_000);
+
+  // Regression: the launcher used to append its header to the file that
+  // Start-Process was already redirecting; on Windows PowerShell 5.1 that
+  // threw "being used by another process" and killed the launcher before the
+  // readiness wait, while the service kept running unattended.
+  assert.equal(result.status, 0, `launcher failed: ${result.stdout} ${result.stderr}`);
+  assert.equal(result.timedOut, false);
+  assert.doesNotMatch(result.stdout, /being used by another process/i);
+  assert.match(result.stdout, /\[OK\] UGK Cockpit is running in background\./);
+  const pidMatch = result.stdout.match(/Service spawned in background \(PID: (\d+)/);
+  assert.ok(pidMatch, `launcher did not report the service PID: ${result.stdout}`);
+  servicePid = Number(pidMatch[1]);
+
+  // Per-run log files: the launcher log carries the header, and both service
+  // logs exist for this run.
+  const stamps = [...new Set(readdirSync(logDir)
+    .map((name) => (/(?:service|launcher)-(\d{8}-\d{6})/.exec(name) || [])[1])
+    .filter((stamp) => stamp && !stamp.startsWith('20200101')))];
+  assert.equal(stamps.length, 1, `expected exactly one fresh run stamp, got ${stamps.join(', ')}`);
+  const stamp = stamps[0];
+  const launcherLog = readFileSync(path.join(logDir, `launcher-${stamp}.log`), 'utf8');
+  assert.match(launcherLog, /UGK Cockpit launcher starting/);
+  assert.match(launcherLog, new RegExp(`port: ${port}`));
+  assert.ok(existsSync(path.join(logDir, `service-${stamp}.log`)), 'service stdout log must exist');
+  assert.ok(existsSync(path.join(logDir, `service-${stamp}.err.log`)), 'service error log must exist');
+
+  // Retention: 12 stamps total -> keep newest 10, drop the two oldest.
+  assert.equal(existsSync(path.join(logDir, 'service-20200101-000001.log')), false);
+  assert.equal(existsSync(path.join(logDir, 'launcher-20200101-000001.log')), false);
+  assert.equal(existsSync(path.join(logDir, 'service-20200101-000002.log')), false);
+  assert.ok(existsSync(path.join(logDir, 'service-20200101-000003.log')), 'third-oldest run must be retained');
+
+  // AGENTS.md acceptance: after start, verify the existing project list and
+  // details through the authenticated API (an empty fixture -> an empty list
+  // and the detail endpoint answering its contract), never a bare HTTP 200.
+  const token = readFileSync(path.join(dataDir, 'api-token'), 'utf8').trim();
+  assert.ok(token.length >= 32, 'service must have provisioned its API token');
+  const health = await waitForHttp(`http://127.0.0.1:${port}/health`);
+  assert.ok(health, 'service must answer /health');
+  const healthBody = JSON.parse(health.body);
+  assert.equal(healthBody.status, 'ok');
+  assert.ok(healthBody.version, 'health must report the running version');
+
+  const headers = { authorization: `Bearer ${token}` };
+  const dashboard = await fetch(`http://127.0.0.1:${port}/api/v1/dashboard`, { headers });
+  assert.equal(dashboard.status, 200);
+  const dashboardBody = await dashboard.json();
+  assert.equal(dashboardBody.ok, true);
+  assert.deepStrictEqual(dashboardBody.projects, [], 'fresh fixture must report an empty project list');
+  assert.deepStrictEqual(dashboardBody.archivedProjects, []);
+
+  const detail = await fetch(`http://127.0.0.1:${port}/api/v1/projects/fixture-nonexistent`, { headers });
+  assert.equal(detail.status, 404);
+  assert.equal((await detail.json()).code, 'PROJECT_NOT_FOUND');
+
+  await terminateProcessTree(servicePid);
+  await waitForPidExit(servicePid);
+  servicePid = null;
 });
