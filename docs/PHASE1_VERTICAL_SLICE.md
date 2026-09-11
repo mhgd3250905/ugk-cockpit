@@ -18,7 +18,14 @@
 4. **非终态进度状态枚举只存在于 MCP 桥**，HTTP 边界接受核心未拒绝的任意字符串，包括仅由 init 路径写入的 `adopted`：持 scoped token 的直接调用者可伪造一条"接入"事件并推高 assignment 与 run 的 revision。现由 `src/core/assignments-contract.mjs` 提供唯一定义，两处网关共同引用。
 5. **`main.mjs` 从不传 `authorizedRoots`，导致旧 `/api/v1/runs/*` 路由在生产环境对每个请求返回 `PATH_NOT_AUTHORIZED`**，上一轮交付的"用户确认释放残留写租约"路径只在注入夹具根的测试里可达。现授权根取注入列表与持久授予事实（`projects.authorized_root`、开发空间 worktree 路径）的并集，仍对未授予路径 fail closed。
 
-**本轮验证证据**（2026-09-10，Windows / Node.js 24.16.0）：新增回归 `test/audit-2026-09-10.test.mjs` **17/17**；`node --test --test-concurrency=1 test/repository-config-guard.test.mjs test/runs-release-lease.test.mjs test/codex-plugin.test.mjs test/zcode-plugin.test.mjs test/delivery-ops.test.mjs test/integration-service.test.mjs` **60/60**；`npm run test:phase0` **97/97**；`npm run build:web` 通过；全量 `npm test` **537/538**，唯一失败为上述既存夹具清理 `EPERM`（已确认基线同样失败）。台账既有证据命令（5 个文件的 40/40）可精确重现。
+**2026-09-11 审查返工（PR #11 评审意见，两项 P2）**：
+
+1. **无值布尔配置误拒绝**：`[http] sslVerify`（无值）按 Git 布尔语义是 true（加固），但此前实现把它当空字符串判敌意，正常仓库被 `UNSAFE_REMOTE_URL` 挡在送审/集成/推送之外。现改为让 Git 自己归一化取值：`sslVerify`/`schannelCheckRevoke` 走 `--bool` 专查（无值→`true` 放行、显式空值→`false` 拒绝、git 无法解析的写法直接 fatal→按敌意处理），`followRedirects` 走 `--bool-or-str` 专查（`initial` 与 false 放行，无值=true 及其余拒绝）。不再解析 `--get-regexp` 的打印格式——`probe.git()` 会 trim stdout，显式空值的尾随空格（与无值的唯一区别）在进入解析前就被删掉了，第一版按空白区分的思路在这个代码库里根本立不住（实测确认）。显式空值的 `sslVerify` 仍拒绝（false=关闭校验），键名即敌意的键（`proxy` 等）仍出现即拒绝、不开空值特例。新增 7 条正反例，其中 4 条对返工前源码为红。
+2. **代理行为测试误判**：断言依赖 Git/curl 错误文案中的 "via 127.0.0.1"，在 Git 2.50（文案无 "via"）上把确实访问了代理的对照组判为失败。现改为本地 TCP 监听端点计数连接：对照组（不加固）必须真的连上代理，加固组（带 `SAFE_GIT_PREFIX`）必须零新增连接且命令仍失败，完全不依赖任何错误措辞。附带发现并修正用例自身的缺陷：同步等待（`execFileSync`）会阻塞事件循环，监听端点永远处理不了到达的连接（curl 等不到 CONNECT 响应直到 20s 超时、计数恒为 0），改为异步等待后对照组即时失败、计数正确。
+
+返工验证（2026-09-11，Windows / Node.js 24.16.0 / Git 2.51.2）：`test/audit-2026-09-10.test.mjs` **24/24**；Phase 0 **97/97**；受影响邻接套件（guard/release-lease/plugin×2/delivery-ops/integration-service/submission-service）**73/74**，唯一失败仍是下述既存 `EPERM` 清理问题；全量结果见下。
+
+首轮验证证据（2026-09-10，Windows / Node.js 24.16.0）：新增回归 `test/audit-2026-09-10.test.mjs` **17/17**；`node --test --test-concurrency=1 test/repository-config-guard.test.mjs test/runs-release-lease.test.mjs test/codex-plugin.test.mjs test/zcode-plugin.test.mjs test/delivery-ops.test.mjs test/integration-service.test.mjs` **60/60**；`npm run test:phase0` **97/97**；`npm run build:web` 通过；全量 `npm test` **537/538**，唯一失败为上述既存夹具清理 `EPERM`（已确认基线同样失败）。台账既有证据命令（5 个文件的 40/40）可精确重现。
 
 **对既有记录的更正**（交叉核对结果）：
 

@@ -41,11 +41,27 @@ export const HOSTILE_ANY_SCOPE_CONFIG_PATTERN =
 //     are *hardening* when set to the safe spelling and only dangerous
 //     otherwise. Matching the key alone rejected repositories that had
 //     explicitly tightened their own transport (`http.sslVerify=true`), so
-//     these are value-aware: see TRANSPORT_SAFE_VALUES.
+//     these are value-aware. The boolean ones are judged in two dedicated
+//     queries that make git normalise the value (`--bool`, `--bool-or-str`),
+//     because the two "unset" spellings are OPPOSITES there and the raw print
+//     format cannot be trusted to carry the difference through this codebase:
 //
-// An unrecognised value for a value-aware key is treated as hostile. That
-// matches git, which fails the operation outright on a bad boolean, so failing
-// closed here costs nothing and never silently accepts a weakened setting.
+//       * a valueless entry (`[http] sslVerify`) is boolean TRUE,
+//       * an explicitly empty value (`[http] sslVerify = `) is boolean FALSE,
+//       * `git config --get-regexp` prints the latter with one trailing space —
+//         which probe.git() strips when it trims stdout, making the two forms
+//         indistinguishable in the received text (measured).
+//
+//     With `--bool`, git itself reports `true` for the valueless form and
+//     `false` for the empty form, and exits fatally on a spelling it cannot
+//     parse — exactly the fail-closed behaviour wanted for `maybe`. `followRedirects`
+//     also accepts the non-boolean `initial` (git's default), so it is queried
+//     with `--bool-or-str`, which passes such values through verbatim.
+//
+// Key-only entries stay hostile whatever their value, including an explicit
+// empty one: an empty `http.proxy` happens to mean "no proxy", but presence is
+// the rule for keys no repository may set on the user's behalf, and making
+// per-key empty-value exceptions would be the harder contract to keep straight.
 //
 // Rejecting is correct rather than rewriting: unlike `remote.<name>.mirror`
 // (a benign setting Cockpit can neutralise, see delivery-ops.mjs), a repository
@@ -67,19 +83,20 @@ export const HOSTILE_TRANSPORT_CONFIG_PATTERN =
   '^(https?\\.|https?\\..*\\.)'
   + '(proxy|curloptresolve|extraheader|cookiefile|savecookies|delegation'
   + '|emptyauth|proactiveauth|proxysslcainfo|proxysslcert|proxysslkey'
-  + '|sslcainfo|sslcapath|sslcert|sslkey|pinnedpubkey|sslcipherlist'
-  + '|sslverify|sslversion|schannelcheckrevoke|followredirects)$';
+  + '|sslcainfo|sslcapath|sslcert|sslkey|pinnedpubkey|sslcipherlist|sslversion)$';
 
-// Values that leave a value-aware key at least as strict as git's default. Any
-// other value for the same key is refused, including ones git itself rejects.
-const TRANSPORT_SAFE_VALUES = new Map([
-  ['sslverify', new Set(['true', 'yes', 'on', '1'])],
-  ['schannelcheckrevoke', new Set(['true', 'yes', 'on', '1'])],
-  // `initial` is git's default: redirects are followed for the first request
-  // only, and git drops the Authorization header when the host changes.
-  ['followredirects', new Set(['initial', 'false', 'no', 'off', '0', 'none'])],
-  ['sslversion', new Set(['tlsv1.2', 'tlsv1.3'])],
-]);
+// Refused when git itself resolves the value to false (verification off,
+// revocation checking off), or when git cannot parse the value at all —
+// `--bool` makes both cases explicit and keeps valueless (= true) allowed.
+export const HOSTILE_TRANSPORT_BOOLEAN_PATTERN =
+  '^(https?\\.|https?\\..*\\.)(sslverify|schannelcheckrevoke)$';
+
+// `followRedirects` is an enum that also accepts boolean spellings, so it is
+// normalised with `--bool-or-str`: `initial` (git's default) and any boolean
+// false stay allowed, everything else — including the valueless form, which is
+// boolean true = follow on every request — is refused.
+export const HOSTILE_TRANSPORT_REDIRECT_PATTERN =
+  '^(https?\\.|https?\\..*\\.)followredirects$';
 
 /** The trailing key component, which is the part that names the setting. */
 function transportKeyName(key) {
@@ -87,14 +104,41 @@ function transportKeyName(key) {
 }
 
 /**
- * True when this config entry must block the operation. Key-only entries are
- * always hostile; value-aware entries are hostile unless the value is one of
- * the safe spellings.
+ * True when a raw (non-boolean) transport entry must block the operation.
+ * Key-only entries are hostile whatever their value; `sslVersion` is an enum
+ * where only a raised TLS floor is safe, and a valueless or empty sslversion is
+ * a nonsense configuration that stays refused.
  */
 export function transportEntryIsHostile(key, rawValue) {
-  const safeValues = TRANSPORT_SAFE_VALUES.get(transportKeyName(key));
-  if (!safeValues) return true;
-  return !safeValues.has(String(rawValue ?? '').trim().toLowerCase());
+  if (transportKeyName(key) === 'sslversion') {
+    const normalized = String(rawValue ?? '').trim().toLowerCase();
+    return normalized !== 'tlsv1.2' && normalized !== 'tlsv1.3';
+  }
+  return true;
+}
+
+// Ask git to normalise the boolean-ish transport keys instead of parsing its
+// print format: with `--bool` the output is always `key true` or `key false`,
+// the valueless form reports true and the explicitly empty form reports false,
+// and a spelling git cannot parse makes the command exit fatally — treated as
+// hostile, since git would refuse the value later anyway. `--bool-or-str` is
+// the same idea for `followRedirects`, whose legal `initial` is not a boolean
+// and must pass through as text.
+async function normalizedTransportEntriesHostile(cwd, scope, pattern, overrides, { boolOrStr = false } = {}) {
+  let result;
+  try {
+    result = await git(cwd, [
+      'config', ...scope, boolOrStr ? '--bool-or-str' : '--bool', '--get-regexp', pattern,
+    ], { ...gitOptions(overrides), acceptExitCodes: [0, 1] });
+  } catch {
+    return true;
+  }
+  return result.stdout.split(/\r?\n/).some((line) => {
+    if (!line.trim()) return false;
+    const value = line.slice(line.indexOf(' ') + 1).trim().toLowerCase();
+    if (boolOrStr) return value !== 'initial' && value !== 'false';
+    return value === 'false';
+  });
 }
 
 // Drivers must be defined in a repository-owned config file. Scoping matters in
@@ -204,14 +248,14 @@ function firstKey(stdout) {
 
 // `git config --get-regexp` prints `key value` with the value taken verbatim, so
 // only the first space separates them (an `http.extraHeader` value contains
-// spaces of its own). Value-aware entries need the value, not just the key.
+// spaces of its own). Presence of the key is all this query decides; value
+// nuance for the boolean keys lives in the dedicated `--bool` queries, precisely
+// because probe.git() trims stdout and would erase the empty-vs-valueless cue.
 function hasHostileTransportEntry(stdout) {
   return stdout.split(/\r?\n/).some((line) => {
     if (!line.trim()) return false;
-    const separator = line.indexOf(' ');
-    const key = separator === -1 ? line : line.slice(0, separator);
-    const value = separator === -1 ? '' : line.slice(separator + 1);
-    return transportEntryIsHostile(key, value);
+    const key = line.slice(0, line.indexOf(' '));
+    return transportEntryIsHostile(key, line.slice(key.length + 1));
   });
 }
 
@@ -223,7 +267,7 @@ function hasHostileTransportEntry(stdout) {
  */
 export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
   const scopes = await configScopes(cwd, overrides);
-  const [driverResults, redirectResult, transportResults] = await Promise.all([
+  const [driverResults, redirectResult, transportResults, verifyResults, followResults] = await Promise.all([
     Promise.all(scopes.map((scope) => git(
       cwd, ['config', ...scope, '--get-regexp', HOSTILE_LOCAL_CONFIG_PATTERN], gitOptions(overrides),
     ))),
@@ -241,15 +285,24 @@ export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
     // unscoped get-regexp returns them). `--local`/`--worktree` exclude
     // command-line values while still catching repository-owned ones, and the
     // url-scoped `http.<url>.<key>` spelling is read from the same scopes.
-    // The values matter here, so these results are read entry by entry rather
-    // than reduced to the first key.
     Promise.all(scopes.map((scope) => git(
       cwd, ['config', ...scope, '--get-regexp', HOSTILE_TRANSPORT_CONFIG_PATTERN], gitOptions(overrides),
+    ))),
+    // The two boolean checks use the same repository-owned scopes: command-line
+    // `-c` values must stay excluded here too, or SAFE_GIT_PREFIX's own
+    // `http.sslVerify=true` reset would silence every repository's weakened
+    // setting (and, unscoped, be visible to the query).
+    Promise.all(scopes.map((scope) => normalizedTransportEntriesHostile(
+      cwd, scope, HOSTILE_TRANSPORT_BOOLEAN_PATTERN, overrides,
+    ))),
+    Promise.all(scopes.map((scope) => normalizedTransportEntriesHostile(
+      cwd, scope, HOSTILE_TRANSPORT_REDIRECT_PATTERN, overrides, { boolOrStr: true },
     ))),
   ]);
   if (driverResults.some((result) => firstKey(result.stdout))) return { kind: 'filter' };
   if (firstKey(redirectResult.stdout)) return { kind: 'remote' };
   if (transportResults.some((result) => hasHostileTransportEntry(result.stdout))) return { kind: 'transport' };
+  if (verifyResults.some(Boolean) || followResults.some(Boolean)) return { kind: 'transport' };
 
   const attribute = await findFilterAttributeFile(cwd, overrides);
   if (attribute) return { kind: 'attributes' };

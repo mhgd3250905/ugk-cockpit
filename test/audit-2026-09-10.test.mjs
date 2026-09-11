@@ -15,11 +15,13 @@
 //    user-confirmed release path for a crashed write lease was unreachable in
 //    production while the suite (which injects the roots) passed.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { openCockpitDatabase } from '../src/core/database.mjs';
@@ -52,6 +54,8 @@ function gitSync(cwd, args) {
 function slashes(value) {
   return value.split(path.sep).join('/');
 }
+
+const execFileAsync = promisify(execFile);
 
 function createFixture(t, prefix) {
   const base = mkdtempSync(path.join(fixtureTempRoot(), prefix));
@@ -141,57 +145,65 @@ test('SAFE_GIT_PREFIX neutralises the generic transport keys', () => {
   }
 });
 
-// 上面的用例只断言 argv 内容。这里用真实进程证明复位确实生效：仓库本地的
-// http.proxy 会让未加固的 Git 去连接该代理，而经过 SAFE_GIT_PREFIX 的同一命令
-// 根本不再使用代理。观察点是 Git 自己的诊断文本（代理地址是否被尝试），而不是
-// 一个真实的代理服务：连接到一个已确认关闭的端口会立刻失败，既不需要 TLS
-// 夹具，也不会因为 Git 重试而挂住。TLS 证书校验那一支需要可信夹具证书才能正向
-// 观察"连接成功"，因此只对"重定向"这支做行为验证，其余键由检测侧覆盖。
+// 上面的用例只断言 argv 内容。这里用真实进程证明复位确实生效：对照组的
+// http.proxy 必须让 Git 真正连到本地监听端点，加固组必须一次都不连。判据是
+// 本地端点的连接计数，不依赖 Git/curl 任何版本的错误措辞（不同 Git 版本对
+// 代理连接失败的诊断文本不同，按措辞断言会在别的环境误判）。TLS 证书校验
+// 那一支需要可信夹具证书才能正向观察"连接成功"，因此行为验证只覆盖
+// "重定向"这支，其余键由检测侧覆盖。
 test('SAFE_GIT_PREFIX actually stops a repo-local proxy from being used', async (t) => {
   const { repo } = createFixture(t, 'ugk-audit-proxy-neutralise-');
-  // Reserve a port, then release it, so nothing is listening on it.
-  const probe = createServer();
-  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve));
-  const closedPort = probe.address().port;
-  await new Promise((resolve) => probe.close(resolve));
+  const proxyHits = [];
+  const openSockets = new Set();
+  const proxy = createServer((socket) => {
+    proxyHits.push(Date.now());
+    openSockets.add(socket);
+    socket.on('close', () => openSockets.delete(socket));
+    // 立即断开：Git 会快速失败，不留下可能挂住夹具清理的句柄。
+    socket.destroy();
+  });
+  await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  const proxyPort = proxy.address().port;
+  t.after(() => new Promise((resolve) => {
+    for (const socket of openSockets) socket.destroy();
+    proxy.close(resolve);
+  }));
 
   gitSync(repo, ['remote', 'set-url', 'origin', 'https://example.invalid/secret/repo.git']);
-  gitSync(repo, ['config', '--local', 'http.proxy', `http://127.0.0.1:${closedPort}`]);
+  gitSync(repo, ['config', '--local', 'http.proxy', `http://127.0.0.1:${proxyPort}`]);
 
-  const run = (args) => {
+  // Git 子进程必须以异步方式等待：同步等待（execFileSync）会阻塞 Node 的事件
+  // 循环，监听端点因此永远处理不了到达的连接——curl 等不到 CONNECT 响应直到
+  // 超时，连接计数也恒为 0（这条用例的第一版就是这么自己把自己挂死的）。
+  const run = async (args) => {
     try {
-      execFileSync('git', args, {
+      await execFileAsync('git', args, {
         cwd: repo,
-        encoding: 'utf8',
         windowsHide: true,
         env: safeGitEnvironment(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 30_000,
+        timeout: 20_000,
       });
-      return '';
+      return { code: 0 };
     } catch (error) {
-      return `${error.stdout ?? ''}${error.stderr ?? ''}`;
+      return { code: error.status ?? error.signal ?? 'unknown-failure' };
     }
   };
+  const settle = () => delay(200);
 
-  // 对照组：不加固时，仓库本地配置让 Git 经代理连接。curl 的诊断写作
-  // "Failed to connect to <host> port 443 via <proxy>"——代理端口本身不出现在
-  // 文本里，因此以 "via <proxy host>" 作为"确实用了代理"的判据。
-  const control = run(['ls-remote', 'origin']);
-  assert.match(
-    control,
-    /via 127\.0\.0\.1/,
-    'the control run must actually route through the proxy, or this test proves nothing',
-  );
+  // 对照组：不加固时 Git 必须真的连上代理，否则本用例证明不了任何事。
+  const control = await run(['ls-remote', 'origin']);
+  await settle();
+  assert.notEqual(control.code, 0, 'the control run must fail (the proxy refuses it)');
+  assert.ok(proxyHits.length >= 1, 'the control run must actually connect to the proxy');
 
-  // 加固组：同一命令加上产品使用的前缀后不得再使用代理；错误应来自目标主机本身。
-  const guarded = run([...SAFE_GIT_PREFIX, 'ls-remote', 'origin']);
-  assert.doesNotMatch(
-    guarded,
-    /via 127\.0\.0\.1/,
-    'the http.proxy reset must stop the proxy from being used, not merely appear in argv',
-  );
-  assert.match(guarded, /example\.invalid/, 'the guarded run must still fail against the real target');
+  // 加固组：同一命令加上产品使用的前缀后不得再使用代理，且命令仍然失败
+  // （目标是不可达的，静默成功同样说明复位没生效）。
+  const hitsBefore = proxyHits.length;
+  const guarded = await run([...SAFE_GIT_PREFIX, 'ls-remote', 'origin']);
+  await settle();
+  assert.notEqual(guarded.code, 0, 'the guarded run must still fail against the unreachable target');
+  assert.equal(proxyHits.length, hitsBefore,
+    'the http.proxy reset must stop the proxy from being used, not merely appear in argv');
 });
 
 // 与 filter 模式同理：--local 取不到 config.worktree，必须按仓库作用域展开。
@@ -236,6 +248,55 @@ test('transport detection distinguishes hardening values from weakened ones', as
       `${key}=${value}: ${label}`,
     );
   }
+});
+
+// Git 布尔语义里"无值"与"显式空值"是相反的两种取值：`[http] sslVerify` 解析为
+// true（加固），`[http] sslVerify = ` 解析为 false（关闭校验）。实测
+// `git config --get-regexp` 保留了这个区别——无值条目只打印键名，显式空值打印
+// 键名加一个尾随空格。把无值条目当空字符串处理会把合法仓库错杀成
+// UNSAFE_REMOTE_URL（审查返工项），以下正反例钉住这条语义。
+test('a valueless boolean transport key keeps git\'s true semantics', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-valueless-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tsslVerify\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('a valueless url-scoped boolean key is also treated as true', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-valueless-url-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://example.invalid"]\n\tsslVerify\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('a valueless schannelCheckRevoke resolves to true and is allowed', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-valueless-revoke-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tschannelCheckRevoke\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('an explicitly empty sslVerify resolves to false and is still refused', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-empty-verify-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tsslVerify =\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+test('a valueless followRedirects resolves to true (follow everything) and is refused', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-valueless-redirects-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tfollowRedirects\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+test('an explicitly empty followRedirects resolves to false (never follow) and is allowed', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-empty-redirects-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tfollowRedirects =\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+// 键名即敌意的键不因显式空值而放行：空 proxy 恰好等于无代理，但"出现即拒绝"
+// 是这些键的规则，按键开空值特例会让契约更难保持（对比 filter 模式的做法）。
+test('an explicitly empty key-only transport setting is still refused', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-empty-keyonly-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http]\n\tproxy =\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
 });
 
 // --------------------------------------------------------------- mirror
