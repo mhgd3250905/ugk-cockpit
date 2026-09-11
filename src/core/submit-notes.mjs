@@ -35,6 +35,7 @@ export async function resolveAuthorizedSource(db, workingDirectory, options = {}
            NULL AS space_id, NULL AS space_name
     FROM projects
     JOIN worktrees ON worktrees.id = projects.worktree_id
+    WHERE projects.removed_at IS NULL
 
     UNION ALL
 
@@ -48,7 +49,7 @@ export async function resolveAuthorizedSource(db, workingDirectory, options = {}
     FROM development_spaces
     JOIN projects ON projects.id = development_spaces.project_id
     JOIN worktrees ON worktrees.id = development_spaces.worktree_id
-    WHERE development_spaces.status != 'archived'
+    WHERE development_spaces.status != 'archived' AND projects.removed_at IS NULL
 
     UNION ALL
 
@@ -62,6 +63,7 @@ export async function resolveAuthorizedSource(db, workingDirectory, options = {}
     FROM delivery_sources
     JOIN projects ON projects.id = delivery_sources.project_id
     JOIN worktrees ON worktrees.id = delivery_sources.worktree_id
+    WHERE projects.removed_at IS NULL
   `).all();
 
   const matches = [];
@@ -76,7 +78,11 @@ export async function resolveAuthorizedSource(db, workingDirectory, options = {}
       revalidateAuthorizedPath(binding);
       matched = true;
     } catch (err) {
-      if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND'].includes(err?.code)) {
+      // ENOENT is how path-guard reports a registration whose directory has
+      // vanished (the guard never produces PATH_NOT_FOUND itself). Such a
+      // candidate is simply unreachable — skip it, like any offline
+      // registration, instead of failing the whole resolution.
+      if (['PATH_OUTSIDE_SCOPE', 'PATH_NOT_AUTHORIZED', 'REPARSE_POINT', 'PATH_NOT_FOUND', 'ENOENT'].includes(err?.code)) {
         matched = false;
       } else {
         throw err;

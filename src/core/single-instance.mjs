@@ -22,7 +22,11 @@ const MAX_ACQUIRE_ATTEMPTS = 8;
 //
 // Where the platform exposes a boot-relative process start time it can be
 // compared exactly; where it does not, there is no reliable identity to compare
-// and a live PID stays authoritative (the pre-existing behaviour).
+// and a live PID stays authoritative (the pre-existing behaviour). The lock
+// additionally records the creator's own `performance.timeOrigin`: when the
+// recorded pid equals this process's pid but the origin differs, this very
+// process is the reuse — positive proof the original owner is gone, valid on
+// every platform.
 function processIdentity(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform !== 'linux') return null;
@@ -36,6 +40,20 @@ function processIdentity(pid) {
   } catch {
     return null;
   }
+}
+
+function ownProcessStartMs() {
+  return Number.isFinite(performance.timeOrigin) ? Math.floor(performance.timeOrigin) : null;
+}
+
+// True only when the lock names this very pid AND a start instant different
+// from ours — that combination proves the pid was recycled onto this process
+// and the recorded owner cannot be alive.
+function recordedOwnerIsOurRecycledPid(owner) {
+  if (owner?.pid !== process.pid) return false;
+  const recorded = owner?.processStartMs;
+  const own = ownProcessStartMs();
+  return typeof recorded === 'number' && own !== null && recorded !== own;
 }
 
 function processExists(pid) {
@@ -67,6 +85,7 @@ function fileAgeMs(filePath) {
 }
 
 function ownerAlive(owner) {
+  if (recordedOwnerIsOurRecycledPid(owner)) return false;
   if (!processExists(owner?.pid)) return false;
   // Reclaim only on a positive mismatch. An unknown identity on either side
   // leaves the lock in place.
@@ -76,10 +95,10 @@ function ownerAlive(owner) {
   return current === recorded;
 }
 
-function instanceConflict(state) {
+function instanceConflict(state, lockPath) {
   const conflict = new Error(state === 'running'
-    ? 'UGK Cockpit 已经在运行。'
-    : 'UGK Cockpit 正在启动。');
+    ? `UGK Cockpit 已经在运行。锁文件：${lockPath}；确认没有运行中的实例后可删除它重试。`
+    : `UGK Cockpit 正在启动。锁文件：${lockPath}。`);
   conflict.code = 'INSTANCE_ALREADY_RUNNING';
   return conflict;
 }
@@ -135,7 +154,7 @@ function reclaimStaleLock(lockPath, pid) {
       const age = fileAgeMs(lockPath);
       if (age !== null && age < INCOMPLETE_LOCK_GRACE_MS) return 'busy';
     } else if (ownerAlive(owner)) {
-      throw instanceConflict('running');
+      throw instanceConflict('running', lockPath);
     }
     const stalePath = `${lockPath}.${randomUUID()}.stale`;
     try {
@@ -165,6 +184,7 @@ export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
         ownerToken,
         createdAt: new Date().toISOString(),
         processIdentity: processIdentity(pid),
+        processStartMs: pid === process.pid ? ownProcessStartMs() : null,
       }), 'utf8');
       fsyncSync(fd);
       let released = false;
@@ -189,16 +209,16 @@ export function acquireInstanceLock(lockPath, { pid = process.pid } = {}) {
       if (error?.code !== 'EEXIST') throw error;
       const owner = readJsonFile(lockPath);
       if (owner?.vanished) continue;
-      if (owner && ownerAlive(owner)) throw instanceConflict('running');
+      if (owner && ownerAlive(owner)) throw instanceConflict('running', lockPath);
       if (!owner) {
         const age = fileAgeMs(lockPath);
         if (age === null) continue;
-        if (age < INCOMPLETE_LOCK_GRACE_MS) throw instanceConflict('starting');
+        if (age < INCOMPLETE_LOCK_GRACE_MS) throw instanceConflict('starting', lockPath);
       }
       // 死主或陈旧的锁文件：进入串行回收，然后重试创建。
       const reclaimed = reclaimStaleLock(lockPath, pid);
-      if (reclaimed === 'busy') throw instanceConflict('starting');
+      if (reclaimed === 'busy') throw instanceConflict('starting', lockPath);
     }
   }
-  throw instanceConflict('starting');
+  throw instanceConflict('starting', lockPath);
 }

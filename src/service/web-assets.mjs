@@ -73,7 +73,10 @@ export async function serveWebAsset({ request, response, pathname, webRoot, sess
       'content-length': body.length,
     };
     if (relativePath === 'index.html') {
-      headers['set-cookie'] = `ugk_cockpit_session=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`;
+      // Secure is accepted on http://127.0.0.1 / localhost (browsers treat
+      // them as secure contexts) and keeps the session cookie marked for
+      // loopback-only if the port is ever fronted by a local TLS terminator.
+      headers['set-cookie'] = `ugk_cockpit_session=${sessionToken}; HttpOnly; SameSite=Strict; Secure; Path=/`;
     }
     response.writeHead(200, headers);
     response.end(body);

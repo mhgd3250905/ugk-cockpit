@@ -41,7 +41,13 @@ const messages = {
   DELIVERY_DIRECTORY_MISMATCH: ['当前会话目录与本次送审对象不一致。', '请回到对应代码目录，不能拿另一份代码的检查结果送审。'],
   DELIVERY_INTEGRATION_BUSY: ['同一交付正在执行合并。', '请等待该操作结果后重新检查，不要替换它正在处理的版本。'],
   DELIVERY_CONTENT_TOO_LARGE: ['选中的送审文件超出大小安全限制。', '请从送审范围移除超限文件，或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。'],
+  FOLDER_PICKER_BUSY: ['文件夹选择窗口已在使用中。', '请先完成或关闭已打开的系统文件夹选择窗口，再重试。'],
 };
+
+// Codes with a user-facing contract. Everything else (raw fs/child-process
+// error codes such as ENOENT) must collapse to DELIVERY_CHECK_FAILED before it
+// reaches an HTTP or MCP client.
+export const KNOWN_DELIVERY_CODES = new Set(Object.keys(messages));
 
 export function deliveryResponse(result) {
   if (result.ok) return result;

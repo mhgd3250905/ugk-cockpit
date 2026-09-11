@@ -7,6 +7,7 @@ import {
   statSync,
   unlinkSync,
 } from 'node:fs';
+import { readFile as readFileAsync, stat as statAsync } from 'node:fs/promises';
 import path from 'node:path';
 import { VERSION } from '../version.mjs';
 
@@ -81,8 +82,12 @@ function diagnosticLogPaths(directory, fileName) {
  * Read only the redacted records associated with sessions already known to a
  * project. The caller supplies the session ids from the durable database;
  * request data never supplies a file path or an arbitrary session selector.
+ *
+ * The log reads are asynchronous on purpose: this runs on the HTTP request
+ * path, and the synchronous variant would block the event loop for up to
+ * ~1 MB of file I/O per call.
  */
-export function readRecentSessionDiagnostics({
+export async function readRecentSessionDiagnostics({
   directory,
   fileName = 'mcp-diagnostics.log',
   sessionIds = [],
@@ -98,8 +103,8 @@ export function readRecentSessionDiagnostics({
   for (const logPath of diagnosticLogPaths(directory, fileName).reverse()) {
     let content;
     try {
-      if (statSync(logPath).size > MAX_READ_BYTES) continue;
-      content = readFileSync(logPath, { encoding: 'utf8' });
+      if ((await statAsync(logPath)).size > MAX_READ_BYTES) continue;
+      content = await readFileAsync(logPath, { encoding: 'utf8' });
     } catch {
       continue;
     }

@@ -105,10 +105,46 @@ export async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_
   }
 }
 
+// "Local path" means a filesystem location this process can reach without a
+// network credential decision of its own. Anything that names a remote host —
+// a `file://` authority or a UNC server — is a network entity: on Windows an
+// `existsSync` against `\\host\share` opens an SMB session (and can leak
+// Net-NTLMv2 answers), and a push to such a share would bypass the
+// https/ssh-only destination policy. Only loopback spellings stay local.
+function fileUrlHostname(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    // A malformed file:// URL is not a provable local path either.
+    return null;
+  }
+}
+
+function uncHostname(rawUrl) {
+  const match = /^\\\\([^\\/]+)|^\/\/([^\\/]+)/.exec(rawUrl);
+  const candidate = match?.[1] ?? match?.[2];
+  return candidate ? candidate.toLowerCase() : null;
+}
+
+function isLoopbackHostName(hostname) {
+  // An empty authority (`file:///C:/...`) is the spelling for "no host at
+  // all" — a plain local path — and stays local like loopback spellings.
+  return hostname === '' || hostname === 'localhost'
+    || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+}
+
 export function isLocalPath(rawUrl, cwd = null) {
-  if (rawUrl.startsWith('file://')) return true;
+  if (rawUrl.startsWith('file://')) {
+    const hostname = fileUrlHostname(rawUrl);
+    return hostname !== null && isLoopbackHostName(hostname);
+  }
   if (/^[a-zA-Z]:[\\/]/.test(rawUrl)) return true;
-  if (rawUrl.startsWith('/') || rawUrl.startsWith('\\\\')) return true;
+  if (rawUrl.startsWith('/') && !rawUrl.startsWith('//')) return true;
+  if (rawUrl.startsWith('\\\\') || rawUrl.startsWith('//')) {
+    // UNC and its POSIX-style spelling name a server; local only for loopback.
+    const hostname = uncHostname(rawUrl);
+    return hostname !== null && isLoopbackHostName(hostname);
+  }
   if (rawUrl.startsWith('./') || rawUrl.startsWith('../') || rawUrl.startsWith('.\\') || rawUrl.startsWith('..\\')) return true;
   // A bare relative remote (e.g. remotes/local.git) is resolved by git against
   // the worktree the command runs in — never against this service process's
@@ -409,6 +445,14 @@ export async function readDeliveryLocation(cwd, { files = null } = {}) {
 
   const remotes = [];
   for (const name of remoteNames) {
+    // `git remote` prints nicknames that git's own config layer cannot round-trip
+    // (e.g. a subsection "a=b" makes `config --get-all remote.a=b.url` exit 129
+    // with an unmapped error). Skip names that the push path would reject anyway.
+    try {
+      assertSafeRemoteName(name);
+    } catch {
+      continue;
+    }
     const urlRes = await runGit(cwd, ['config', '--get-all', `remote.${name}.url`], { acceptExitCodes: [0, 1] });
     const url = urlRes.stdout.trim();
     if (url) {
@@ -416,7 +460,16 @@ export async function readDeliveryLocation(cwd, { files = null } = {}) {
       const identity = normalizeRemoteIdentity(url, cwd);
       const push = await runGit(cwd, ['config', '--get-all', `remote.${name}.pushurl`], { acceptExitCodes: [0, 1] });
       if (push.stdout && push.stdout !== url) throw Object.assign(new Error('Separate push destination needs explicit reconciliation'), { code: 'REMOTE_IDENTITY_CHANGED' });
-      const localPath = isLocalPath(url, cwd) ? (url.startsWith('file:') ? fileURLToPath(url) : path.resolve(cwd, url)) : null;
+      let localPath = null;
+      if (isLocalPath(url, cwd)) {
+        try {
+          localPath = url.startsWith('file:') ? fileURLToPath(url) : path.resolve(cwd, url);
+        } catch {
+          // A malformed file:// URL (unmapped authority, bad percent-encoding)
+          // must not crash the whole location read with an unmapped RangeError.
+          localPath = null;
+        }
+      }
       if (localPath && !existsSync(localPath)) throw Object.assign(new Error('Local remote is unavailable'), { code: 'REMOTE_SOURCE_UNREACHABLE' });
       remotes.push({ name, url: localPath ? realpathSync(localPath) : url, identity });
     }

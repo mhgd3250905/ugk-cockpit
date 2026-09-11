@@ -84,11 +84,17 @@ export function resolveDataDirectory() {
   return path.join(process.env.LOCALAPPDATA, 'UGK Cockpit');
 }
 
-async function probe() {
+// `mode` distinguishes the two callers: a pre-start check must fail fast on an
+// unanswerable port ("cannot verify what is listening"), while the startup
+// wait loop treats every transient network failure (refused, reset, timeout
+// during a cold start or AV scan) as simply "not ready yet" and keeps
+// retrying — the detached child keeps starting either way.
+async function probe({ allowTransient = false } = {}) {
   let response;
   try {
     response = await fetch(new URL('health', serviceUrl), { signal: AbortSignal.timeout(3000) });
   } catch (error) {
+    if (allowTransient) return false;
     if (error.cause?.code === 'ECONNREFUSED') return false;
     throw new Error('Cannot verify the existing listener. Service was not replaced.');
   }
@@ -159,7 +165,7 @@ export async function setupCodex(options = {}, dependencies = {}) {
     await deps.start(directory);
     let ready = false;
     for (let attempt = 0; attempt < 100; attempt++) {
-      if (await deps.probe()) { ready = true; break; }
+      if (await deps.probe({ allowTransient: true })) { ready = true; break; }
       await deps.wait();
     }
     if (!ready) throw new Error('Service startup was not verified. Inspect setup-service logs; do not reset data.');

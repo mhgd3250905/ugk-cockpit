@@ -32,7 +32,7 @@ npm run setup:zcode -- --start-only
 
 安装器的 `host_verification_pending` 表示程序、插件和本机服务已准备好，当前聊天的实际工具调用仍需验证。不要把它转述为全部可用。最后向用户分别确认网页可用和聊天工具可用；尚缺的一步明确说明。
 
-Codex 和 ZCode 的安装及 `--start-only` 结果提供 `dataDirectory`，表示服务实际使用的数据目录。Windows 默认位置为 `%LOCALAPPDATA%\UGK Cockpit`，设置了自定义目录时以返回路径为准；程序目录、插件目录与数据目录用途不同。
+Codex 和 ZCode 的安装及 `--start-only` 结果提供 `dataDirectory`，表示服务实际使用的数据目录。Windows 默认位置为 `%LOCALAPPDATA%\UGK Cockpit`，设置了自定义目录时以返回路径为准；程序目录、插件目录与数据目录用途不同。注意：默认的插件输出根（`plugin-packages`，含宿主插件 `.mcp.json` 指向的运行时）位于数据目录之内；搬移、还原或清理数据目录前，请保留该子树，或在重装前设置 `UGK_PLUGIN_OUTPUT_ROOT` 把它放到数据目录之外，否则已安装插件的 MCP 入口会失效。
 
 alpha.41 修复插件输出目录解析对 Windows 环境变量的无条件依赖。可用绝对路径 `UGK_PLUGIN_OUTPUT_ROOT` 指定插件输出根目录；它不改变服务数据目录。ZCode CLI 路径解析支持 POSIX 无扩展名程序及经 Node 启动的 JS 入口。上述兼容性修复不代表完整非 Windows 安装、原生选择器或宿主调用已完成现场验收；当前承诺的自动安装范围仍是 Windows Codex / ZCode。
 

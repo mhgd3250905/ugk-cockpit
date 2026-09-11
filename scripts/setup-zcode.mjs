@@ -107,9 +107,15 @@ export function inspectZcodeLegacy({ home = defaultHome() } = {}) {
     .some((directory) => existsSync(path.join(home, directory, name, 'SKILL.md'))));
   let servers = config.mcp?.servers ?? {};
   const fallback = path.join(home, '.agents/mcp.json');
-  if (Object.keys(servers).length === 0 && existsSync(fallback)) {
-    try { servers = JSON.parse(readFileSync(fallback, 'utf8')).mcpServers ?? {}; }
-    catch { throw new Error('ZCode fallback MCP configuration is invalid; repair it before installing.'); }
+  // Both configuration locations always participate: a non-empty config.json
+  // must not blind the check to a Cockpit entry that only exists in the
+  // fallback file (that blind spot produced duplicate installations where the
+  // contract promises "keep existing config and stop").
+  if (existsSync(fallback)) {
+    try {
+      const fallbackServers = JSON.parse(readFileSync(fallback, 'utf8')).mcpServers ?? {};
+      servers = { ...fallbackServers, ...servers };
+    } catch { throw new Error('ZCode fallback MCP configuration is invalid; repair it before installing.'); }
   }
   const mcp = Object.keys(servers).some((name) => name === 'ugk-cockpit' || name === 'plugin:ugk-cockpit:ugk-cockpit');
   return { skills, mcp };

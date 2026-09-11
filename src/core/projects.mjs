@@ -543,7 +543,14 @@ export function updateProject(db, request, { avatarStorageRoot } = {}) {
     }
 
     const timestamp = now();
-    const updatedName = name !== undefined ? trimmedName : project.name;
+    // Re-read inside the transaction: `project` was read before the avatar
+    // validation ran, so falling back to the stale `project.name` here would
+    // overwrite a name renamed concurrently in between.
+    const current = readProjectContext(db, projectId);
+    if (!current) {
+      return failCommand(db, commandId, { ok: false, code: 'PROJECT_NOT_FOUND', projectId });
+    }
+    const updatedName = name !== undefined ? trimmedName : current.name;
     db.prepare(`
       UPDATE projects
       SET name = ?, avatar_path = ?, updated_at = ?
