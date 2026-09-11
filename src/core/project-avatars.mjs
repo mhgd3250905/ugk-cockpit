@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import { rejectSymbolicPath } from './path-guard.mjs';
+import { rejectSymbolicPath, PathScopeError } from './path-guard.mjs';
 
 export const MAX_AVATAR_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -140,19 +140,26 @@ export function stageProjectAvatar({
   const digest = createHash('sha256').update(fileContent).digest('hex');
   const fileName = `${digest}${format.extension}`;
   const projectRoot = path.join(storageRoot, projectId);
-  mkdirSync(projectRoot, { recursive: true });
-  rejectSymbolicPath(projectRoot);
-  const storageReal = realpathSync.native(path.resolve(storageRoot));
-  const projectReal = realpathSync.native(projectRoot);
-  if (!isWithin(storageReal, projectReal) || storageReal === projectReal) {
-    throw avatarError('INVALID_IMAGE_PATH', '头像存储位置无效。');
-  }
-  const destination = path.join(projectReal, fileName);
+  // fs errors here carry absolute local paths in their messages, which must
+  // not reach HTTP responses; map them to the controlled avatar error.
   try {
-    writeFileSync(destination, fileContent, { flag: 'wx' });
+    mkdirSync(projectRoot, { recursive: true });
+    rejectSymbolicPath(projectRoot);
+    const storageReal = realpathSync.native(path.resolve(storageRoot));
+    const projectReal = realpathSync.native(projectRoot);
+    if (!isWithin(storageReal, projectReal) || storageReal === projectReal) {
+      throw avatarError('INVALID_IMAGE_PATH', '头像存储位置无效。');
+    }
+    const destination = path.join(projectReal, fileName);
+    try {
+      writeFileSync(destination, fileContent, { flag: 'wx' });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      rejectSymbolicPath(destination);
+    }
   } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
-    rejectSymbolicPath(destination);
+    if (error?.code === 'REPARSE_POINT' || error instanceof PathScopeError) throw error;
+    throw avatarError('INVALID_IMAGE_PATH', '头像暂时无法保存，请确认磁盘可写后重试。');
   }
   return {
     avatarPath: `${projectId}/${fileName}`,

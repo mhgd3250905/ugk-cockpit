@@ -86,7 +86,17 @@ export function createZcodeClient({ cli = resolveZcodeCli(), env = process.env, 
   };
 }
 
-export function inspectZcodeLegacy({ home = process.env.HOME || process.env.USERPROFILE || os.homedir() } = {}) {
+// On Windows the real profile is USERPROFILE; a Git Bash-style HOME can point
+// anywhere and would silently miss an existing .zcode installation, skipping
+// the migration guard below. Prefer USERPROFILE there.
+function defaultHome() {
+  if (process.platform === 'win32') {
+    return process.env.USERPROFILE || process.env.HOME || os.homedir();
+  }
+  return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
+export function inspectZcodeLegacy({ home = defaultHome() } = {}) {
   const configFile = path.join(home, '.zcode/cli/config.json');
   let config = {};
   if (existsSync(configFile)) {

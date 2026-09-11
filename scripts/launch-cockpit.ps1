@@ -412,10 +412,27 @@ if (-not (Test-Path -LiteralPath $mainEntry)) {
 
 $mainEntry = (Resolve-Path -LiteralPath $mainEntry).Path
 
-$stdOutLog = Join-Path $LogDirectory 'service.log'
-$stdErrLog = Join-Path $LogDirectory 'service.err.log'
+# Start-Process redirects truncate their target, so a fixed service.log would
+# destroy the previous run's log on every relaunch, exactly when crash history
+# matters most. Give each run its own files. The launcher writes its own
+# launcher-<stamp>.log and must NEVER touch the service log files: the
+# redirect keeps them open, and appending from this process throws
+# "being used by another process" on Windows PowerShell 5.1 (and risks being
+# overwritten by redirected output elsewhere).
+$runStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$stdOutLog = Join-Path $LogDirectory "service-$runStamp.log"
+$stdErrLog = Join-Path $LogDirectory "service-$runStamp.err.log"
+$launcherLog = Join-Path $LogDirectory "launcher-$runStamp.log"
 $timestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Add-Content -LiteralPath $stdOutLog -Value "`r`n=== [${timestamp}] UGK Cockpit launcher starting (repo: ${RepoDirectory}) ==="
+# Best-effort diagnostics only; a failed launcher log must never stop a launch.
+@(
+  "=== [${timestamp}] UGK Cockpit launcher starting ==="
+  "repo: ${RepoDirectory}"
+  "data: ${DataDirectory}"
+  "port: ${Port}"
+  "service stdout: ${stdOutLog}"
+  "service stderr: ${stdErrLog}"
+) | Set-Content -LiteralPath $launcherLog -ErrorAction SilentlyContinue
 
 Write-Status 'START' 'Starting UGK Cockpit background service...'
 
@@ -430,6 +447,22 @@ $startParams = @{
 }
 
 $serviceProc = Start-Process @startParams
+
+# Keep the newest runs' logs; older ones are only crash history. Runs are
+# identified by their stamp so one retention decision covers the launcher and
+# both service files of the same start.
+$runLogs = @(Get-ChildItem -LiteralPath $LogDirectory -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^(service|launcher)-\d{8}-\d{6}(\.err)?\.log$' })
+$runStamps = @($runLogs | ForEach-Object {
+  if ($_.Name -match '(\d{8}-\d{6})') { $matches[1] }
+} | Sort-Object -Unique -Descending)
+if ($runStamps.Count -gt 10) {
+  foreach ($staleStamp in ($runStamps | Select-Object -Skip 10)) {
+    $runLogs | Where-Object { $_.Name -like "*${staleStamp}*" } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+}
+
 $newPid = $serviceProc.Id
 
 Write-Status 'INFO' "Service spawned in background (PID: $newPid, WindowStyle: Hidden)."

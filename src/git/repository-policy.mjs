@@ -165,6 +165,23 @@ export async function assertRepositoryAllowed(cwd, overrides = {}) {
   if (hostile) throw repositoryConfigurationError(hostile.kind, { messages });
 }
 
+// Flows that only observe a path (folder selection, registration, refresh,
+// runs) gate BEFORE their first probe. The repository check itself must not
+// turn "not a repository yet" into its own error: those paths are owned by the
+// probe that follows and already report FOLDER_NOT_CODE_PROJECT / PROBE_FAILED.
+// Only a readable repository with hostile config is rejected here.
+export async function assertRepositoryAllowedForProbe(cwd, overrides = {}) {
+  try {
+    await assertRepositoryAllowed(cwd, overrides);
+  } catch (error) {
+    const stderr = error?.stderr ?? '';
+    if (error?.code === 128
+      && (/--local can only be used inside a git repository/i.test(stderr)
+        || /not a git repository/i.test(stderr))) return;
+    throw error;
+  }
+}
+
 // Existing call sites keep the error codes their contracts and messages already
 // publish; only the detection logic is shared.
 export function repositoryConfigurationError(kind, { messages }) {

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { git, safeGitEnvironment, SAFE_GIT_PREFIX } from './probe.mjs';
+import { git, safeGitEnvironment, SAFE_GIT_PREFIX, GIT_OBJECT_ID_PATTERN } from './probe.mjs';
 import { DELIVERY_CONFIG_ERROR_CODES } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
@@ -38,6 +38,21 @@ export function generateStableBranchName(opaqueOrProjectId, maybeCommandId) {
 
 export function isStableWorkspaceBranch(branch) {
   return typeof branch === 'string' && /^cockpit\/work\/[a-zA-Z0-9_-]+$/.test(branch);
+}
+
+// baseCommit sits in the trailing revision position of `git worktree add` /
+// `git switch`, where git still parses leading-dash tokens as OPTIONS (e.g. a
+// "--force" there would be consumed as a flag, not a revision). The callers
+// always mean a full object id reported by `git rev-parse HEAD`, so accept
+// exactly that and nothing else. The pattern itself lives in probe.mjs.
+export { GIT_OBJECT_ID_PATTERN };
+
+function assertGitObjectId(baseCommit) {
+  if (typeof baseCommit !== 'string' || !GIT_OBJECT_ID_PATTERN.test(baseCommit)) {
+    const error = new Error('baseCommit must be a full git object id (40 or 64 hex characters).');
+    error.code = 'INVALID_BASE_COMMIT';
+    throw error;
+  }
 }
 
 export async function checkBranchExists(repoPath, branchName, { timeoutMs = 5000, maxBuffer = 1024 * 1024 } = {}) {
@@ -99,6 +114,7 @@ export async function createGitWorktree(repoPath, {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+  assertGitObjectId(baseCommit);
 
   await assertWorkspaceRepositoryAllowed(repoPath);
   try {
@@ -142,6 +158,7 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+  assertGitObjectId(baseCommit);
 
   await assertWorkspaceRepositoryAllowed(worktreePath);
   try {
