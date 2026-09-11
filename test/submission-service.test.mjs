@@ -437,6 +437,43 @@ test('a first submission is refused when the run is abandoned and the lease rele
 });
 
 // 策略拒绝发生在仓库锁之后；锁必须在返回前释放，而不是等到 TTL 到期。
+test('a policy refusal drains the other repository check before releasing the lock', async (t) => {
+  const f = await fixture(t);
+  const refused = Object.assign(new Error('policy'), { code: 'GIT_FILTER_UNSUPPORTED' });
+  const pendingCheck = Promise.withResolvers();
+  let checks = 0;
+  let returned = false;
+  const submission = submitDevelopmentSpace(f.db, {
+    commandId: 'submit-policy-drain',
+    sessionId: f.sessionId,
+    expectedRevision: 2,
+    summary: '等待已启动的仓库检查退出',
+  }, {
+    assertRepositoryAllowed: async () => {
+      checks += 1;
+      if (checks === 1) throw refused;
+      await pendingCheck.promise;
+    },
+  }).then((result) => { returned = true; return result; });
+
+  let returnedBeforeDrain;
+  let locksBeforeDrain;
+  try {
+    // Let the first rejection propagate while the second check is still active.
+    await new Promise((resolve) => setImmediate(resolve));
+    returnedBeforeDrain = returned;
+    locksBeforeDrain = f.db.prepare('SELECT * FROM repository_locks').all().length;
+  } finally {
+    pendingCheck.resolve();
+  }
+  const result = await submission;
+  assert.equal(checks, 2);
+  assert.equal(returnedBeforeDrain, false, '不能在另一个仓库检查仍运行时返回');
+  assert.equal(locksBeforeDrain, 1, '已启动的检查结束前应保持仓库锁');
+  assert.equal(result.code, 'GIT_FILTER_UNSUPPORTED');
+  assert.equal(f.db.prepare('SELECT * FROM repository_locks').all().length, 0);
+});
+
 test('a repository policy refusal releases the repository lock immediately', async (t) => {
   const f = await fixture(t);
   const refused = Object.assign(new Error('policy'), { code: 'GIT_FILTER_UNSUPPORTED' });

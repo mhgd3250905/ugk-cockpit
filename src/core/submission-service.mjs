@@ -261,10 +261,14 @@ export async function submitDevelopmentSpace(db, request = {}, options = {}) {
     // would come too late to prevent execution. The check lives inside this
     // try/finally so a refusal releases the repository lock immediately instead
     // of holding it until the TTL expires.
-    await Promise.all([
+    // A refusal must drain both checks before finally releases the lock: the
+    // other check may still own Git processes using these repository paths.
+    const policyChecks = await Promise.allSettled([
       (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(context.canonicalPath),
       (options.assertRepositoryAllowed ?? assertRepositoryAllowed)(project.canonical_path),
     ]);
+    const refusedPolicy = policyChecks.find((result) => result.status === 'rejected');
+    if (refusedPolicy) throw refusedPolicy.reason;
     if (!attempt) {
       let sourceObservation;
       let targetObservation;
