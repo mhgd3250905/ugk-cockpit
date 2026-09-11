@@ -1,4 +1,3 @@
-import readline from 'node:readline';
 import { conversationIdentity } from './conversation-identity.mjs';
 import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
@@ -1401,17 +1400,23 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   const outStream = stdout || process.stdout;
   const errStream = stderr || process.stderr;
 
-  const rl = readline.createInterface({
-    input: inStream,
-    crlfDelay: Infinity,
-    terminal: false
-  });
+  // The service accepts MCP tool payloads up to MCP_PAYLOAD_LIMIT (18 MB) and
+  // must be able to replay persisted requests verbatim, so the transport-level
+  // line bound stays above that. Without a bound, a host crash looping garbage
+  // into the pipe (or one unterminated line) buffers without limit and the
+  // bridge process dies of memory exhaustion.
+  const MAX_LINE_BYTES = 24 * 1024 * 1024;
+  // The request queue must stay bounded too: stdin arrives at wire speed while
+  // each request can wait up to a service timeout. Past this many queued lines
+  // the stream is paused and resumed as the queue drains (backpressure).
+  const MAX_PENDING_LINES = 16;
 
   // The host can destroy the pipes at any moment (crash, restart, user
   // cancel). An 'error' event with no listener would escape the request queue
   // and take the whole bridge process down as an uncaught exception.
   outStream?.on?.('error', () => {});
   errStream?.on?.('error', () => {});
+  inStream?.on?.('error', () => {});
 
   const writeResponse = (response) => {
     try {
@@ -1420,8 +1425,8 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   };
 
   // Hosts close stdin when the session ends. In-flight service calls must be
-  // aborted so this process cannot linger on a stalled connection: wire the
-  // readline 'close' event (EOF or close()) into the same shutdown path.
+  // aborted so this process cannot linger on a stalled connection: EOF and an
+  // explicit close() both converge on the same shutdown path.
   let shutdownInvoked = false;
   const shutdown = () => {
     if (shutdownInvoked) return;
@@ -1430,7 +1435,6 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
       try { onShutdown(); } catch {}
     }
   };
-  rl.on('close', shutdown);
 
   const handleLine = async (line) => {
     const trimmed = line.trim();
@@ -1483,22 +1487,110 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   };
 
   let queue = Promise.resolve();
+  let pending = 0;
 
-  rl.on('line', (line) => {
+  const drain = () => {
+    if (pending < MAX_PENDING_LINES) inStream?.resume?.();
+  };
+
+  const emitLine = (rawLine) => {
+    pending += 1;
+    if (pending >= MAX_PENDING_LINES) inStream?.pause?.();
     queue = queue
-      .then(() => handleLine(line))
+      .then(() => handleLine(rawLine))
       .catch((err) => {
         if (errStream?.write) {
           try {
             errStream.write(`[ugk-mcp] Unhandled error: ${err?.message || err}\n`);
           } catch {}
         }
+      })
+      .finally(() => {
+        pending -= 1;
+        drain();
       });
-  });
+  };
+
+  const reportOverflow = () => {
+    if (errStream?.write) {
+      try {
+        errStream.write('[ugk-mcp] Inbound line exceeded the transport limit and was dropped.\n');
+      } catch {}
+    }
+    writeResponse({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32700,
+        message: 'Parse error'
+      }
+    });
+  };
+
+  // A bounded line splitter: lines are emitted whole; anything longer than
+  // MAX_LINE_BYTES — whether it overflows the inter-newline buffer or only
+  // exceeds the limit once joined with a buffered prefix — is answered with
+  // one parse error and discarded up to the next newline instead of buffering
+  // without limit. A partial trailing line left at EOF is emitted, matching
+  // the previous readline behaviour for hosts that close stdin right after
+  // their final, newline-less message.
+  let buffer = Buffer.alloc(0);
+  let discarding = false;
+  let detached = false;
+  const emitJoinedLine = (line) => {
+    if (line.length > MAX_LINE_BYTES) {
+      reportOverflow();
+      return;
+    }
+    if (line.length > 0) emitLine(line.toString('utf8'));
+  };
+  const onData = (chunk) => {
+    let start = 0;
+    while (true) {
+      const newline = chunk.indexOf(0x0a, start);
+      if (newline === -1) break;
+      const piece = chunk.subarray(start, newline);
+      start = newline + 1;
+      if (discarding) {
+        discarding = false;
+        buffer = Buffer.alloc(0);
+        continue;
+      }
+      const line = buffer.length === 0 ? piece : Buffer.concat([buffer, piece]);
+      buffer = Buffer.alloc(0);
+      emitJoinedLine(line);
+    }
+    const rest = chunk.subarray(start);
+    if (rest.length > 0 && !discarding) {
+      buffer = Buffer.concat([buffer, rest]);
+      if (buffer.length > MAX_LINE_BYTES) {
+        discarding = true;
+        buffer = Buffer.alloc(0);
+        reportOverflow();
+      }
+    }
+  };
+  const onClose = () => {
+    if (!discarding) {
+      const tail = buffer;
+      buffer = Buffer.alloc(0);
+      emitJoinedLine(tail);
+    }
+    shutdown();
+  };
+  inStream.on('data', onData);
+  inStream.on('end', onClose);
+  inStream.on('close', onClose);
 
   return {
     close() {
-      rl.close();
+      if (!detached) {
+        detached = true;
+        inStream.removeListener('data', onData);
+        inStream.removeListener('end', onClose);
+        inStream.removeListener('close', onClose);
+        inStream.pause?.();
+      }
       // EOF and an explicit close() both converge on the same shutdown path;
       // whichever arrives first aborts in-flight service calls exactly once.
       shutdown();

@@ -108,7 +108,7 @@ test('native timeout reports uncertain outcome', async () => {
   finally { client.close(); }
 });
 
-test('legacy MCP fallback is inspected only when native user servers are empty', (t) => {
+test('legacy MCP fallback is inspected even when native user servers exist', (t) => {
   const home = mkdtempSync(path.join(os.tmpdir(), 'zcode-legacy-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(path.join(home, '.agents'), { recursive: true });
@@ -116,6 +116,12 @@ test('legacy MCP fallback is inspected only when native user servers are empty',
   writeFileSync(path.join(home, '.agents/mcp.json'), JSON.stringify({ mcpServers: { 'ugk-cockpit': {} } }));
   assert.equal(inspectZcodeLegacy({ home }).mcp, true);
   writeFileSync(path.join(home, '.zcode/cli/config.json'), JSON.stringify({ mcp: { servers: { other: {} } } }));
+  // A Cockpit entry in the fallback file must be detected even when the
+  // native config registers an unrelated server; missing it produced a
+  // duplicate installation where the contract promises to keep the existing
+  // configuration and stop.
+  assert.equal(inspectZcodeLegacy({ home }).mcp, true);
+  writeFileSync(path.join(home, '.agents/mcp.json'), JSON.stringify({ mcpServers: { unrelated: {} } }));
   assert.equal(inspectZcodeLegacy({ home }).mcp, false);
 });
 

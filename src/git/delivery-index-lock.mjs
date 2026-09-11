@@ -70,13 +70,38 @@ export function acquireDeliveryIndexLock(indexPath, commandId) {
   return { fd, lockPath, fileIdentity, bytes };
 }
 
+// A residue from a release whose every unlink was refused (AV / indexer
+// holding the file without FILE_SHARE_DELETE) would otherwise stay until the
+// next service restart, because the recorded pid — this service — is alive
+// and reclaimExitedOwner deliberately refuses live owners. A bounded
+// unref'd retry chain cleans the residue in the background while the service
+// keeps running. unref keeps a pending retry from holding the process open in
+// tests and short-lived scripts.
+const residualRetryScheduled = new Set();
+
+function scheduleResidualReleaseRetry(lock) {
+  if (residualRetryScheduled.has(lock.fileIdentity)) return;
+  residualRetryScheduled.add(lock.fileIdentity);
+  let attempt = 0;
+  const clearAndStop = () => residualRetryScheduled.delete(lock.fileIdentity);
+  const retry = () => {
+    if (!sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) { clearAndStop(); return; }
+    try { unlinkSync(lock.lockPath); clearAndStop(); return; } catch {}
+    attempt += 1;
+    if (attempt >= 10) { clearAndStop(); return; }
+    const timer = setTimeout(retry, 250 * attempt);
+    if (typeof timer.unref === 'function') timer.unref();
+  };
+  const timer = setTimeout(retry, 250);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 export function releaseDeliveryIndexLock(lock) {
   // Best effort: the caller's finally already holds the real outcome, and a
   // release error must not mask a saved commit (or its local_saved state).
   // A few immediate retries cover the shortest Windows transient refusals
-  // (AV / indexer); if the unlink still fails, the leaked lock is reclaimed
-  // once the owning service process is gone — the pid liveness check in
-  // reclaimExitedOwner stays the durable recovery path.
+  // (AV / indexer); a longer stand-off hands the residue to the background
+  // retry chain instead of locking the repository until the next restart.
   try { closeSync(lock.fd); } catch {}
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (!sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) return true;
@@ -85,6 +110,7 @@ export function releaseDeliveryIndexLock(lock) {
       return true;
     } catch {}
   }
+  scheduleResidualReleaseRetry(lock);
   return false;
 }
 

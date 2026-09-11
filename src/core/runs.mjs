@@ -599,8 +599,8 @@ export function takeoverWriteRun(db, request) {
       INSERT INTO snapshots (
         id, run_id, phase, head, branch, index_fingerprint,
         worktree_fingerprint, repository_identity, worktree_identity,
-        head_relation, coherence, observed_at
-      ) VALUES (?, ?, 'baseline', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        head_relation, coherence, observed_at, lifecycle_epoch
+      ) VALUES (?, ?, 'baseline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       snapshotId,
       newRunId,
@@ -613,6 +613,7 @@ export function takeoverWriteRun(db, request) {
       baseline.headRelation ?? 'same',
       baseline.coherence ?? 'unknown',
       baseline.observedAt ?? changedAt,
+      worktree.lifecycle_epoch ?? 0,
     );
     db.prepare(`
       UPDATE write_leases

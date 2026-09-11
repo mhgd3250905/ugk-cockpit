@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,6 +62,12 @@ export function installCockpitSkills({
   }
 
   for (const name of COCKPIT_SKILL_NAMES) {
+    // --force means "make the target match this source". cpSync alone only
+    // overwrites same-named files, so a file the new version dropped would
+    // survive as a stale leftover the host keeps loading.
+    if (force) {
+      rmSync(path.join(resolvedTarget, name), { recursive: true, force: true });
+    }
     cpSync(path.join(resolvedSource, name), path.join(resolvedTarget, name), {
       recursive: true,
       force,

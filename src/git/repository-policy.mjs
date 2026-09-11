@@ -10,14 +10,26 @@ import { git } from './probe.mjs';
 //
 //   filter.<driver>.clean|smudge|process   -> runs on `git add` / checkout / status
 //   diff.<driver>.command|textconv         -> runs on `git diff` / `log -p`
+//   diff.external                          -> replaces the whole diff machinery
+//   merge.<driver>.driver                  -> runs on conflicted merges
+//   gpg.<program>|gpg.ssh.<program>        -> runs to sign pushes/commits/tags
 //   url.*.insteadOf|pushInsteadOf          -> silently rewrites a push target
 //   remote.*.uploadpack|receivepack|proxy  -> runs on fetch / push
 //   http.* transport keys                  -> see HOSTILE_TRANSPORT_CONFIG_PATTERN
 //
 // Cockpit cannot prove a hostile driver is absent, so it fails closed before
-// any Git operation that could invoke one.
+// any Git operation that could invoke one. The signing programs are refused
+// outright because Cockpit never signs anything: `git push` reads
+// `push.gpgSign` into a signed-push request even without `--signed`, and the
+// signing client then executes `gpg.program` on whatever the repository chose
+// — measured locally as `push.gpgsign=true` alone steering push into the
+// signed-push code path. SAFE_GIT_PREFIX additionally resets the three
+// sign-everything toggles as a second line of defence.
 export const HOSTILE_LOCAL_CONFIG_PATTERN =
-  '^(filter\\..*\\.(clean|smudge|process)|diff\\..*\\.(command|textconv))$';
+  '^(filter\\..*\\.(clean|smudge|process)'
+  + '|diff\\..*\\.(command|textconv)|diff\\.external'
+  + '|merge\\..*\\.driver'
+  + '|gpg\\..*program)$';
 export const HOSTILE_ANY_SCOPE_CONFIG_PATTERN =
   '^(url\\..*\\.(insteadof|pushinsteadof)|remote\\..*\\.(uploadpack|receivepack|proxy))$';
 

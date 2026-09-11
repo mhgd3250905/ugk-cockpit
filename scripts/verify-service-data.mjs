@@ -3,10 +3,16 @@ import { DatabaseSync } from 'node:sqlite';
 
 // Use the browser session of the actual listener, never a token from another file view.
 export async function verifyServiceData(directory, url) {
+  // The read-only SQL pass is a bonus cross-check, not the authority: while a
+  // service write transaction holds the file lock, a second connection can
+  // get SQLITE_BUSY even though the data is perfectly healthy. Busy is not a
+  // verification failure — the HTTP dashboard below stays the authority.
+  let projects = null;
   const db = new DatabaseSync(path.join(directory, 'cockpit.db'), { readOnly: true });
-  let projects;
   try {
     projects = db.prepare('SELECT id FROM projects').all();
+  } catch (error) {
+    if (!/busy|locked/i.test(error?.message ?? '')) throw error;
   } finally {
     db.close();
   }
@@ -20,16 +26,16 @@ export async function verifyServiceData(directory, url) {
     throw new Error('Project list could not be loaded from the running service.');
   }
   const actual = new Set(dashboard.projects.map((project) => project.id));
-  if (projects.length !== actual.size || projects.some((project) => !actual.has(project.id))) {
+  if (projects && (projects.length !== actual.size || projects.some((project) => !actual.has(project.id)))) {
     throw new Error(`Database/service project mismatch: database=${projects.length}, service=${actual.size}.`);
   }
-  for (const project of projects) {
-    const detail = await fetch(new URL(`/api/v1/projects/${encodeURIComponent(project.id)}`, url), {
+  for (const project of actual) {
+    const detail = await fetch(new URL(`/api/v1/projects/${encodeURIComponent(project)}`, url), {
       headers: { cookie }, signal: AbortSignal.timeout(10000),
     });
-    if (!detail.ok || !(await detail.json()).ok) throw new Error(`Project detail failed: ${project.id}`);
+    if (!detail.ok || !(await detail.json()).ok) throw new Error(`Project detail failed: ${project}`);
   }
-  return projects.length;
+  return actual.size;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {

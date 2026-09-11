@@ -84,6 +84,12 @@ export function buildPluginPackage({ outputRoot, sourceRoot = repositoryRoot, ho
     const oldRuntime = typeof entry === 'string' ? path.resolve(path.dirname(entry), '../..') : '';
     const relative = path.relative(path.join(marketplaceRoot, 'packages'), oldRuntime).replaceAll('\\', '/');
     if (!/^[a-f0-9]{16}\/ugk-cockpit$/.test(relative)) throw new Error('Unrecognized plugin source; refusing overwrite');
+    if (!existsSync(oldRuntime)) {
+      // The snapshot survives but its immutable runtime was removed (disk
+      // cleanup, partial backup restore). lstatSync would escape as a bare
+      // ENOENT here and every later setup run would fail the same way.
+      throw new Error(`Existing plugin runtime is missing on disk: ${oldRuntime}. Delete the plugins/ugk-cockpit snapshot directory and re-run setup to rebuild both.`);
+    }
     assertSameTree(pluginRoot, oldRuntime);
     if (oldRuntime === runtimeRoot) return { marketplaceRoot, pluginRoot, runtimeRoot, marketplaceFile, version: manifest.version };
   }

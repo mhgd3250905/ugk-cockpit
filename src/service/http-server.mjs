@@ -60,7 +60,7 @@ import { setProjectArchived, setWorkLineClosed, readWorkLineStates, removeProjec
 import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.mjs';
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
-import { deliveryResponse } from '../core/delivery-messages.mjs';
+import { deliveryResponse, KNOWN_DELIVERY_CODES } from '../core/delivery-messages.mjs';
 import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
 import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
@@ -150,6 +150,13 @@ const WORKSPACE_PENDING_ERROR = {
   message: '开发空间操作尚未确认完成。',
   impact: '代码可能已发生变化；相关操作和历史记录仍保留，暂不开放新的 AI 工作。',
   requiredAction: '请在开发空间区域使用“恢复并核对”，沿原请求继续核对，不要新建删除或重新开始请求。',
+};
+
+const FOLDER_PICKER_BUSY_ERROR = {
+  status: 409,
+  message: '文件夹选择窗口已在使用中。',
+  impact: '没有代码或记录被修改。',
+  requiredAction: '请先完成或关闭已打开的系统文件夹选择窗口，再重试。',
 };
 
 const PUBLIC_ERRORS = {
@@ -400,6 +407,7 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 没有确认保存成功，代码不会被自动清理或覆盖。',
     requiredAction: '请刷新状态后重试；如果仍然失败，请保留当前代码并查看技术详情。',
   },
+  FOLDER_PICKER_BUSY: FOLDER_PICKER_BUSY_ERROR,
   DATABASE_BUSY: {
     status: 503,
     message: '本地记录正在被另一项操作占用。',
@@ -2537,6 +2545,25 @@ export async function createCockpitHttpServer({
     return [...roots];
   }
 
+  // The native folder picker is a single modal window backed by a serial
+  // promise queue; unbounded requests would queue invisible dialogs for
+  // minutes and starve the UI's own selection flow. One in-flight selection is
+  // the real capacity — anything else is refused immediately.
+  let folderPickerBusy = false;
+  async function guardedFolderPicker() {
+    if (folderPickerBusy) {
+      const error = new Error('文件夹选择窗口已在使用中。');
+      error.code = 'FOLDER_PICKER_BUSY';
+      throw error;
+    }
+    folderPickerBusy = true;
+    try {
+      return await folderPicker();
+    } finally {
+      folderPickerBusy = false;
+    }
+  }
+
   async function prepareFolderSelection(selectedPath, principalHash) {
     if (!selectedPath) return { ok: true, cancelled: true };
     const binding = authorizeExistingPath(selectedPath, selectedPath);
@@ -3046,7 +3073,7 @@ export async function createCockpitHttpServer({
           return;
         }
       }
-      if (request.method === 'GET' && url.pathname === '/health') {
+      if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === '/health') {
         sendJson(response, 200, {
           status: 'ok',
           version: VERSION,
@@ -3123,7 +3150,23 @@ export async function createCockpitHttpServer({
           if (session.expiresAt <= now) mcpSessions.delete(candidate);
         }
         if (mcpSessions.size >= MCP_SESSION_LIMIT) {
-          mcpSessions.delete(mcpSessions.keys().next().value);
+          // Evict the least valuable session instead of the merely oldest:
+          // an expired-session-first, then identity-less, then earliest-expiry
+          // order keeps a flood of anonymous bootstraps from churning out the
+          // scoped tokens of real bridge connections (whose reconnection is
+          // user-visible churn, not a silent no-op).
+          let victim = null;
+          let victimSession = null;
+          for (const [candidate, session] of mcpSessions) {
+            if (victim === null) { victim = candidate; victimSession = session; continue; }
+            const victimHandleCapable = victimSession.connectionHandleRecognized === true;
+            const candidateHandleCapable = session.connectionHandleRecognized === true;
+            if (victimHandleCapable && !candidateHandleCapable) { victim = candidate; victimSession = session; continue; }
+            if (victimHandleCapable === candidateHandleCapable && session.expiresAt < victimSession.expiresAt) {
+              victim = candidate; victimSession = session;
+            }
+          }
+          mcpSessions.delete(victim);
         }
         const scopedToken = randomBytes(32).toString('base64url');
         const expiresAt = now + MCP_SESSION_TTL_MS;
@@ -3301,13 +3344,13 @@ export async function createCockpitHttpServer({
         url.pathname === '/api/v1/folders/select-empty'
         || (url.pathname === '/api/v1/folders/select' && (url.searchParams.get('type') === 'empty' || url.searchParams.get('mode') === 'empty'))
       )) {
-        const selectedPath = await folderPicker();
+        const selectedPath = await guardedFolderPicker();
         sendJson(response, 200, await prepareEmptyFolderSelection(selectedPath, authentication.principalHash));
         return;
       }
 
       if (request.method === 'POST' && url.pathname === '/api/v1/folders/select') {
-        const selectedPath = await folderPicker();
+        const selectedPath = await guardedFolderPicker();
         sendJson(response, 200, await prepareFolderSelection(selectedPath, authentication.principalHash));
         return;
       }
@@ -3594,14 +3637,15 @@ export async function createCockpitHttpServer({
           WHERE project_id = ? AND session_id IS NOT NULL
           ORDER BY updated_at DESC, id DESC
         `).all(projectId).map((row) => row.session_id);
+        const entries = await readRecentSessionDiagnostics({
+          directory: diagnosticLogDirectory,
+          sessionIds,
+          limit,
+        });
         sendJson(response, 200, {
           ok: true,
           projectId,
-          entries: readRecentSessionDiagnostics({
-            directory: diagnosticLogDirectory,
-            sessionIds,
-            limit,
-          }),
+          entries,
         });
         return;
       }
@@ -4528,7 +4572,7 @@ export async function createCockpitHttpServer({
                 authorizedRoot: working.space ? working.observation.canonicalPath : working.project.authorized_root,
                 projectId: working.project.id });
             } else if (body.selectFolder) {
-              const selected = await folderPicker();
+              const selected = await guardedFolderPicker();
               if (!selected) { sendJson(response, 200, { ok: true, ready: false, cancelled: true }); return; }
               const binding = authorizeExistingPath(body.mcpWorkingDirectory, selected);
               await checkUnsupportedFeatures(binding.rootReal);
@@ -4551,7 +4595,12 @@ export async function createCockpitHttpServer({
         } catch (error) {
           sendJson(response, 200, deliveryResponse({
             ok: false,
-            code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+            // Only codes with a published user contract may pass through; raw
+            // fs/child-process codes (ENOENT, EACCES, …) collapse to the
+            // generic check failure like every other delivery surface.
+            code: typeof error.code === 'string' && KNOWN_DELIVERY_CODES.has(error.code)
+              ? error.code
+              : 'DELIVERY_CHECK_FAILED',
             ...(error.details !== undefined ? { details: error.details } : {}),
             localSaved: false,
             pushed: false,

@@ -35,6 +35,14 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'protocol.ftps.allow=never',
   '-c', 'core.sshCommand=ssh',
   '-c', 'ssh.variant=ssh',
+  // Cockpit never signs commits, tags, or pushes, so the repository-owned
+  // sign-everything toggles must not turn a push into an invocation of the
+  // repository's chosen `gpg.program`. Command-line -c overrides the same
+  // generic keys from any config file; the programs themselves are refused
+  // outright by HOSTILE_LOCAL_CONFIG_PATTERN in repository-policy.mjs.
+  '-c', 'commit.gpgsign=false',
+  '-c', 'push.gpgsign=false',
+  '-c', 'tag.gpgsign=false',
   '-c', 'filter.lfs.clean=',
   '-c', 'filter.lfs.smudge=',
   '-c', 'filter.lfs.process=',
