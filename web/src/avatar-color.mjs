@@ -99,7 +99,15 @@ export function extractDominantColor(imageData, {
   }
 
   let winner = null;
-  for (const bucket of buckets.values()) {
+  const colorful = [...buckets.values()].filter((bucket) => {
+    const channels = [bucket.sumR, bucket.sumG, bucket.sumB].map((sum) => sum / bucket.count);
+    const max = Math.max(...channels), min = Math.min(...channels);
+    return max > 55 && min < 235 && max - min > 35;
+  });
+  // Ignore black/white icon backdrops when a meaningful colored area exists.
+  const coloredCount = colorful.reduce((sum, bucket) => sum + bucket.count, 0);
+  const visibleCount = [...buckets.values()].reduce((sum, bucket) => sum + bucket.count, 0);
+  for (const bucket of (coloredCount >= visibleCount * 0.08 ? colorful : buckets.values())) {
     // Strictly greater keeps the first pixel-scan winner on ties, making the
     // result deterministic without a second expensive sort.
     if (!winner || bucket.count > winner.count) winner = bucket;

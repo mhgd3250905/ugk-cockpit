@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const SUPPORTED_SCHEMA_VERSION = 27;
+export const SUPPORTED_SCHEMA_VERSION = 28;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1081,6 +1081,16 @@ END;
             entry.command.created_at,
           );
         }
+      }
+    },
+  },
+  {
+    version: 28,
+    name: 'project-dashboard-removal',
+    apply(db) {
+      const columns = db.prepare('PRAGMA table_info(projects)').all();
+      if (!columns.some((column) => column.name === 'removed_at')) {
+        db.exec('ALTER TABLE projects ADD COLUMN removed_at TEXT;');
       }
     },
   },

@@ -204,6 +204,52 @@ function manualEventId(commandId) {
   return `work_line_event_${createHash('sha256').update(commandId).digest('hex').slice(0, 32)}`;
 }
 
+/** Remove dashboard membership only; retain every code and history record. */
+export function removeProjectFromDashboard(db, request = {}) {
+  const { commandId, projectId, expectedRevision } = request;
+  if (!isNonEmptyString(commandId) || !isNonEmptyString(projectId)
+    || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return invalidRequest('commandId, projectId, and expectedRevision are required.');
+  }
+  const begun = beginCommand(db, {
+    commandId, kind: 'project.remove', request: { commandId, projectId, expectedRevision },
+  });
+  if (['committed', 'failed'].includes(begun.command.state)) return parseCommandResponse(begun.command);
+  return withImmediateTransaction(db, () => {
+    const replay = terminalCommandResponse(db, commandId);
+    if (replay) return replay;
+    const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
+    if (!project) return failCommand(db, commandId, { ok: false, code: 'PROJECT_NOT_FOUND', projectId });
+    if (project.archive_revision !== expectedRevision) {
+      return failCommand(db, commandId, projectArchiveConflict(projectId, expectedRevision, project));
+    }
+    const timestamp = now();
+    const revision = expectedRevision + (project.removed_at ? 0 : 1);
+    db.prepare('UPDATE projects SET removed_at = ?, archive_revision = ?, updated_at = ? WHERE id = ? AND archive_revision = ?')
+      .run(project.removed_at ?? timestamp, revision, timestamp, projectId, expectedRevision);
+    return commitCommand(db, commandId, {
+      ok: true, projectId, removed: true, archiveRevision: revision,
+      removedAt: project.removed_at ?? timestamp, changed: !project.removed_at,
+    }, timestamp);
+  });
+}
+
+/** Closing cancels only invitations which have never been accepted. */
+export function cancelClosedWorkLineInvitations(db, projectId, worktreeId) {
+  const closed = db.prepare("SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'")
+    .get(projectId, worktreeId);
+  if (!closed) return;
+  const timestamp = now();
+  db.prepare(`UPDATE dispatch_grants SET state = 'revoked', revoked_at = ?
+    WHERE state = 'active' AND assignment_id IN (
+      SELECT id FROM assignments WHERE project_id = ? AND worktree_id = ?
+      AND status = 'pending' AND session_id IS NULL
+    )`).run(timestamp, projectId, worktreeId);
+  db.prepare(`UPDATE assignments SET status = 'cancelled', revision = revision + 1, updated_at = ?
+    WHERE project_id = ? AND worktree_id = ? AND status = 'pending' AND session_id IS NULL`)
+    .run(timestamp, projectId, worktreeId);
+}
+
 function readProject(db, projectId) {
   return db.prepare('SELECT id, worktree_id FROM projects WHERE id = ?').get(projectId) ?? null;
 }
@@ -456,6 +502,7 @@ export function setWorkLineClosed(db, request = {}) {
     }
 
     const event = closed ? 'close' : 'reopen';
+    if (closed) cancelClosedWorkLineInvitations(db, projectId, worktreeId);
     const eventResult = appendWorkLineEvent(db, {
       projectId,
       worktreeId,

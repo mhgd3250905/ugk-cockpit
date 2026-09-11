@@ -4,7 +4,36 @@ import {
   timelineCurveGeometry,
   timelineCurveSourceY,
   timelineRailEndY,
+  timelineRailSegments,
 } from '../web/src/timeline-geometry.mjs';
+
+test('closed work line ends at its close row instead of the latest time', () => {
+  assert.deepEqual(timelineRailSegments({ endY: 500, status: 'closed', transitions: [
+    { kind: 'work_line_closed', y: 160 },
+  ] }), [[160, 500]]);
+});
+
+test('reopened work lines leave inactive intervals disconnected', () => {
+  assert.deepEqual(timelineRailSegments({ endY: 500, status: 'open', transitions: [
+    { kind: 'work_line_reopened', y: 80 },
+    { kind: 'work_line_closed', y: 180 },
+    { kind: 'work_line_reopened', y: 260 },
+    { kind: 'work_line_closed', y: 340 },
+  ] }), [[3, 80], [180, 260], [340, 500]]);
+});
+
+test('closed lanes without a known close row do not invent an active rail', () => {
+  assert.deepEqual(timelineRailSegments({ endY: 500, status: 'closed' }), []);
+  assert.deepEqual(timelineRailSegments({ endY: 500 }), [[3, 500]]);
+});
+
+test('rail uses event state when no persisted line state was supplied', () => {
+  assert.deepEqual(timelineRailSegments({ endY: 500, transitions: [
+    { kind: 'work_line_closed', y: 70 },
+    { kind: 'work_line_reopened', y: 120 },
+    { kind: 'work_line_closed', y: 180 },
+  ] }), [[70, 120], [180, 500]]);
+});
 
 function assertMetroGeometry(curve) {
   const minX = Math.min(curve.start.x, curve.end.x);

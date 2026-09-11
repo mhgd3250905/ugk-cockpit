@@ -8,7 +8,7 @@ function fileStatus(git) {
   return '尚未记录';
 }
 
-export function WorkContext({ context, label, formatTime, overview }) {
+export function WorkContext({ context, label, formatTime, overview, closed, operations }) {
   const [open, setOpen] = useState(false);
   const titleRef = useRef(null);
   const triggerRef = useRef(null);
@@ -28,7 +28,7 @@ export function WorkContext({ context, label, formatTime, overview }) {
       <button ref={triggerRef} type="button" className="work-context-summary" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-label={`查看${label}的完整工作信息`}>
         <span className="work-context-label"><span className="work-context-name">{label}</span><span className="work-context-more">查看完整信息 ›</span></span>
         {overview && <span className="work-context-facts">{overview.lineCount} 条分支工作线 · {overview.closedCount} 条已手动结束</span>}
-        <span className="work-context-goal"><strong>{overview ? '主项目工作' : '当前工作'}</strong>{context?.currentGoal || '尚未记录工作目标'}</span>
+        <span className="work-context-goal"><strong>{overview ? '主项目工作' : closed ? '最后工作 · 已结束' : '当前工作'}</strong>{context?.currentGoal || '尚未记录工作目标'}</span>
         <span className="work-context-facts">
           <span>{context?.currentAgent || '会话未记录'}</span>
           <span>{git?.branch || '工作线未记录'}</span>
@@ -55,6 +55,7 @@ export function WorkContext({ context, label, formatTime, overview }) {
                 {context?.revision != null && <div><dt>Revision</dt><dd>{context.revision}</dd></div>}
               </dl>
             </details>
+            {open && operations}
           </DialogBody>
         </DialogContent>
       </Dialog>

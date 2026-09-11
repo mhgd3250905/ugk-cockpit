@@ -7,7 +7,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
-import { reopenWorkLineStateForReuse } from './manual-records.mjs';
+import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
 import { readProjectContext, worktreeIdFor } from './projects.mjs';
 import {
   listDevelopmentSpaces,
@@ -1280,9 +1280,12 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     };
     return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
+  withImmediateTransaction(db, () => cancelClosedWorkLineInvitations(db, request.projectId, space.worktreeId));
   const activeWork = readActiveWorkspaceWork(db, space.worktreeId);
   if (activeWork) {
-    const result = { ok: false, code: 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
+    const closed = db.prepare("SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'")
+      .get(request.projectId, space.worktreeId);
+    const result = { ok: false, code: closed ? 'SPACE_CLOSED_HAS_ACTIVE_WORK' : 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
     return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
 

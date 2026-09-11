@@ -73,6 +73,30 @@ export function timelineRailEndY({ laneRole, originY, historyHeight }) {
   return Math.min(fullEnd, Math.max(3, originY));
 }
 
+// Rows run from newest to oldest. Walking backwards through a reopen enters
+// the inactive interval; walking backwards through a close enters active work.
+export function timelineRailSegments({ endY, status, transitions = [] }) {
+  const events = transitions.filter((event) => Number.isFinite(event.y)
+    && event.y >= 3 && event.y <= endY
+    && ['work_line_closed', 'work_line_reopened'].includes(event.kind))
+    .sort((left, right) => left.y - right.y);
+  let active = status ? status !== 'closed' : events[0]?.kind !== 'work_line_closed';
+  let start = active ? 3 : null;
+  const segments = [];
+  for (const event of events) {
+    if (event.kind === 'work_line_reopened') {
+      if (active && start !== null && event.y > start) segments.push([start, event.y]);
+      active = false;
+      start = null;
+    } else {
+      if (!active) start = event.y;
+      active = true;
+    }
+  }
+  if (active && start !== null && endY > start) segments.push([start, endY]);
+  return segments;
+}
+
 export function timelineCurveSourceY(targetY, railEndY, preferredDrop = 28) {
   if (!Number.isFinite(targetY) || !Number.isFinite(railEndY)) return null;
   const availableDrop = railEndY - targetY;

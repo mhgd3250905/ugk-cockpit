@@ -55,7 +55,7 @@ import {
 } from '../core/workspaces.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { readWorkLineContexts } from '../core/work-line-context.mjs';
-import { setProjectArchived, setWorkLineClosed, readWorkLineStates } from '../core/manual-records.mjs';
+import { setProjectArchived, setWorkLineClosed, readWorkLineStates, removeProjectFromDashboard } from '../core/manual-records.mjs';
 import { finishRun, startWriteRun } from '../core/runs.mjs';
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
@@ -704,6 +704,12 @@ const PUBLIC_ERRORS = {
     message: '这个开发空间仍有进行中的 AI 工作。',
     impact: '为了保留正在工作的代码，Cockpit 没有切换或删除该空间。',
     requiredAction: '请先完成、交接或明确结束这项工作，然后再试。',
+  },
+  SPACE_CLOSED_HAS_ACTIVE_WORK: {
+    status: 409,
+    message: '工作线已标记结束，但仍有 AI 会话或写入任务占用这个空间。',
+    impact: '本地代码保持原样；结束标记不会强制终止 AI 会话。',
+    requiredAction: '打开此工作线的完整信息，在会话接续与转交中找到持有人，回到对应聊天完成交接后再删除。',
   },
   WORKSPACE_HAS_CHANGES: {
     status: 409,
@@ -3372,6 +3378,23 @@ export async function createCockpitHttpServer({
       }
 
       const projectArchiveMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/archive$/);
+      const projectRemoveMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/remove$/);
+      if (request.method === 'POST' && projectRemoveMatch) {
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        if (Object.keys(body).some((key) => !['commandId', 'expectedRevision'].includes(key))
+          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const result = removeProjectFromDashboard(db, {
+          commandId: body.commandId, expectedRevision: body.expectedRevision,
+          projectId: decodeURIComponent(projectRemoveMatch[1]),
+        });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, { commandId: body.commandId });
+        return;
+      }
       const workLineStateMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/work-lines\/([^/]+)\/state$/);
       if (request.method === 'POST' && (projectArchiveMatch || workLineStateMatch)) {
         const match = projectArchiveMatch || workLineStateMatch;

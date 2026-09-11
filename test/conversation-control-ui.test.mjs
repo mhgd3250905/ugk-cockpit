@@ -17,9 +17,10 @@ test('timeline renders transfer actor payloads as meaningful strings instead of 
   assert.equal((source.match(/\{timelineDetailText\(detail\)\}/g) || []).length, 3);
 });
 
-test('conversation control exposes every returned chain with explicit user transfer confirmation', () => {
-  assert.match(source, /<ConversationControlPanel key=\{project.id\} projectId=\{project.id\}/);
-  assert.match(panel, /chains\?\.map\(\(chain\)/);
+test('conversation control scopes chains to selected work line with explicit user transfer confirmation', () => {
+  assert.match(source, /operations=\{<ConversationControlPanel projectId=\{project.id\} worktreeId=/);
+  assert.match(panel, /chain.worktreeId === worktreeId/);
+  assert.match(panel, /历史已结束会话/);
   assert.match(panel, /chain\.latestNode/);
   assert.match(panel, /owner\.conversationLocator/);
   assert.match(panel, /确认冻结并签发授权/);

@@ -315,6 +315,9 @@ function SubmitNoteCard({
   onStatusChange,
   onRetry,
 }) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [editingRemark, setEditingRemark] = useState(false);
+  useEffect(() => { setEditingRemark(false); }, [item.revision]);
   const [copyStatus, setCopyStatus] = useState('');
   const [copying, setCopying] = useState(false);
   const [manualCopyOpen, setManualCopyOpen] = useState(false);
@@ -371,17 +374,37 @@ function SubmitNoteCard({
     className: `submit-note-card note-status-${item.status}`,
     'aria-label': item.title || '工作说明',
   },
-    e('header', { className: 'note-card-header' },
-      e('div', { className: 'note-card-title-group' },
+    e('button', {
+      type: 'button', className: 'note-summary-button', onClick: () => setDetailOpen(true),
+      'aria-haspopup': 'dialog', 'aria-label': `查看工作说明：${item.title || '无标题工作说明'}`,
+    },
+      e('div', { className: 'note-summary-top' },
         e(Badge, { variant: 'soft', size: 'sm', className: 'note-status-badge' }, noteStatusLabel(item.status)),
-        e('h4', null, item.title || '无标题工作说明')
+        e('time', { dateTime: item.createdAt, className: 'note-card-time' }, formatNoteTime(item.createdAt))
       ),
-      e('time', { dateTime: item.createdAt, className: 'note-card-time' }, formatNoteTime(item.createdAt))
+      e('h4', null, item.title || '无标题工作说明'),
+      e('p', { className: 'note-summary-preview' }, item.body || '暂无正文'),
+      e('div', { className: 'note-summary-bottom' },
+        e('span', null, source.projectName || '工作说明', references.length ? ` · ${references.length} 项引用` : ''),
+        e('span', { className: 'note-open-label' }, actionError ? '操作待确认 · 查看详情 →' : '查看说明 →')
+      )
     ),
+    e(Dialog, { open: detailOpen, onOpenChange: setDetailOpen },
+      e(DialogContent, { className: 'ugk-dialog note-detail-dialog', closeButton: true, closeLabel: '关闭工作说明' },
+        e(DialogHeader, null,
+          e('div', { className: 'note-summary-top' },
+            e(Badge, { variant: 'soft', size: 'sm' }, noteStatusLabel(item.status)),
+            e('time', { dateTime: item.createdAt }, formatNoteTime(item.createdAt))
+          ),
+          e(DialogTitle, null, item.title || '无标题工作说明'),
+          e(DialogDescription, null, source.projectName || '工作说明', ' · 查看说明、引用与处理记录')
+        ),
+        e(DialogBody, { className: 'note-detail-body' },
     e('div', { className: 'note-disclaimer', role: 'note' },
       '提示：说明与引用均为提交方原始资料，不构成平台背书或自动执行授权。'
     ),
-    e('div', { className: 'note-body-box' },
+    e('section', { className: 'note-body-box' },
+      e('h5', null, '工作内容'),
       e('div', { className: 'note-body-text' }, renderSafeTextWithLinks(item.body))
     ),
     references.length > 0 && e('section', { className: 'note-references-section' },
@@ -410,11 +433,15 @@ function SubmitNoteCard({
       source.branch && e('span', { className: 'source-item source-branch' }, `分支: ${source.branch}`),
       e('span', { className: 'source-item source-attribution' }, `归属: ${attributionText}`)
     ),
-    item.handlingNote && e('div', { className: 'note-handling-note-display' },
-      e('strong', null, '处理备注：'),
-      e('span', null, renderSafeTextWithLinks(item.handlingNote))
+    e('section', { className: 'note-handling-note-display' },
+      e('div', { className: 'note-remark-heading' },
+        e('h5', null, '处理记录'),
+        !editingRemark && e(Button, { variant: 'soft', size: 'sm', disabled: busy || actionError?.retryable,
+          onClick: () => setEditingRemark(true) }, item.handlingNote ? '编辑备注' : '添加备注')
+      ),
+      e('div', { className: 'note-handling-text' }, renderSafeTextWithLinks(item.handlingNote || '尚未填写处理备注。'))
     ),
-    e('div', { className: 'note-remark-input-group' },
+    editingRemark && e('div', { className: 'note-remark-input-group' },
       e('label', { htmlFor: `remark-input-${item.noteId}` },
         item.handlingNote ? '修改处理备注（可选）：' : '填写处理备注（可选）：'
       ),
@@ -427,7 +454,13 @@ function SubmitNoteCard({
         value: draftRemark,
         placeholder: '可输入处理记录、审核决定或交接说明（最多 4000 字）…',
         onChange: (ev) => onDraftRemarkChange(ev.target.value),
-      })
+      }),
+      e('div', { className: 'note-remark-buttons' },
+        e(Button, { variant: 'primary', size: 'sm', disabled: busy || actionError?.retryable,
+          onClick: () => onStatusChange(item.status) }, busy ? '正在保存…' : '保存备注'),
+        e(Button, { variant: 'soft', size: 'sm', disabled: busy || actionError?.retryable,
+          onClick: () => { onDraftRemarkChange(item.handlingNote || ''); setEditingRemark(false); } }, '取消')
+      )
     ),
     actionError && e(Alert, { variant: 'error', className: 'note-action-error', role: 'alert' },
       e(AlertIcon),
@@ -526,6 +559,9 @@ function SubmitNoteCard({
         type: 'button', className: 'note-manual-copy', disabled: !item.copyText,
         onClick: () => setManualCopyOpen(true),
       }, '手动复制')
+    ),
+        )
+      )
     ),
     e(Dialog, { open: manualCopyOpen, onOpenChange: setManualCopyOpen },
       e(DialogContent, { className: 'ugk-dialog note-copy-dialog', closeButton: true, closeLabel: '关闭手动复制', initialFocus: () => {

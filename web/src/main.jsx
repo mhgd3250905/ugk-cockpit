@@ -37,6 +37,7 @@ import {
   timelineCurvePath,
   timelineCurveSourceY,
   timelineRailEndY,
+  timelineRailSegments,
 } from './timeline-geometry.mjs';
 import {
   extractDominantColorFromImage,
@@ -59,8 +60,11 @@ import {
 import { WorkbenchShell } from './workbench-shell.jsx';
 import { WorkContext } from './work-context.jsx';
 import { ManualRecordAction } from './manual-record-action.jsx';
+import { RemoveProjectAction } from './remove-project-action.jsx';
 import './styles.css';
 import './workbench.css';
+import './project-experience.css';
+import './submit-notes.css';
 
 const STATUS = {
   preexisting_changes: {
@@ -184,7 +188,7 @@ function timelineTimestamp(value) {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-function getTimelineLanes(timeline, items = []) {
+function getTimelineLanes(timeline, items = [], workLineStates = []) {
   const lanes = [];
   const known = new Map();
   const supplied = Array.isArray(timeline?.lanes) ? timeline.lanes : [];
@@ -234,6 +238,7 @@ function getTimelineLanes(timeline, items = []) {
 
   return lanes.map((lane, index) => ({
     ...lane,
+    workLineState: workLineStates.find((state) => state.worktreeId === lane.worktreeId) ?? null,
     index,
     color: stableLaneColor(lane),
   }));
@@ -248,6 +253,27 @@ function getTimelineEntries(timeline, lanes) {
   }, null);
 
   for (const lane of lanes) {
+    const state = lane.workLineState;
+    if (state?.updatedAt && ['closed', 'open'].includes(state.status)
+      && !items.some((item) => item.laneKey === lane.key
+        && ['work_line_closed', 'work_line_reopened'].includes(item.kind)
+        && timelineTimestamp(item.timestamp) === timelineTimestamp(state.updatedAt))) {
+      const closed = state.status === 'closed';
+      entries.push({
+        id: `line-state:${lane.key}:${state.revision}`,
+        entryKind: 'event',
+        kind: closed ? 'work_line_closed' : 'work_line_reopened',
+        typeLabel: closed ? '用户手动结束' : '用户重新打开',
+        laneKey: lane.key,
+        laneLabel: lane.label,
+        laneRole: lane.role,
+        worktreeId: lane.worktreeId,
+        timestamp: state.updatedAt,
+        summary: closed ? '你已手动结束这条工作线' : '你已重新打开这条工作线',
+        details: [],
+        userAction: true,
+      });
+    }
     const origin = lane.origin;
     if (lane.role !== 'development_space' || !origin?.createdAt) continue;
     const originTime = timelineTimestamp(origin.createdAt);
@@ -1984,6 +2010,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
     stage: 'development',
   };
   const effectiveProjectId = projectId || project.id;
+  const projectColor = getProjectCardAvatarColorStyle(useProjectAvatarColor(project));
   const statusReason = getProjectStatusReason(project);
   const statusCopy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const headingCopy = state?.loading
@@ -2010,7 +2037,8 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
 
   return (
     <section
-      className={`project-detail-page status-${getProjectTheme(project)}`}
+      className={`project-detail-page status-${getProjectTheme(project)} ${projectColor.className}`}
+      style={projectColor.style}
       aria-labelledby="project-detail-title"
     >
       <header className="project-detail-header">
@@ -2036,7 +2064,10 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
                     编辑项目
                   </Button>
                 )}
-                {state?.data && <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />}
+                {state?.data && <details className="project-more-actions"><summary>更多操作 ···</summary><div>
+                  <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />
+                  <RemoveProjectAction project={project} api={api} disabled={busy} onRemoved={async () => { onBack(); await onRecordsChanged(); }} />
+                </div></details>}
               </div>
               <div className="detail-kicker-row">
                 {project.archivedAt && <Badge variant="soft" size="sm" className="stat-neutral">已归档</Badge>}
@@ -2154,11 +2185,18 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const projectPendingWorkspaceActions = pendingWorkspaceActions.filter((item) => item.projectId === project.id);
   const [activeTab, setActiveTab] = useState('timeline');
+  const [noticeVisible, setNoticeVisible] = useState(true);
+  useEffect(() => {
+    setNoticeVisible(true);
+    if (!actionNotice || actionNotice.error) return;
+    const timer = setTimeout(() => setNoticeVisible(false), 6500);
+    return () => clearTimeout(timer);
+  }, [actionNotice]);
   const tabRefs = useRef([]);
   const [focusedLaneKey, setFocusedLaneKey] = useState(null);
   const selectedContext = data.workLineContexts?.find((context) => context.laneKey === (focusedLaneKey || 'main'));
   const timelineItems = Array.isArray(timeline?.items) ? timeline.items : [];
-  const timelineLanes = useMemo(() => getTimelineLanes(timeline, timelineItems), [timeline, timelineItems]);
+  const timelineLanes = useMemo(() => getTimelineLanes(timeline, timelineItems, data.workLineStates), [timeline, timelineItems, data.workLineStates]);
   const selectedLane = timelineLanes.find((lane) => lane.key === focusedLaneKey);
   const selectedLineState = data.workLineStates?.find((state) => state.worktreeId === selectedLane?.worktreeId);
   const timelineEntries = useMemo(
@@ -2191,7 +2229,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
 
   return (
     <>
-      {actionNotice && (
+      {actionNotice && noticeVisible && (
         <Alert
           variant={actionNotice.error ? 'error' : 'success'}
           className="detail-action-notice"
@@ -2246,7 +2284,10 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
               />
 
               <WorkContext
+                key={focusedLaneKey || 'main'}
                 context={selectedContext}
+                closed={selectedLineState?.status === 'closed'}
+                operations={<ConversationControlPanel projectId={project.id} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} />}
                 label={focusedLaneKey ? (timelineLanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选工作线') : '项目总览'}
                 overview={focusedLaneKey ? null : {
                   lineCount: timelineLanes.filter((lane) => ['development_space', 'delivery_source'].includes(lane.role)).length,
@@ -2384,28 +2425,36 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                 <div className="workspace-list">
                   {developmentSpaces.map((space) => {
                     const pendingAction = projectPendingWorkspaceActions.find((item) => item.spaceId === space.spaceId);
+                    const closed = data.workLineStates?.some((line) => line.worktreeId === space.worktreeId && line.status === 'closed');
+                    const removed = space.statusReason === 'removed_by_user';
                     return (
-                      <article className="workspace-card" key={space.spaceId}>
-                        <div>
+                      <article className={`workspace-card development-card ${closed ? 'is-closed' : ''}`} key={space.spaceId}>
+                        <div className="space-card-heading">
+                          <span className="space-emblem" aria-hidden="true">{space.name?.slice(0, 1).toUpperCase() || '◇'}</span>
+                          <span className="space-state">{removed ? '已移除副本' : closed ? '已结束' : space.status === 'cleanup_ready' ? '已完成' : space.status === 'awaiting_review' ? '待审核' : space.status === 'archived' ? '已归档' : '可继续'}</span>
+                        </div>
+                        <div className="space-card-copy">
                           <strong>{space.name}</strong>
-                          <span>{space.statusReason === 'removed_by_user' ? '本地副本已删除，工作记录已保留' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '可以继续开发'}</span>
+                          <span>{removed ? '本地副本已删除，工作记录已保留' : closed ? '工作线已结束，历史记录仍可查看' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '独立推进功能，进展汇入项目工作线'}</span>
                         </div>
                         <div className="workspace-card-actions">
                           {pendingAction ? (
                             <span className="read-only-action">操作待核对</span>
-                          ) : space.status === 'ready' && (
-                            <Button variant="soft" size="sm" onClick={() => onAssignSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                          ) : space.status === 'ready' && !closed && (
+                            <Button variant="primary" size="sm" onClick={() => onAssignSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
                               复制接入消息
                             </Button>
                           )}
                           {!pendingAction && ['ready', 'cleanup_ready', 'paused', 'attention'].includes(space.status) && (
                             <>
-                              <Button variant="soft" size="sm" onClick={() => onReuseSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                              <Button variant={closed || space.status === 'cleanup_ready' ? 'primary' : 'soft'} size="sm" onClick={() => onReuseSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
                                 重新开始
                               </Button>
+                              <details className="space-more"><summary aria-label={`${space.name}的更多操作`}>···</summary><div>
                               <Button variant="soft" size="sm" className="workspace-remove-button" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
                                 删除空间
                               </Button>
+                              </div></details>
                             </>
                           )}
                         </div>
@@ -2432,14 +2481,13 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
             loading={diagnosticsLoading}
             onLoad={onLoadDiagnostics}
           />
-          <ConversationControlPanel key={project.id} projectId={project.id} />
         </aside>
       </div>
     </>
   );
 }
 
-function ConversationControlPanel({ projectId }) {
+function ConversationControlPanel({ projectId, worktreeId }) {
   const [chains, setChains] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -2447,6 +2495,7 @@ function ConversationControlPanel({ projectId }) {
   const path = `/api/v1/projects/${encodeURIComponent(projectId)}/conversation-control`;
 
   useEffect(() => () => { requestRef.current += 1; }, []);
+  useEffect(() => { if (worktreeId) refresh(); }, [projectId, worktreeId]);
 
   async function refresh() {
     const request = ++requestRef.current;
@@ -2465,15 +2514,20 @@ function ConversationControlPanel({ projectId }) {
   return (
     <section className="context-section conversation-control" aria-label="会话接续与转交">
       <h3>会话接续与转交</h3>
-      <p>按工作会话分别查看最后节点。接手成功本身就是新节点；不会改写此前成果的归属。</p>
+      <p>查看这条工作线的会话，或授权其他聊天接手。</p>
       <Button variant="soft" size="sm" onClick={refresh} disabled={loading}>
         {loading ? '正在读取…' : '刷新会话接续情况'}
       </Button>
       {error && <ConversationControlError error={error} />}
-      {chains?.length === 0 && <p>当前项目尚无工作会话。</p>}
-      {chains?.map((chain) => (
+      {!worktreeId && <p>这条工作线尚未记录可操作的会话。</p>}
+      {chains && !chains.some((chain) => chain.worktreeId === worktreeId) && <p>这条工作线暂无工作会话。</p>}
+      {chains?.filter((chain) => chain.worktreeId === worktreeId && (['active', 'awaiting_resume', 'standby'].includes(chain.status) || chain.transfer)).map((chain) => (
         <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} />
       ))}
+      {chains?.some((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer) && <details className="conversation-history">
+        <summary>历史已结束会话</summary>
+        {chains.filter((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer).map((chain) => <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} />)}
+      </details>}
     </section>
   );
 }
@@ -2727,11 +2781,16 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
     const x = geometry.laneX.get(lane.key);
     if (x === undefined) continue;
     const railEndY = geometry.railEndY.get(lane.key) ?? Math.max(3, geometry.height - 3);
-    paths.push(
+    const transitions = entries.filter((entry) => entry.laneKey === lane.key).map((entry) => ({
+      kind: entry.kind,
+      y: geometry.points.get(timelineEntryKey(entry))?.y,
+    }));
+    const segments = timelineRailSegments({ endY: railEndY, status: lane.workLineState?.status, transitions });
+    for (const [startY, endY] of segments) paths.push(
       <path
-        key={`rail:${lane.key}`}
+        key={`rail:${lane.key}:${startY}`}
         className="timeline-graph-rail"
-        d={`M ${x} 3 V ${railEndY}`}
+        d={`M ${x} ${startY} V ${endY}`}
         stroke={lane.color}
         style={{ opacity: focusOpacity(lane.key) }}
       />,
