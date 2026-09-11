@@ -18,7 +18,12 @@
 4. **非终态进度状态枚举只存在于 MCP 桥**，HTTP 边界接受核心未拒绝的任意字符串，包括仅由 init 路径写入的 `adopted`：持 scoped token 的直接调用者可伪造一条"接入"事件并推高 assignment 与 run 的 revision。现由 `src/core/assignments-contract.mjs` 提供唯一定义，两处网关共同引用。
 5. **`main.mjs` 从不传 `authorizedRoots`，导致旧 `/api/v1/runs/*` 路由在生产环境对每个请求返回 `PATH_NOT_AUTHORIZED`**，上一轮交付的"用户确认释放残留写租约"路径只在注入夹具根的测试里可达。现授权根取注入列表与持久授予事实（`projects.authorized_root`、开发空间 worktree 路径）的并集，仍对未授予路径 fail closed。
 
-**2026-09-11 审查返工（PR #11 评审意见，两项 P2）**：
+**2026-09-11 审查返工二（PR #11 复审，一项 P1）**：
+
+- **URL 作用域子节含空格时削弱设置被放行**：`[http "https://example.invalid/a b"] sslVerify = false` 的完整键名本身含空格，此前按键名首个空格切分键值把它读成键 `...a`、值 `b.sslverify false`——既非 `true` 也非 `false`，被放行；而 `SAFE_GIT_PREFIX` 下 `get-urlmatch` 对 `/a%20b/` URL 实测返回 `false`，证书校验被真实关闭（复审复现，旧版守卫返回 `transport`、返工版返回 `null`，确系回归）。现全部传输查询改读 **`-z` 记录格式**（`key LF value NUL`），键值边界无歧义、空格子节不再可能伪装成分隔符；布尔归一化只放行 Git 明确解析出的 `true`（`--bool` 下无值仍报 `true`，上一轮修复的语义不变），`followRedirects` 的 `initial`/`false` 仍放行。新增 6 条含空格子节正反例，其中评审原始复现一条对返工前源码（`8bc1208`）为红。
+- 返工二验证（2026-09-11）：`test/audit-2026-09-10.test.mjs` **30/30**；Phase 0 **97/97**；邻接套件 **60/60**；全量结果见下。
+
+**2026-09-11 审查返工一（PR #11 评审意见，两项 P2）**：
 
 1. **无值布尔配置误拒绝**：`[http] sslVerify`（无值）按 Git 布尔语义是 true（加固），但此前实现把它当空字符串判敌意，正常仓库被 `UNSAFE_REMOTE_URL` 挡在送审/集成/推送之外。现改为让 Git 自己归一化取值：`sslVerify`/`schannelCheckRevoke` 走 `--bool` 专查（无值→`true` 放行、显式空值→`false` 拒绝、git 无法解析的写法直接 fatal→按敌意处理），`followRedirects` 走 `--bool-or-str` 专查（`initial` 与 false 放行，无值=true 及其余拒绝）。不再解析 `--get-regexp` 的打印格式——`probe.git()` 会 trim stdout，显式空值的尾随空格（与无值的唯一区别）在进入解析前就被删掉了，第一版按空白区分的思路在这个代码库里根本立不住（实测确认）。显式空值的 `sslVerify` 仍拒绝（false=关闭校验），键名即敌意的键（`proxy` 等）仍出现即拒绝、不开空值特例。新增 7 条正反例，其中 4 条对返工前源码为红。
 2. **代理行为测试误判**：断言依赖 Git/curl 错误文案中的 "via 127.0.0.1"，在 Git 2.50（文案无 "via"）上把确实访问了代理的对照组判为失败。现改为本地 TCP 监听端点计数连接：对照组（不加固）必须真的连上代理，加固组（带 `SAFE_GIT_PREFIX`）必须零新增连接且命令仍失败，完全不依赖任何错误措辞。附带发现并修正用例自身的缺陷：同步等待（`execFileSync`）会阻塞事件循环，监听端点永远处理不了到达的连接（curl 等不到 CONNECT 响应直到 20s 超时、计数恒为 0），改为异步等待后对照组即时失败、计数正确。

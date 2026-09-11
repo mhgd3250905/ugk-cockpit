@@ -43,20 +43,25 @@ export const HOSTILE_ANY_SCOPE_CONFIG_PATTERN =
 //     explicitly tightened their own transport (`http.sslVerify=true`), so
 //     these are value-aware. The boolean ones are judged in two dedicated
 //     queries that make git normalise the value (`--bool`, `--bool-or-str`),
-//     because the two "unset" spellings are OPPOSITES there and the raw print
-//     format cannot be trusted to carry the difference through this codebase:
+//     because the two "unset" spellings are OPPOSITES there:
 //
 //       * a valueless entry (`[http] sslVerify`) is boolean TRUE,
 //       * an explicitly empty value (`[http] sslVerify = `) is boolean FALSE,
-//       * `git config --get-regexp` prints the latter with one trailing space —
-//         which probe.git() strips when it trims stdout, making the two forms
-//         indistinguishable in the received text (measured).
 //
-//     With `--bool`, git itself reports `true` for the valueless form and
-//     `false` for the empty form, and exits fatally on a spelling it cannot
-//     parse — exactly the fail-closed behaviour wanted for `maybe`. `followRedirects`
-//     also accepts the non-boolean `initial` (git's default), so it is queried
-//     with `--bool-or-str`, which passes such values through verbatim.
+//     and under `--bool` git reports exactly `true` / `false` for them. A
+//     spelling git cannot parse exits fatally, which is the fail-closed
+//     behaviour wanted for `maybe`. `followRedirects` also accepts the
+//     non-boolean `initial` (git's default), so it is queried with
+//     `--bool-or-str`, which passes such values through verbatim.
+//
+//     All transport queries read the `-z` record format (`key LF value NUL`).
+//     The first-space split this replaced was a real bypass: a URL-scoped
+//     subsection may itself contain spaces — `[http "https://example.invalid/a b"]`
+//     prints the key `http.https://example.invalid/a b.sslverify` — so
+//     `sslVerify = false` parsed as key `...a` and value `b.sslverify false`,
+//     which matched neither safe spelling and slipped through, while git
+//     itself honours the key for the matching percent-encoded URL (measured
+//     with get-urlmatch under SAFE_GIT_PREFIX).
 //
 // Key-only entries stay hostile whatever their value, including an explicit
 // empty one: an empty `http.proxy` happens to mean "no proxy", but presence is
@@ -117,27 +122,45 @@ export function transportEntryIsHostile(key, rawValue) {
   return true;
 }
 
-// Ask git to normalise the boolean-ish transport keys instead of parsing its
-// print format: with `--bool` the output is always `key true` or `key false`,
-// the valueless form reports true and the explicitly empty form reports false,
-// and a spelling git cannot parse makes the command exit fatally — treated as
-// hostile, since git would refuse the value later anyway. `--bool-or-str` is
-// the same idea for `followRedirects`, whose legal `initial` is not a boolean
-// and must pass through as text.
+// The `-z` record format is `key LF value NUL`, which keeps keys unambiguous no
+// matter what their subsection contains — a URL-scoped subsection with a space
+// broke the previous first-space split (see the pattern comment above).
+// probe.git() trims stdout, but NUL is not whitespace, so the trailing
+// terminator and every interior byte survive; a record without an LF is a
+// valueless entry.
+function eachTransportRecord(stdout) {
+  return stdout.split('\0')
+    .filter((record) => record.trim())
+    .map((record) => {
+      const separator = record.indexOf('\n');
+      return separator === -1
+        ? { key: record, value: '' }
+        : { key: record.slice(0, separator), value: record.slice(separator + 1) };
+    });
+}
+
+// Ask git to normalise the boolean-ish transport keys instead of parsing raw
+// values: with `--bool` the value is always exactly `true` or `false` (the
+// valueless form reports true, the explicitly empty form false), and a spelling
+// git cannot parse exits fatally — treated as hostile, since git would refuse
+// the value later anyway. `--bool-or-str` is the same idea for `followRedirects`,
+// whose legal `initial` is not a boolean and passes through as text.
+//
+// Only an explicit git-resolved `true` passes for the boolean family: any other
+// normalised value — `false`, an empty readback, anything unexpected — refuses.
 async function normalizedTransportEntriesHostile(cwd, scope, pattern, overrides, { boolOrStr = false } = {}) {
   let result;
   try {
     result = await git(cwd, [
-      'config', ...scope, boolOrStr ? '--bool-or-str' : '--bool', '--get-regexp', pattern,
+      'config', ...scope, '-z', boolOrStr ? '--bool-or-str' : '--bool', '--get-regexp', pattern,
     ], { ...gitOptions(overrides), acceptExitCodes: [0, 1] });
   } catch {
     return true;
   }
-  return result.stdout.split(/\r?\n/).some((line) => {
-    if (!line.trim()) return false;
-    const value = line.slice(line.indexOf(' ') + 1).trim().toLowerCase();
-    if (boolOrStr) return value !== 'initial' && value !== 'false';
-    return value === 'false';
+  return eachTransportRecord(result.stdout).some(({ value }) => {
+    const normalized = value.trim().toLowerCase();
+    if (boolOrStr) return normalized !== 'initial' && normalized !== 'false';
+    return normalized !== 'true';
   });
 }
 
@@ -246,17 +269,12 @@ function firstKey(stdout) {
   return stdout.split(/\r?\n/).map((line) => line.split(/\s+/)[0]).filter(Boolean)[0];
 }
 
-// `git config --get-regexp` prints `key value` with the value taken verbatim, so
-// only the first space separates them (an `http.extraHeader` value contains
-// spaces of its own). Presence of the key is all this query decides; value
-// nuance for the boolean keys lives in the dedicated `--bool` queries, precisely
-// because probe.git() trims stdout and would erase the empty-vs-valueless cue.
+// The `-z` record format keeps the key/value boundary unambiguous (see
+// eachTransportRecord); this query only decides presence and the sslVersion
+// enum, but it reads the same unambiguous records so a space inside a
+// URL-scoped subsection cannot masquerade as a separator.
 function hasHostileTransportEntry(stdout) {
-  return stdout.split(/\r?\n/).some((line) => {
-    if (!line.trim()) return false;
-    const key = line.slice(0, line.indexOf(' '));
-    return transportEntryIsHostile(key, line.slice(key.length + 1));
-  });
+  return eachTransportRecord(stdout).some(({ key, value }) => transportEntryIsHostile(key, value));
 }
 
 /**
@@ -286,7 +304,7 @@ export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
     // command-line values while still catching repository-owned ones, and the
     // url-scoped `http.<url>.<key>` spelling is read from the same scopes.
     Promise.all(scopes.map((scope) => git(
-      cwd, ['config', ...scope, '--get-regexp', HOSTILE_TRANSPORT_CONFIG_PATTERN], gitOptions(overrides),
+      cwd, ['config', ...scope, '-z', '--get-regexp', HOSTILE_TRANSPORT_CONFIG_PATTERN], gitOptions(overrides),
     ))),
     // The two boolean checks use the same repository-owned scopes: command-line
     // `-c` values must stay excluded here too, or SAFE_GIT_PREFIX's own

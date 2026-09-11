@@ -299,6 +299,48 @@ test('an explicitly empty key-only transport setting is still refused', async (t
   assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
 });
 
+// 评审 P1：URL 作用域子节可以含空格——`[http "https://example.invalid/a b"]`
+// 的完整键名是 `http.https://example.invalid/a b.sslverify`。此前按首个空格切分
+// 键值，把 `sslVerify = false` 读成键 `...a`、值 `b.sslverify false`，既非 true
+// 也非 false，削弱设置被放行；而 SAFE_GIT_PREFIX 下 get-urlmatch 实测对该
+// percent-encoded URL（/a%20b/）确实返回 false——证书校验被真实关闭。现全部
+// 传输查询改读 `-z` 记录格式（`key LF value NUL`），键值边界无歧义。
+test('a url-scoped transport key whose subsection contains a space is still detected', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://example.invalid/a b"]\n\tsslVerify = false\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+test('an explicit sslVerify=true under a space-containing url subsection stays allowed', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-ok-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://example.invalid/a b"]\n\tsslVerify = true\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('a valueless sslVerify under a space-containing url subsection stays allowed', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-valueless-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://example.invalid/a b"]\n\tsslVerify\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('followRedirects=false under a space-containing url subsection stays allowed', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-redirects-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://x.invalid/p q"]\n\tfollowRedirects = false\n');
+  assert.equal(await findHostileRepositoryConfiguration(repo), null);
+});
+
+test('a key-only transport key under a space-containing url subsection is refused', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-proxy-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://x.invalid/p q"]\n\tproxy = http://127.0.0.1:9\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
+test('a weakened sslVersion under a space-containing url subsection is refused', async (t) => {
+  const { repo } = createFixture(t, 'ugk-audit-transport-urlspace-sslversion-');
+  appendFileSync(path.join(repo, '.git', 'config'), '[http "https://x.invalid/p q"]\n\tsslVersion = sslv3\n');
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'transport' });
+});
+
 // --------------------------------------------------------------- mirror
 
 test('mirrorResetArguments resets only the named remote', () => {
