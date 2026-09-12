@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -278,4 +279,81 @@ test('stdio bridge answers ping while a slow tools/call is in flight', async (t)
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.fail('ping was never answered');
+});
+
+test('probeGitWorktree inherits the wider git buffer for mid-size repositories', async (t) => {
+  const { execFileSync } = await import('node:child_process');
+  const root = createCommitFixture(t, 'ugk-audit-probe-buffer-');
+
+  // Bulk-load index entries instead of creating files: 26k entries push the
+  // `ls-files --stage -z` output just past the old 2MB probe default.
+  const hash = 'ab'.repeat(20);
+  const lines = [];
+  for (let i = 0; i < 26_000; i += 1) {
+    lines.push(`100644 ${hash} 0\tbulk/generated/file-${String(i).padStart(6, '0')}.txt`);
+  }
+  execFileSync('git', ['update-index', '--index-info'], {
+    cwd: root, encoding: 'utf8', input: `${lines.join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const lsFiles = execFileSync('git', ['ls-files', '--stage', '-z'], {
+    cwd: root, maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  assert.ok(lsFiles.length > 2 * 1024 * 1024, `fixture output only ${lsFiles.length} bytes`);
+
+  const observation = await probeGitWorktree(root);
+  assert.equal(observation.coherence, 'coherent');
+});
+
+test('anonymous MCP session burst evicts the oldest token, newest sessions survive', async (t) => {
+  const root = createCommitFixture(t, 'ugk-audit-mcp-evict-');
+  const service = await createCockpitHttpServer({
+    dbPath: path.join(root, 'cockpit.db'), token: TOKEN,
+  });
+  t.after(async () => {
+    await service.close();
+  });
+
+  const bootstrap = async () => {
+    const response = await fetch(`http://${service.host}:${service.port}/api/v1/mcp/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client: 'ugk-cockpit-stdio' }),
+    });
+    assert.equal(response.status, 201);
+    return (await response.json()).token;
+  };
+
+  const first = await bootstrap();
+  const tokens = [first];
+  for (let i = 1; i < 65; i += 1) tokens.push(await bootstrap());
+
+  // The session limit is 64: registering the 65th session must evict the
+  // earliest one instead of leaving the burst in place.
+  const probe = async (token) => fetch(`http://${service.host}:${service.port}/api/v1/mcp/work/context`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const evicted = await probe(first);
+  assert.equal(evicted.status, 401, 'first session must have been evicted by the burst');
+  const survivor = await probe(tokens[64]);
+  assert.ok(survivor.status !== 401, `newest session must survive (got ${survivor.status})`);
+});
+
+test('launcher rejects quote characters in the data directory before spawning node', { skip: process.platform !== 'win32' && 'launcher validation runs Windows PowerShell' }, async (t) => {
+  const { spawn } = await import('node:child_process');
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const result = await new Promise((resolve) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass',
+      '-File', path.join(repoRoot, 'scripts', 'launch-cockpit.ps1'),
+      '-DataDirectory', 'C:\temp" --evil-arg "injected',
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stderrText = '';
+    child.stderr.on('data', (chunk) => { stderrText += chunk.toString(); });
+    child.on('close', (code) => resolve({ code, stderrText }));
+  });
+  assert.notEqual(result.code, 0, 'launcher must fail on a quote-bearing data directory');
+  assert.match(result.stderrText, /quote or newline/i);
 });

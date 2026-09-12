@@ -215,7 +215,11 @@ export async function probeGitWorktree(
   worktreePath,
   {
     timeoutMs = 5_000,
-    maxBuffer = 2 * 1024 * 1024,
+    // Omitted on purpose: `ls-files --stage -z` on a mid-size repository
+    // easily exceeds 2MB, so the probe must inherit git()'s wider default
+    // (undefined triggers that destructuring default) instead of pinning
+    // its own smaller cap.
+    maxBuffer,
     onBetweenObservations,
     expectedBaselineHead = null,
   } = {},

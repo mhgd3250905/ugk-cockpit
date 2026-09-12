@@ -5,6 +5,7 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyServiceData } from './verify-service-data.mjs';
 import { COCKPIT_SKILL_NAMES, defaultCodexSkillsRoot } from './install-cockpit-skills.mjs';
 import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
+import '../src/core/exec-guard.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const serviceUrl = 'http://127.0.0.1:41737/';
