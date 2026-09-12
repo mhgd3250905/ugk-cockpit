@@ -67,10 +67,6 @@ body { font-family: var(--font-sans); }
 .development-card .space-card-copy > span { display: block; font-size: 13px; line-height: 1.8; margin-top: 8px; }
 .development-card .workspace-card-actions { display: flex; width: 100%; justify-content: flex-start; align-items: center; gap: 8px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--wb-line); }
 .development-card .workspace-card-actions > button { min-height: 36px; padding-inline: 14px; }
-.space-more { position: relative; margin-left: auto; }
-.space-more > summary { list-style: none; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--wb-line); border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 20px; }
-.space-more > summary::-webkit-details-marker { display: none; }
-.space-more > div { position: absolute; right: 0; top: 42px; z-index: 5; padding: 8px; border: 1px solid var(--wb-line); border-radius: 10px; background: var(--wb-raised); box-shadow: var(--wb-shadow); white-space: nowrap; }
 .detail-action-notice { max-width: none; margin-bottom: 18px; border-radius: 12px; padding: 12px 16px; }
 .project-detail-content .workspace-context { border-top: 0; opacity: .85; margin-top: 24px; display: flex; flex-wrap: wrap; gap: 24px; }
 .project-more-actions { margin-left: 4px; position: relative; }
@@ -89,3 +85,24 @@ body { font-family: var(--font-sans); }
   .work-context-fields { grid-template-columns: 1fr; }
   .work-context-fields > div:nth-child(3) { grid-column: auto; }
 }
+
+/* Keep destructive actions discoverable; confirmation remains in the dialog. */
+.development-card .workspace-card-actions > .space-delete-action { margin-left: auto; width: 36px; min-width: 36px; padding: 8px; color: var(--wb-muted); border: 1px solid var(--wb-line); }
+.development-card .workspace-card-actions > .space-delete-action:hover { color: var(--wb-ink); background: var(--wb-raised); border-color: var(--wb-muted); }
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-bubble,
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-origin-card { opacity: .28; filter: saturate(.25); }
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-bubble:hover,
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-bubble:focus-within,
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-origin-card:hover,
+.timeline-history.has-focused-lane .is-lane-dimmed .timeline-origin-card:focus-within { opacity: .75; }
+.timeline-history.has-focused-lane .is-lane-focused .timeline-bubble,
+.timeline-history.has-focused-lane .is-lane-focused .timeline-origin-card { opacity: 1; border-color: var(--timeline-lane-color); }
+.conversation-control > button,
+.conversation-chain > button,
+.conversation-transfer-result > button,
+.conversation-control-actions > button { background: var(--wb-raised); border: 1px solid color-mix(in srgb, var(--wb-muted) 55%, var(--wb-line)); color: var(--wb-ink); box-shadow: 0 1px 2px #0001; }
+.conversation-control > button:hover,
+.conversation-chain > button:hover,
+.conversation-transfer-result > button:hover,
+.conversation-control-actions > button:hover { background: var(--project-tint, var(--wb-surface)); border-color: var(--wb-muted); }
+.control-content > .notice-banner { margin-bottom: 24px; }

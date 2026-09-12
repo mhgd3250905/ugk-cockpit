@@ -32,6 +32,10 @@ test('startup rejects an empty service over existing data and verifies project d
   await assert.rejects(verifyServiceData(root, url), /Database\/service project mismatch/);
   projects = [{ id: 'existing' }];
   assert.equal(await verifyServiceData(root, url), 1);
+  const updated = new DatabaseSync(path.join(root, 'cockpit.db'));
+  updated.exec("ALTER TABLE projects ADD COLUMN removed_at TEXT; INSERT INTO projects VALUES ('removed', '2026-09-12');");
+  updated.close();
+  assert.equal(await verifyServiceData(root, url), 1);
   detailOk = false;
   await assert.rejects(verifyServiceData(root, url), /Project detail failed/);
 });

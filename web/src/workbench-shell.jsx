@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Button } from '@appica/ui-react/button';
 import { projectAvatarUrl } from './avatar-color.mjs';
 import './workbench-shell.css';
+import { ServiceStatus } from './service-status.jsx';
 
 function ShellIcon({ name, ...props }) {
   const paths = {
@@ -40,6 +41,7 @@ export function WorkbenchShell({
   onAddProject,
   busy,
   themeControl,
+  serviceApi,
   isStale,
   refreshedAt,
   onRefresh,
@@ -125,6 +127,7 @@ export function WorkbenchShell({
             {(activeProjectId || guideActive) && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
             <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={guideActive ? '使用指南' : activeProject?.name || activeProjectName}>{guideActive ? '使用指南' : activeProject?.name || activeProjectName || '项目工作台'}</span>
           </nav>
+          <ServiceStatus api={serviceApi} />
           <div className="wb-topbar-actions">
             <button className="wb-icon-button wb-refresh" type="button" onClick={onRefresh} disabled={busy} title="刷新项目数据" aria-label="刷新项目数据"><ShellIcon name="refresh" /></button>
             <Button type="button" variant="soft" className="wb-add-project" onClick={onAddProject} disabled={busy}><ShellIcon name="plus" /><span>添加项目</span></Button>

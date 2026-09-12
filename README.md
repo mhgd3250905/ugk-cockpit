@@ -26,13 +26,13 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.43` — 合入项目操作页面八项反馈：关闭工作线时撤销未使用的接入邀请，按工作线查看会话接续与转交，结束/重开时间线断线续画，调整项目与空间卡片、头像主题色及工作说明阅读方式。项目可从工作台软移除，保留代码与历史，显式重新添加可恢复展示。数据库新增 schema 29，保留 schema 28 的工作空间操作执行者记录；关闭弹窗或切换工作线不会丢失页面内的转交原请求及晚到指令。工作台仍处于用户试用期。
+`0.1.0-alpha.44` — 完成本轮工作台验收修复：工作说明列表和固定复制区、开发空间删除图标、工作线聚焦淡化、会话按钮及提示间距。顶部显示服务状态、版本、访问端口和运行时长，可确认关闭本地服务；关闭等待在途请求结束后释放数据库。沿用 schema 29，无新增依赖。
 
-本轮完成源码合并与阶段收束，未创建 alpha.43 发布标签或 GitHub Release，未重启正式服务或更新宿主插件；[alpha.41 预发布](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.41) 是历史发布入口。升级到 schema 29 前仍需备份并核对已有项目及详情，验证范围见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
+本轮页面与服务功能已于 2026-09-12 在本机更新并经用户验收；版本提交和运维核验见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)及[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。未创建新发布标签或 GitHub Release，未更新宿主插件；[alpha.41 预发布](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.41) 保留为历史发布入口。
 
 2026-09-09 已发布 [alpha.40 预发布版本](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.40)，本机服务随后升级并核对 7 个已有项目及全部详情，用户确认使用指南页面正常。运行记录见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。插件中的新版对话指引仍需宿主更新并重新加载，服务重启不代表各宿主插件已同步更新。
 
-保留 `alpha.39` 的工作节点持久记录平台与宿主会话 ID，接手成功本身就是新节点。异常转交由用户在工作台选择准确工作会话并授权：旧聊天立即冻结，新聊天凭一次性指令接手；支持定向授权、过期重签和明确取消恢复。聊天内两步 takeover 已关闭，正常 Relay 保留。ZCode 原生请求身份已接入；走错聊天时返回当前持有人和最新节点，未知历史不猜身份。此前本机部署记录为 schema 27，用户已反馈原 ZCode 聊天接手后可写；本轮 schema 29 源码变更不代表运行服务已迁移。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
+保留 `alpha.39` 的工作节点持久记录平台与宿主会话 ID，接手成功本身就是新节点。异常转交由用户在工作台选择准确工作会话并授权：旧聊天立即冻结，新聊天凭一次性指令接手；支持定向授权、过期重签和明确取消恢复。聊天内两步 takeover 已关闭，正常 Relay 保留。ZCode 原生请求身份已接入；走错聊天时返回当前持有人和最新节点，未知历史不猜身份。本机服务现已使用 schema 29；此前用户反馈原 ZCode 聊天接手后可写属于当时的现场验收，服务更新不代表宿主插件同步更新。协议与运维见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
 
 保留轻量 Submit 工作说明：向所属项目发布说明，可以引用 PR、本地提交或其他分支的审核结果，不再默认保存上传或创建代码审核对象。说明发布不冻结分支，不结束会话，已有 progress 与 relay 照常推进。2026-09-03 的实现、切换及历史验收见 [Submit 工作说明](docs/SUBMIT_NOTES.md)。
 

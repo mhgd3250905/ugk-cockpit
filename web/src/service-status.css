@@ -1,0 +1,9 @@
+.service-status-strip { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px 12px; min-width: 0; margin-left: auto; font-size: 12px; color: var(--wb-muted); }
+.service-status-indicator { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #589b70; }
+.service-status-strip.is-offline .service-status-indicator { background: #aa854e; }
+.service-status-version, .service-status-port { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.service-shutdown-button { padding: 6px 10px; border: 1px solid var(--wb-line); border-radius: 7px; background: var(--wb-raised); color: var(--wb-ink); cursor: pointer; white-space: nowrap; }
+.service-shutdown-button:hover:not(:disabled) { border-color: var(--wb-accent); background: var(--wb-accent-soft); }
+.service-shutdown-button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 1200px) { .service-status-uptime { display: none; } }
+@media (max-width: 760px) { .wb-topbar { flex-wrap: wrap; padding-block: 12px; gap: 12px; } .service-status-strip { order: 3; width: 100%; justify-content: flex-start; padding-top: 10px; border-top: 1px solid var(--wb-line); } .service-status-uptime { display: inline; } .wb-topbar-actions { margin-left: auto; } }

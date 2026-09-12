@@ -6,7 +6,8 @@ export async function verifyServiceData(directory, url) {
   const db = new DatabaseSync(path.join(directory, 'cockpit.db'), { readOnly: true });
   let projects;
   try {
-    projects = db.prepare('SELECT id FROM projects').all();
+    const hasRemovedAt = db.prepare('PRAGMA table_info(projects)').all().some((column) => column.name === 'removed_at');
+    projects = db.prepare(`SELECT id FROM projects${hasRemovedAt ? ' WHERE removed_at IS NULL' : ''}`).all();
   } finally {
     db.close();
   }

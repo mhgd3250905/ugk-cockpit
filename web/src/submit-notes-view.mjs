@@ -368,6 +368,21 @@ function SubmitNoteCard({
     copyField.current?.select();
   }
 
+  function copyControls(location) {
+    return e('div', { className: `note-copy-controls note-copy-controls-${location}` },
+      e(Button, {
+        variant: location === 'detail' ? 'primary' : 'soft', size: 'sm',
+        onClick: handleCopy, disabled: copying, 'aria-busy': copying,
+        title: '复制说明与处理指令，只读操作不改变状态',
+      }, copying ? '正在复制…' : '复制说明'),
+      e('button', {
+        type: 'button', className: 'note-manual-copy', disabled: !item.copyText,
+        onClick: () => setManualCopyOpen(true),
+      }, '手动复制'),
+      e('span', { className: 'note-copy-feedback', role: 'status', 'aria-live': 'polite', 'aria-atomic': true }, copyStatus)
+    );
+  }
+
   const source = item.source || {};
   const references = Array.isArray(item.references) ? item.references : [];
 
@@ -397,15 +412,17 @@ function SubmitNoteCard({
         e('span', { className: 'note-open-label' }, actionError ? '操作待确认 · 查看详情 →' : '查看说明 →')
       )
     ),
+    copyControls('list'),
     e(Dialog, { open: detailOpen, onOpenChange: setDetailOpen },
       e(DialogContent, { className: 'ugk-dialog note-detail-dialog', closeButton: true, closeLabel: '关闭工作说明' },
-        e(DialogHeader, null,
+        e(DialogHeader, { className: 'note-detail-header' },
           e('div', { className: 'note-summary-top' },
             e(Badge, { variant: 'soft', size: 'sm' }, noteStatusLabel(item.status)),
             e('time', { dateTime: item.createdAt }, formatNoteTime(item.createdAt))
           ),
           e(DialogTitle, null, item.title || '无标题工作说明'),
-          e(DialogDescription, null, source.projectName || '工作说明', ' · 查看说明、引用与处理记录')
+          e(DialogDescription, null, source.projectName || '工作说明', ' · 查看说明、引用与处理记录'),
+          copyControls('detail')
         ),
         e(DialogBody, { className: 'note-detail-body' },
     e('div', { className: 'note-disclaimer', role: 'note' },
@@ -487,14 +504,6 @@ function SubmitNoteCard({
     ),
     e('footer', { className: 'note-card-actions' },
       e('div', { className: 'note-action-buttons' },
-        e(Button, {
-          variant: 'soft',
-          size: 'sm',
-          onClick: handleCopy,
-          disabled: copying,
-          'aria-busy': copying,
-          title: '复制说明与处理指令，只读操作不改变状态',
-        }, '复制说明'),
         item.status === 'pending' && [
           e(Button, {
             key: 'handle-btn',
@@ -560,13 +569,6 @@ function SubmitNoteCard({
           item.archivedAt && e('div', null, e('dt', null, '归档时间'), e('dd', null, item.archivedAt))
         )
       )
-    ),
-    e('div', { className: 'note-copy-feedback' },
-      e('span', { role: 'status', 'aria-live': 'polite', 'aria-atomic': true }, copyStatus),
-      e('button', {
-        type: 'button', className: 'note-manual-copy', disabled: !item.copyText,
-        onClick: () => setManualCopyOpen(true),
-      }, '手动复制')
     ),
         )
       )

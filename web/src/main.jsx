@@ -1748,6 +1748,7 @@ function App() {
 
   return (
     <WorkbenchShell
+      serviceApi={api}
       projects={projects}
       guideActive={route.kind === 'guide'}
       onGuide={() => { window.location.hash = '/guide'; }}
@@ -2491,11 +2492,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                               <Button variant={closed || space.status === 'cleanup_ready' ? 'primary' : 'soft'} size="sm" onClick={() => onReuseSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
                                 重新开始
                               </Button>
-                              <details className="space-more"><summary aria-label={`${space.name}的更多操作`}>···</summary><div>
-                              <Button variant="soft" size="sm" className="workspace-remove-button" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
-                                删除空间
+                              <Button variant="soft" size="sm" className="workspace-remove-button space-delete-action" aria-label={`删除开发空间：${space.name}`} title="删除开发空间" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
+                                </svg>
                               </Button>
-                              </div></details>
                             </>
                           )}
                         </div>
@@ -2816,7 +2817,7 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
   const mainLane = lanes.find((lane) => lane.role === 'main') || lanes[0];
   const activeLaneKeys = new Set(entries.flatMap((entry) => [entry.laneKey, entry.sourceLaneKey].filter(Boolean)));
   const focusOpacity = (laneKey) => (
-    focusedLaneKey && focusedLaneKey !== laneKey ? 0.28 : 1
+    focusedLaneKey && focusedLaneKey !== laneKey ? 0.12 : 1
   );
   const paths = [];
 
@@ -2913,7 +2914,7 @@ function TimelineGraph({ geometry, entries, lanes, focusedLaneKey }) {
             ? lane.color
             : 'var(--timeline-connector)',
           opacity: focusedLaneKey
-            ? (focusedLaneKey === entry.laneKey ? 0.9 : 0.55)
+            ? (focusedLaneKey === entry.laneKey ? 1 : 0.2)
             : 0.75,
         }}
       />,

@@ -34,6 +34,7 @@ try {
     token,
     host: '127.0.0.1',
     port: 41737,
+    onShutdown: () => stop(),
   });
   process.stdout.write(`UGK Cockpit Phase 0 service: http://${service.host}:${service.port}\n`);
   let stopping = false;

@@ -2500,9 +2500,32 @@ export async function createCockpitHttpServer({
   createGitWorktree,
   checkBranchExists,
   diagnosticLogDirectory = path.join(path.dirname(dbPath), 'logs'),
+  onShutdown,
 }) {
   if (!token || token.length < 32) throw new Error('A local API token of at least 32 characters is required.');
   const db = openCockpitDatabase(dbPath);
+  const startedAt = new Date().toISOString();
+  const startedClock = performance.now();
+  const activeRequests = new Set();
+  let closing;
+  function close() {
+    closing ??= (async () => {
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+        server.closeIdleConnections();
+      });
+      // Disconnected clients can leave an asynchronous write handler running.
+      // Keep the database open until these handlers have finished as well.
+      await Promise.allSettled([...activeRequests]);
+      if (folderPicker === selectFolder) {
+        try { await closeFolderPicker(); } catch {}
+      } else if (typeof folderPicker?.close === 'function') {
+        try { await folderPicker.close(); } catch {}
+      }
+      db.close();
+    })();
+    return closing;
+  }
   const activeFolderGrants = folderGrants ?? new FolderGrantStore({ db });
   const activeEmptyFolderGrants = emptyFolderGrants ?? new EmptyFolderGrantStore({ db });
   const browserSessionToken = randomBytes(32).toString('base64url');
@@ -3010,7 +3033,8 @@ export async function createCockpitHttpServer({
     return result;
   }
 
-  const server = createServer((request, response) => withCommandActor({ kind: 'unattributed' }, async () => {
+  const server = createServer((request, response) => {
+    const handling = withCommandActor({ kind: 'unattributed' }, async () => {
     try {
       const currentPort = server.address().port;
       const url = new URL(request.url, `http://${host}:${currentPort}`);
@@ -3244,6 +3268,29 @@ export async function createCockpitHttpServer({
         && !['/api/v1/mcp/work/context', '/api/v1/mcp/work/submit/preflight',
           '/api/v1/mcp/submit-notes/get'].includes(url.pathname)) {
         sendError(response, 'CONVERSATION_IDENTITY_REQUIRED'); return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/v1/service/status') {
+        sendJson(response, 200, {
+          ok: true, version: VERSION, startedAt,
+          uptimeSeconds: Math.floor((performance.now() - startedClock) / 1000),
+          status: closing ? 'stopping' : 'running',
+        });
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/service/shutdown') {
+        if (authentication.kind !== 'browser') { sendError(response, 'AUTH_REQUIRED'); return; }
+        const body = await readJson(request);
+        if (body.userConfirmed !== true || Object.keys(body).some((key) => key !== 'userConfirmed')) {
+          sendError(response, 'INVALID_REQUEST'); return;
+        }
+        response.once('finish', () => {
+          Promise.resolve().then(() => onShutdown ? onShutdown() : close()).catch((error) => {
+            process.stderr.write(`[ugk-cockpit] graceful shutdown failed: ${error?.code ?? 'UNKNOWN'}\n`);
+          });
+        });
+        sendJson(response, 202, { ok: true, status: 'stopping' });
+        return;
       }
 
       const controlMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/conversation-control(?:\/([^/]+)\/(transfer|cancel))?$/);
@@ -4978,7 +5025,13 @@ export async function createCockpitHttpServer({
         context: error?.context,
       });
     }
-  }));
+    });
+    activeRequests.add(handling);
+    handling.then(
+      () => activeRequests.delete(handling),
+      () => { activeRequests.delete(handling); response.destroy(); },
+    );
+  });
 
   try {
     await new Promise((resolve, reject) => {
@@ -4993,18 +5046,6 @@ export async function createCockpitHttpServer({
   return {
     host,
     port: server.address().port,
-    async close() {
-      server.closeIdleConnections();
-      server.closeAllConnections();
-      await new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-      if (folderPicker === selectFolder) {
-        try { await closeFolderPicker(); } catch {}
-      } else if (typeof folderPicker?.close === 'function') {
-        try { await folderPicker.close(); } catch {}
-      }
-      db.close();
-    },
+    close,
   };
 }
