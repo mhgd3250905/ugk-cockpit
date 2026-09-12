@@ -3123,7 +3123,18 @@ export async function createCockpitHttpServer({
           if (session.expiresAt <= now) mcpSessions.delete(candidate);
         }
         if (mcpSessions.size >= MCP_SESSION_LIMIT) {
-          mcpSessions.delete(mcpSessions.keys().next().value);
+          // Evict the earliest-expiring session rather than the first
+          // inserted one: a burst of anonymous registrations should push out
+          // stale tokens first, not the newest legitimate ones.
+          let oldestKey = null;
+          let oldestExpiry = Infinity;
+          for (const [candidate, session] of mcpSessions) {
+            if (session.expiresAt < oldestExpiry) {
+              oldestExpiry = session.expiresAt;
+              oldestKey = candidate;
+            }
+          }
+          if (oldestKey !== null) mcpSessions.delete(oldestKey);
         }
         const scopedToken = randomBytes(32).toString('base64url');
         const expiresAt = now + MCP_SESSION_TTL_MS;
@@ -3324,15 +3335,17 @@ export async function createCockpitHttpServer({
           error.code = 'INVALID_REQUEST';
           throw error;
         }
-        const grant = activeFolderGrants.claim(
-          body.grantId,
-          body.commandId,
-          authentication.principalHash,
-        );
+        // Replay check must precede the grant claim: the command journal is
+        // the idempotency source of truth, and a retry that arrives after the
+        // 5-minute grant TTL would otherwise surface as FOLDER_GRANT_EXPIRED
+        // even though the project was already registered. Mirrors the order
+        // used by workspace creation (beginCommand replay before claim).
         const replay = readCommand(db, body.commandId);
         if (replay?.kind === 'project.register' && ['committed', 'failed'].includes(replay.state)) {
           const frozen = JSON.parse(replay.request_json);
-          const expectedName = body.name?.trim() || path.basename(grant.canonical_path);
+          const grantRow = db.prepare('SELECT canonical_path FROM folder_grants WHERE id = ?')
+            .get(body.grantId);
+          const expectedName = body.name?.trim() || path.basename(grantRow?.canonical_path ?? frozen.name);
           if (
             frozen.grantId !== body.grantId
             || frozen.name !== expectedName
@@ -3343,11 +3356,16 @@ export async function createCockpitHttpServer({
             throw error;
           }
           activeFolderGrants.complete(body.grantId, body.commandId);
-            const result = parseCommandResponse(replay);
-            if (result.ok) sendJson(response, 200, result);
-            else sendError(response, result.code, { commandId: body.commandId });
-            return;
+          const result = parseCommandResponse(replay);
+          if (result.ok) sendJson(response, 200, result);
+          else sendError(response, result.code, { commandId: body.commandId });
+          return;
         }
+        const grant = activeFolderGrants.claim(
+          body.grantId,
+          body.commandId,
+          authentication.principalHash,
+        );
         const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
         await assertRepositoryAllowedForProbe(binding.candidateReal);
         const observation = await probe(binding.candidateReal);
@@ -3818,6 +3836,11 @@ export async function createCockpitHttpServer({
           } else {
             response.destroy();
           }
+        });
+        // pipe() never destroys the source when the client disconnects;
+        // tear the read stream down alongside the response either way.
+        response.on('close', () => {
+          stream.destroy();
         });
         stream.pipe(response);
         return;
@@ -4692,38 +4715,52 @@ export async function createCockpitHttpServer({
         });
         const acknowledgements = body.acknowledgements ?? [];
         assertConversationWrite(key, body.sessionId, ['active', 'completed', 'blocked', 'abandoned']);
-        const result = finishRun(db, {
-          commandId: id('mcp_finish', `${body.sessionId}:${body.clientRequestId}`),
-          runId: body.sessionId,
-          expectedRevision: body.expectedRevision,
-          leaseGeneration: context.run.leaseGeneration,
-          outcome: body.outcome,
-          summary: body.summary,
-          nextStep: body.nextStep,
-          commitRefs: acknowledgements
-            .filter((value) => value.startsWith('commit:'))
-            .map((value) => value.slice('commit:'.length)),
-          acknowledgeUnattributed: acknowledgements.includes('unattributed_changes'),
-          finalSnapshot: toSnapshot(observation),
-        }, { faultInjector });
-        if (!result.ok) {
-          sendError(response, result.code, {
-            extra: { session_id: body.sessionId, receipt_id: result.receiptId ?? null },
+        // The run terminal state, lease release, and the assignment terminal
+        // state must commit together: a half-applied finish would leave an
+        // active assignment pointing at a finished run whose lease is gone.
+        let result;
+        try {
+          result = withImmediateTransaction(db, () => {
+            const finished = finishRun(db, {
+              commandId: id('mcp_finish', `${body.sessionId}:${body.clientRequestId}`),
+              runId: body.sessionId,
+              expectedRevision: body.expectedRevision,
+              leaseGeneration: context.run.leaseGeneration,
+              outcome: body.outcome,
+              summary: body.summary,
+              nextStep: body.nextStep,
+              commitRefs: acknowledgements
+                .filter((value) => value.startsWith('commit:'))
+                .map((value) => value.slice('commit:'.length)),
+              acknowledgeUnattributed: acknowledgements.includes('unattributed_changes'),
+              finalSnapshot: toSnapshot(observation),
+            }, { faultInjector, inTransaction: true });
+            if (!finished.ok) throw new AtomicHandoffAbort(finished);
+
+            const completed = completeAssignment(db, body, { inTransaction: true });
+            if (!completed.ok) throw new AtomicHandoffAbort(completed);
+
+            return { finished, completed };
+          });
+        } catch (error) {
+          if (!(error instanceof AtomicHandoffAbort)) throw error;
+          sendError(response, error.result.code, {
+            extra: {
+              session_id: body.sessionId,
+              receipt_id: error.result.receiptId ?? null,
+            },
           });
           return;
         }
-        const completed = completeAssignment(db, body);
-        if (!completed.ok) {
-          sendError(response, completed.code, { extra: { session_id: body.sessionId } });
-          return;
-        }
+        faultInjector?.('finish.after_transaction_commit_before_response');
+        const { finished, completed } = result;
         sendJson(response, 200, {
           ok: true,
           assignmentId: completed.assignmentId,
           sessionId: body.sessionId,
           status: completed.status,
           revision: completed.revision,
-          receiptId: result.receiptId,
+          receiptId: finished.receiptId,
           cockpitVerified: true,
           summary: body.summary,
           nextStep: body.nextStep,

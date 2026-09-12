@@ -1012,26 +1012,30 @@ test('createMcpServer stdio protocol loop: verifies single-line JSON on stdout a
     assert.ok('id' in parsed);
   }
 
-  const r1 = JSON.parse(lines[0]);
-  assert.strictEqual(r1.id, 101);
+  // Responses are matched by JSON-RPC id; dispatch is concurrent, so the
+  // arrival order is not part of the contract — only the id-keyed payloads
+  // are. Both untyped errors share id:null, so they are keyed by error code.
+  const parsedLines = lines.map((line) => JSON.parse(line));
+  const responseFor = (id, errorCode = null) => {
+    const found = parsedLines.find((message) => message.id === id
+      && (errorCode === null || message.error?.code === errorCode));
+    assert.ok(found, `expected a response for id ${JSON.stringify(id)} code ${JSON.stringify(errorCode)}`);
+    return found;
+  };
+
+  const r1 = responseFor(101);
   assert.strictEqual(r1.result.serverInfo.name, 'ugk-cockpit');
 
-  const r2 = JSON.parse(lines[1]);
-  assert.strictEqual(r2.id, null);
-  assert.strictEqual(r2.error.code, -32700);
+  const r2 = responseFor(null, -32700);
 
-  const r3 = JSON.parse(lines[2]);
-  assert.strictEqual(r3.id, 102);
+  const r3 = responseFor(102);
   assert.deepEqual(JSON.parse(r3.result.content[0].text), { accepted: true, dispatchCode: 'D-123' });
 
-  const r4 = JSON.parse(lines[3]);
-  assert.strictEqual(r4.id, 103);
+  const r4 = responseFor(103);
   assert.strictEqual(r4.result.isError, true);
   assert.match(r4.result.content[0].text, /暂时无法完成/);
 
-  const r5 = JSON.parse(lines[4]);
-  assert.strictEqual(r5.id, null);
-  assert.strictEqual(r5.error.code, -32600);
+  const r5 = responseFor(null, -32600);
 
   // Verify stderr received diagnostics
   assert.match(stderrBuffer, /JSON parse error/);

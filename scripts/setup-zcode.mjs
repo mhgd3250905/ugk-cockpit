@@ -5,6 +5,7 @@ import path from 'node:path';
 import { setupCodex } from './setup-codex.mjs';
 import { COCKPIT_SKILL_NAMES } from './install-cockpit-skills.mjs';
 import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
+import '../src/core/exec-guard.mjs';
 
 // POSIX executables usually have no extension at all. Probing only `zcode.exe`
 // and `zcode.cjs` made the documented remedy — pointing ZCODE_CLI_PATH at the

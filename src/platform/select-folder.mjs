@@ -1,6 +1,7 @@
 import { spawn as defaultSpawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
+import '../core/exec-guard.mjs';
 
 const WINDOWS_PICKER_SCRIPT = fileURLToPath(new URL('./windows-folder-picker.ps1', import.meta.url));
 
@@ -10,15 +11,19 @@ function pickerError(code, message, cause) {
   return error;
 }
 
+const WORKER_READY_TIMEOUT_MS = 15_000;
+
 export class ResidentFolderPicker {
   constructor({
     platform = process.platform,
     spawn = defaultSpawn,
     scriptPath = WINDOWS_PICKER_SCRIPT,
+    readyTimeoutMs = WORKER_READY_TIMEOUT_MS,
   } = {}) {
     this._platform = platform;
     this._spawn = spawn;
     this._scriptPath = scriptPath;
+    this._readyTimeoutMs = readyTimeoutMs;
     this._child = null;
     this._rl = null;
     this._readyPromise = null;
@@ -47,6 +52,21 @@ export class ResidentFolderPicker {
       resolveReady = resolve;
       rejectReady = reject;
     });
+
+    // A worker that starts but never prints `ready` (antivirus scan, a stuck
+    // WinForms init) must not park the selection queue forever: the caller's
+    // `timeout` only covers the pick phase, so the ready wait needs its own
+    // hard deadline. Timing out tears the worker down like an exit would.
+    const readyTimer = setTimeout(() => {
+      rejectReady(pickerError(
+        'FOLDER_PICKER_UNAVAILABLE',
+        `Native folder picker did not become ready within ${this._readyTimeoutMs}ms.`,
+      ));
+      this._cleanup();
+    }, this._readyTimeoutMs);
+    readyTimer.unref?.();
+    const clearReadyTimer = () => clearTimeout(readyTimer);
+    this._readyPromise.then(clearReadyTimer, clearReadyTimer);
 
     try {
       const child = this._spawn(
