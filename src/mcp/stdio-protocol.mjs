@@ -1482,18 +1482,19 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
     }
   };
 
-  let queue = Promise.resolve();
-
+  // JSON-RPC responses are matched by id, so lines may be dispatched
+  // concurrently: a slow tools/call (network submit, up to the 30s transport
+  // timeout) must not block host liveness probes (ping) queued behind it.
+  // Failures stay per-message so one broken dispatch never takes the bridge
+  // down; ordering guarantees are the host's job via request ids.
   rl.on('line', (line) => {
-    queue = queue
-      .then(() => handleLine(line))
-      .catch((err) => {
-        if (errStream?.write) {
-          try {
-            errStream.write(`[ugk-mcp] Unhandled error: ${err?.message || err}\n`);
-          } catch {}
-        }
-      });
+    handleLine(line).catch((err) => {
+      if (errStream?.write) {
+        try {
+          errStream.write(`[ugk-mcp] Unhandled error: ${err?.message || err}\n`);
+        } catch {}
+      }
+    });
   });
 
   return {

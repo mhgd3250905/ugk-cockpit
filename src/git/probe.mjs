@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import '../core/exec-guard.mjs';
 import { remoteAuthArguments } from './remote-auth.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -93,7 +94,10 @@ export function safeGitEnvironment() {
 
 export async function git(cwd, args, {
   timeoutMs = 5_000,
-  maxBuffer = 2 * 1024 * 1024,
+  // `ls-files --stage -z` on a mid-size repository easily exceeds 2MB
+  // (~120 bytes/file); 8MB covers roughly 60k tracked files before the
+  // probe degrades into a max-buffer error.
+  maxBuffer = 8 * 1024 * 1024,
   acceptExitCodes = [0],
   config = [],
 } = {}) {

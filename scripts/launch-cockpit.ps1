@@ -290,6 +290,11 @@ if ([string]::IsNullOrWhiteSpace($DataDirectory) -and (Test-Path -LiteralPath $s
     throw 'Saved service data directory must be an absolute path.'
   }
 }
+if ($DataDirectory -match '["\r\n]') {
+  # The value is interpolated into a quoted node.exe argument string below;
+  # quote or newline characters would let a tampered file inject arguments.
+  throw 'Service data directory must not contain quote or newline characters.'
+}
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
   $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
   if ([string]::IsNullOrWhiteSpace($localAppData)) {

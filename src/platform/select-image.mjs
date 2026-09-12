@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import '../core/exec-guard.mjs';
 
 const execFileAsync = promisify(execFile);
 const WINDOWS_PICKER_SCRIPT = fileURLToPath(new URL('./windows-image-picker.ps1', import.meta.url));
