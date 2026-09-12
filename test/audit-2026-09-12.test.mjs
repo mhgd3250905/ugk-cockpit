@@ -31,7 +31,9 @@ function gitSync(cwd, args) {
 function createCommitFixture(t, prefix) {
   const root = mkdtempSync(path.join(fixtureTempRoot(), prefix));
   t.after(() => {
-    try { rmSync(root, { recursive: true, force: true }); } catch {}
+    // Windows keeps handles briefly alive after child git processes exit;
+    // retry so a slow release does not leak the fixture into the temp root.
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {}
   });
   gitSync(root, ['init', '-b', 'main', root]);
   gitSync(root, ['config', 'user.email', 'ugk@example.invalid']);
@@ -301,7 +303,7 @@ test('probeGitWorktree inherits the wider git buffer for mid-size repositories',
   });
   assert.ok(lsFiles.length > 2 * 1024 * 1024, `fixture output only ${lsFiles.length} bytes`);
 
-  const observation = await probeGitWorktree(root);
+  const observation = await probeGitWorktree(root, { timeoutMs: 20_000 });
   assert.equal(observation.coherence, 'coherent');
 });
 
@@ -343,12 +345,12 @@ test('anonymous MCP session burst evicts the oldest token, newest sessions survi
 
 test('launcher rejects quote characters in the data directory before spawning node', { skip: process.platform !== 'win32' && 'launcher validation runs Windows PowerShell' }, async (t) => {
   const { spawn } = await import('node:child_process');
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url));
   const result = await new Promise((resolve) => {
     const child = spawn('powershell.exe', [
       '-NoProfile', '-ExecutionPolicy', 'Bypass',
       '-File', path.join(repoRoot, 'scripts', 'launch-cockpit.ps1'),
-      '-DataDirectory', 'C:\temp" --evil-arg "injected',
+      '-DataDirectory', 'C:\\temp" --evil-arg "injected',
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stderrText = '';
     child.stderr.on('data', (chunk) => { stderrText += chunk.toString(); });

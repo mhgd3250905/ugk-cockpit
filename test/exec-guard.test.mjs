@@ -21,7 +21,7 @@ test('exec guard removes the parent cwd from executable resolution on Windows', 
   // of executing the decoy.
   const dir = mkdtempSync(path.join(tmpdir(), 'ugk-exec-guard-'));
   t.after(() => process.chdir(import.meta.dirname));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   copyFileSync(path.join(process.env.SystemRoot, 'System32', 'hostname.exe'), path.join(dir, 'git.exe'));
   process.chdir(dir);
 
