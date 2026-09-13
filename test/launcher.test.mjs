@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -761,4 +761,131 @@ server.listen(${port}, '127.0.0.1');
   await terminateProcessTree(servicePid);
   await waitForPidExit(servicePid);
   servicePid = null;
+});
+
+// --- POSIX launcher (launch-cockpit.sh) ---
+const launcherShPath = path.join(repoRoot, 'launch-cockpit.sh');
+const posixSkip = process.platform === 'win32' && 'the POSIX launcher is validated on POSIX platforms';
+
+function randomListenPort() {
+  return 41000 + Math.floor(Math.random() * 20_000);
+}
+
+function runLauncherSh(envOverrides, timeoutMs = CHILD_TIMEOUT_MS) {
+  return runCaptured('/bin/sh', [launcherShPath], {
+    cwd: repoRoot,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...envOverrides,
+    },
+  }, timeoutMs);
+}
+
+test('POSIX launcher rejects an unsupported Node runtime before touching anything', { timeout: 30_000, skip: posixSkip }, async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-node-'));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const fakeBin = path.join(tempDir, 'bin');
+  mkdirSync(fakeBin, { recursive: true });
+  const fakeNode = path.join(fakeBin, 'node');
+  writeFileSync(fakeNode, '#!/bin/sh\nif [ "$1" = "-p" ]; then echo 20; else echo "v20.11.0"; fi\n');
+  chmodSync(fakeNode, 0o755);
+
+  // HOME 指向临时目录，防止回退到真实的 ~/.local/node。
+  const result = await runLauncherSh({
+    PATH: fakeBin,
+    HOME: tempDir,
+    UGK_COCKPIT_DATA: path.join(tempDir, 'data'),
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  });
+
+  assert.equal(result.status, 1, `expected refusal, got: ${result.stdout} ${result.stderr}`);
+  assert.match(`${result.stdout}${result.stderr}`, /\[ERROR\] 需要 Node\.js/);
+  assert.ok(!existsSync(path.join(tempDir, 'data', 'service.lock')), 'refused run must not create a data directory lock');
+});
+
+test('POSIX launcher reuses a healthy matching-version service without starting a new one', { timeout: 30_000, skip: posixSkip }, async (t) => {
+  const port = randomListenPort();
+  const expectedVersion = readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim();
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', version: expectedVersion }));
+  });
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+  t.after(async () => closeHttpServer(server));
+
+  const result = await runLauncherSh({
+    UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  });
+
+  assert.equal(result.status, 0, `expected reuse, got: ${result.stdout} ${result.stderr}`);
+  assert.match(result.stdout, /直接复用/);
+  assert.doesNotMatch(result.stdout, /\[START\]/, 'a healthy matching service must never be replaced');
+});
+
+test('POSIX launcher refuses to replace a port occupied by an unverifiable process', { timeout: 30_000, skip: posixSkip }, async (t) => {
+  const port = randomListenPort();
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ foreignApp: 'unrelated-service' }));
+  });
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+  t.after(async () => closeHttpServer(server));
+
+  const result = await runLauncherSh({
+    UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  });
+
+  assert.equal(result.status, 1, `expected refusal, got: ${result.stdout} ${result.stderr}`);
+  assert.match(result.stdout, /无法验证.*UGK Cockpit|本脚本不会替换运行中的服务/);
+  const ping = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2_000) }).then((response) => response.json());
+  assert.equal(ping.foreignApp, 'unrelated-service', 'the foreign process must stay untouched');
+});
+
+test('POSIX launcher starts an isolated service and passes readiness plus project acceptance', { timeout: 60_000, skip: posixSkip }, async (t) => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-posix-'));
+  const dataDir = path.join(tempDir, 'data');
+  const port = randomListenPort();
+  let servicePid = null;
+  t.after(async () => {
+    if (servicePid !== null) {
+      await terminateProcessTree(servicePid);
+      await waitForPidExit(servicePid);
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const result = await runLauncherSh({
+    UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_DATA: dataDir,
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  }, 45_000);
+
+  assert.equal(result.status, 0, `launcher failed: ${result.stdout} ${result.stderr}`);
+  assert.match(result.stdout, /\[OK\] UGK Cockpit 已启动/);
+  assert.ok(result.stdout.includes(dataDir), 'launcher must report the data directory it used');
+  servicePid = Number(/PID: (\d+)/.exec(result.stdout)?.[1]);
+  assert.ok(Number.isInteger(servicePid) && servicePid > 0, 'launcher must report the service PID');
+
+  // AGENTS.md 验收：启动后必须核对项目列表及详情，不能只凭 /health 200。
+  const health = await waitForHttp(`http://127.0.0.1:${port}/health`, (response, body) => {
+    try { return JSON.parse(body).status === 'ok'; } catch { return false; }
+  });
+  assert.ok(health, 'service must answer /health');
+  assert.equal(JSON.parse(health.body).version, readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim());
+
+  const token = readFileSync(path.join(dataDir, 'api-token'), 'utf8').trim();
+  assert.ok(token.length >= 32, 'service must have provisioned its API token');
+  const headers = { authorization: `Bearer ${token}` };
+  const dashboard = await fetch(`http://127.0.0.1:${port}/api/v1/dashboard`, { headers });
+  assert.equal(dashboard.status, 200);
+  const dashboardBody = await dashboard.json();
+  assert.equal(dashboardBody.ok, true);
+  assert.deepStrictEqual(dashboardBody.projects, [], 'fresh fixture must report an empty project list');
+
+  const detail = await fetch(`http://127.0.0.1:${port}/api/v1/projects/fixture-nonexistent`, { headers });
+  assert.equal(detail.status, 404);
+  assert.equal((await detail.json()).code, 'PROJECT_NOT_FOUND');
 });

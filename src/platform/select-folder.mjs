@@ -4,6 +4,9 @@ import readline from 'node:readline';
 
 const WINDOWS_PICKER_SCRIPT = fileURLToPath(new URL('./windows-folder-picker.ps1', import.meta.url));
 
+// Same localized title as the Windows IFileOpenDialog helper.
+const MACOS_FOLDER_SCRIPT = 'POSIX path of (choose folder with prompt "选择要添加到 UGK Cockpit 的项目文件夹")';
+
 function pickerError(code, message, cause) {
   const error = new Error(message, { cause });
   error.code = code;
@@ -31,8 +34,11 @@ export class ResidentFolderPicker {
   }
 
   _ensureWorker() {
+    // macOS opens one osascript process per pick (NSOpenPanel dies with it),
+    // so there is no resident worker to keep alive.
+    if (this._platform === 'darwin') return Promise.resolve();
     if (this._platform !== 'win32') {
-      const error = new Error('Native folder selection is only implemented for Windows.');
+      const error = new Error('Native folder selection is only implemented for Windows and macOS.');
       error.code = 'FOLDER_PICKER_UNAVAILABLE';
       throw error;
     }
@@ -115,6 +121,60 @@ export class ResidentFolderPicker {
     return this._readyPromise;
   }
 
+  // One osascript process per pick. A user cancel exits 1 with Apple error
+  // -128 and maps to a cancelled result like the Windows helper's
+  // `{"ok":true,"path":null}`; any other failure is unavailable, not a retry
+  // hint, because e.g. a headless session will never grow a dialog.
+  _selectMacOSFolder(timeout) {
+    return new Promise((resolve, reject) => {
+      let child;
+      try {
+        child = this._spawn('osascript', ['-e', MACOS_FOLDER_SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (spawnError) {
+        reject(pickerError('FOLDER_PICKER_UNAVAILABLE', 'Native folder picker failed to start.', spawnError));
+        return;
+      }
+      const stdout = [];
+      const stderr = [];
+      let timedOut = false;
+      let settled = false;
+      const settle = (action, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        action(value);
+      };
+      const timer = timeout > 0 && timeout < Infinity
+        ? setTimeout(() => {
+          timedOut = true;
+          try { child.kill('SIGTERM'); } catch {}
+        }, timeout)
+        : null;
+      child.stdout?.on?.('data', (chunk) => stdout.push(chunk));
+      child.stderr?.on?.('data', (chunk) => stderr.push(chunk));
+      child.on('error', (err) => settle(reject, pickerError('FOLDER_PICKER_UNAVAILABLE', 'Native folder picker failed to start.', err)));
+      // `close` fires after the stdio streams flush; `exit` can beat the data.
+      child.on('close', (code, signal) => {
+        if (timedOut || signal) {
+          settle(reject, pickerError('FOLDER_PICKER_TIMEOUT', 'Native folder picker did not return in time.'));
+          return;
+        }
+        const text = Buffer.concat(stdout).toString('utf8').trim();
+        if (text) {
+          // POSIX paths keep their trailing "/" only for the filesystem root.
+          settle(resolve, text.replace(/\/+$/, '') || '/');
+          return;
+        }
+        const errorText = Buffer.concat(stderr).toString('utf8');
+        if (code === 0 || /-128\b/.test(errorText) || /User canceled/i.test(errorText)) {
+          settle(resolve, null);
+          return;
+        }
+        settle(reject, pickerError('FOLDER_PICKER_UNAVAILABLE', 'Native folder picker failed.', new Error(errorText.slice(0, 400))));
+      });
+    });
+  }
+
   _cleanup() {
     if (this._rl) {
       try { this._rl.close(); } catch {}
@@ -135,6 +195,7 @@ export class ResidentFolderPicker {
   async selectFolder({ timeout = 120_000 } = {}) {
     const runSelection = async () => {
       await this._ensureWorker();
+      if (this._platform === 'darwin') return this._selectMacOSFolder(timeout);
 
       return new Promise((resolve, reject) => {
         let timer = null;

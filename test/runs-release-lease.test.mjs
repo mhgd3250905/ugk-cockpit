@@ -3,7 +3,7 @@
 // （assignment/聊天绑定/转交记录）必须走工作台转交协议，释放被拒绝且原状
 // 保留。覆盖核心 fencing/确认日志/崩溃重放语义与 HTTP 路由门禁。
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -37,6 +37,12 @@ function baseline(marker) {
   };
 }
 
+// POSIX 的系统临时目录本身可能是符号链接；产品路径授权按契约拒绝穿越链接
+// 的路径，夹具必须建立在真实路径下。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 const START = {
   worktreeId: 'worktree-release',
   canonicalPath: 'E:\\fixture\\release',
@@ -56,7 +62,7 @@ function releaseRequest(overrides = {}) {
 }
 
 test('releaseOrphanedWriteRun：崩溃后释放租约并解除阻塞，fencing 与幂等成立', (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-core-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-release-core-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
 
@@ -186,7 +192,7 @@ function seedManagedWork(db, runId, worktreeId) {
 }
 
 test('受管理会话拒绝释放，待转交状态保持可取消、可接手', (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-managed-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-release-managed-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
   // 场景一：签发转交后，取消授权仍可用。
@@ -295,7 +301,7 @@ test('受管理会话拒绝释放，待转交状态保持可取消、可接手',
 });
 
 test('releaseOrphanedWriteRun：崩溃窗口内租约不丢失，同一命令可安全重放', (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-crash-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-release-crash-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
 
@@ -337,7 +343,7 @@ test('releaseOrphanedWriteRun：崩溃窗口内租约不丢失，同一命令可
 });
 
 test('POST /api/v1/runs/release-lease：路径授权、用户确认、fencing 与 MCP 拒绝', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-release-http-'));
+  const root = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-release-http-'));
   const fixtureRoot = path.join(root, 'projects');
   const worktreeDir = path.join(fixtureRoot, 'wt-a');
   mkdirSync(worktreeDir, { recursive: true });

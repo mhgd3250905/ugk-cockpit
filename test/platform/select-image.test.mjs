@@ -48,6 +48,55 @@ test('native image picker rejects non-Windows platforms with actionable error', 
   }), { code: 'IMAGE_PICKER_UNAVAILABLE' });
 });
 
+test('darwin image picker resolves the osascript POSIX path', async () => {
+  let invocation;
+  const selected = await selectImage({
+    platform: 'darwin',
+    run: async (file, args, options) => {
+      invocation = { file, args, options };
+      return { stdout: '/Users/dev/Pictures/avatar.png\n' };
+    },
+  });
+
+  assert.equal(selected, '/Users/dev/Pictures/avatar.png');
+  assert.equal(invocation.file, 'osascript');
+  assert.equal(invocation.args[0], '-e');
+  assert.match(invocation.args[1], /choose file of type/);
+  assert.equal(invocation.options.timeout, 120_000);
+});
+
+test('darwin image picker treats a user cancel as null', async () => {
+  const error = Object.assign(new Error('osascript failed'), {
+    stderr: 'execution error: User canceled. (-128)\n',
+  });
+  const selected = await selectImage({
+    platform: 'darwin',
+    run: async () => { throw error; },
+  });
+
+  assert.equal(selected, null);
+});
+
+test('darwin image picker timeout becomes an actionable public error', async () => {
+  const timeout = Object.assign(new Error('timed out'), { killed: true, signal: 'SIGTERM' });
+
+  await assert.rejects(selectImage({
+    platform: 'darwin',
+    run: async () => { throw timeout; },
+  }), { code: 'IMAGE_PICKER_TIMEOUT' });
+});
+
+test('darwin image picker maps other failures to FOLDER_PICKER_UNAVAILABLE', async () => {
+  const error = Object.assign(new Error('osascript failed'), {
+    stderr: 'execution error: Not authorized to send Apple events. (-1719)\n',
+  });
+
+  await assert.rejects(selectImage({
+    platform: 'darwin',
+    run: async () => { throw error; },
+  }), { code: 'IMAGE_PICKER_UNAVAILABLE' });
+});
+
 test('Windows helper uses OpenFileDialog with image filter and foreground owner', async () => {
   const helper = await readFile(helperUrl, 'utf8');
 

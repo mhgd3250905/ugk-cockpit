@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,7 +8,9 @@ import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import { VERSION } from '../src/version.mjs';
 
 async function fixture(t, options = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-service-lifecycle-'));
+  // POSIX 的系统临时目录（/tmp、/var）本身是符号链接；夹具必须使用 realpath
+  // 后的位置，否则 path-guard 会按 REPARSE_POINT 拒绝该路径，写入不会发生。
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'ugk-service-lifecycle-')));
   const dbPath = path.join(root, 'fixture.db');
   const token = 'service-lifecycle-fixture-token-12345678';
   const service = await createCockpitHttpServer({
@@ -23,7 +25,7 @@ async function fixture(t, options = {}) {
   });
   t.after(async () => {
     await service.close();
-    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(realpathSync(os.tmpdir())));
     assert.ok(path.basename(root).startsWith('ugk-service-lifecycle-'));
     rmSync(root, { recursive: true, force: true });
   });

@@ -1,24 +1,18 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { backupBeforeMigration } from './core/backup.mjs';
+import { resolveDataDirectory } from './core/data-directory.mjs';
 import { SUPPORTED_SCHEMA_VERSION } from './core/database.mjs';
 import { acquireInstanceLock } from './core/single-instance.mjs';
 import { loadOrCreateToken } from './core/token-file.mjs';
 import { createCockpitHttpServer } from './service/http-server.mjs';
 
-function dataDirectory() {
-  const index = process.argv.indexOf('--data-directory');
-  if (index !== -1) {
-    const directory = process.argv[index + 1];
-    if (!directory || !path.isAbsolute(directory)) throw new Error('--data-directory requires an absolute path.');
-    return path.resolve(directory);
-  }
-  const base = process.env.LOCALAPPDATA;
-  if (!base) throw new Error('LOCALAPPDATA is required on Windows.');
-  return path.join(base, 'UGK Cockpit');
-}
-
-const dataDir = dataDirectory();
+const dataDir = resolveDataDirectory({ argv: process.argv });
+// Launchers pass an explicit port for isolated verification runs; the normal
+// entry keeps the fixed well-known port.
+const portIndex = process.argv.indexOf('--port');
+const port = portIndex === -1 ? 41737 : Number(process.argv[portIndex + 1]);
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('--port requires an integer between 1 and 65535.');
 mkdirSync(dataDir, { recursive: true });
 const lock = acquireInstanceLock(path.join(dataDir, 'service.lock'));
 try {
@@ -33,7 +27,7 @@ try {
     dbPath,
     token,
     host: '127.0.0.1',
-    port: 41737,
+    port,
     onShutdown: () => stop(),
   });
   process.stdout.write(`UGK Cockpit Phase 0 service: http://${service.host}:${service.port}\n`);

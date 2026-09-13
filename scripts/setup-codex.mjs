@@ -5,6 +5,7 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyServiceData } from './verify-service-data.mjs';
 import { COCKPIT_SKILL_NAMES, defaultCodexSkillsRoot } from './install-cockpit-skills.mjs';
 import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
+import { resolveDataDirectory as resolveDefaultDataDirectory } from '../src/core/data-directory.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const serviceUrl = 'http://127.0.0.1:41737/';
@@ -80,8 +81,7 @@ export function resolveDataDirectory() {
     if (!path.isAbsolute(value)) throw new Error('Saved service data directory must be absolute.');
     return value;
   }
-  if (!process.env.LOCALAPPDATA) throw new Error('LOCALAPPDATA is required for the Windows service.');
-  return path.join(process.env.LOCALAPPDATA, 'UGK Cockpit');
+  return resolveDefaultDataDirectory();
 }
 
 async function probe() {
@@ -129,8 +129,12 @@ export async function setupCodex(options = {}, dependencies = {}) {
     ...dependencies,
   };
   const [major, minor] = deps.version.split('.').map(Number);
-  if (major !== 24 || !Number.isInteger(minor) || minor < 15) throw new Error('Node.js >=24.15.0 <25 is required.');
-  if (deps.platform !== 'win32') throw new Error('This installer currently supports Windows.');
+  if (major !== 24 || !Number.isInteger(minor) || minor < 15) {
+    throw new Error(`Node.js >=24.15.0 <25 is required (found ${deps.version || 'unknown'}). Install Node 24 and put it first on PATH, for example: export PATH="/opt/homebrew/opt/node@24/bin:$PATH" or export PATH="$HOME/.local/node/bin:$PATH", then retry.`);
+  }
+  if (!['win32', 'darwin', 'linux'].includes(deps.platform)) {
+    throw new Error(`This installer supports Windows, macOS, and Linux; "${deps.platform}" is not supported yet.`);
+  }
   if (!options.startOnly) {
     await deps.run('git', ['--version']);
     await deps.run('codex', ['plugin', 'add', '--help']);

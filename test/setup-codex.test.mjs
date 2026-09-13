@@ -57,11 +57,23 @@ test('dry run does not build, start or install', async () => {
 
 test('unsupported environment and missing Codex fail before mutations', async () => {
   const { calls, deps } = fixture();
-  await assert.rejects(setupCodex({}, { ...deps, version: '24.14.0' }), /24.15/);
+  await assert.rejects(setupCodex({}, { ...deps, version: '24.14.0' }), /24\.15/);
   await assert.rejects(setupCodex({}, { ...deps, version: '25.0.0' }), /<25/);
   assert.equal(calls.length, 0);
   deps.run = async () => { throw new Error('missing codex'); };
   await assert.rejects(setupCodex({}, deps), /missing codex/);
+  assert.equal(calls.length, 0);
+});
+
+test('macOS is a supported installer platform', async () => {
+  const { deps } = fixture();
+  const result = await setupCodex({ dryRun: true }, { ...deps, platform: 'darwin' });
+  assert.equal(result.status, 'plan');
+});
+
+test('platforms outside the supported list fail before mutations', async () => {
+  const { calls, deps } = fixture();
+  await assert.rejects(setupCodex({}, { ...deps, platform: 'sunos' }), /not supported/);
   assert.equal(calls.length, 0);
 });
 

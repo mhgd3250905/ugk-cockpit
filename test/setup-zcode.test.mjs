@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setupZcode, createZcodeClient, inspectZcodeLegacy, resolveZcodeCli } from '../scripts/setup-zcode.mjs';
@@ -131,6 +131,34 @@ test('the CLI resolver finds the platform-native executable name', (t) => {
   const resolved = resolveZcodeCli({ PATH: dir });
   assert.equal(resolved.file, target);
   assert.deepEqual(resolved.args, []);
+});
+
+test('the darwin CLI resolver falls back to the app bundle entry without PATH hits', () => {
+  const systemBundle = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+  const userBundle = path.join('/Users/x', 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
+
+  // A .cjs bundle entry is started through the node interpreter.
+  const system = resolveZcodeCli({ PATH: '' }, {
+    platform: 'darwin', home: '/Users/x',
+    exists: (candidate) => candidate === systemBundle,
+    stat: (candidate) => ({ isFile: () => candidate === systemBundle }),
+  });
+  assert.equal(system.file, process.execPath);
+  assert.deepEqual(system.args, [systemBundle]);
+
+  const user = resolveZcodeCli({ PATH: '' }, {
+    platform: 'darwin', home: '/Users/x',
+    exists: (candidate) => candidate === userBundle,
+    stat: (candidate) => ({ isFile: () => candidate === userBundle }),
+  });
+  assert.deepEqual(user.args, [userBundle]);
+});
+
+test('the darwin CLI resolver still finds the real bundled CLI on this machine', { skip: process.platform !== 'darwin' && 'requires macOS' }, (t) => {
+  const bundle = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+  if (!existsSync(bundle)) { t.skip('ZCode.app is not installed in /Applications'); return; }
+  const resolved = resolveZcodeCli({ PATH: '' });
+  assert.deepEqual(resolved.args, [bundle]);
 });
 
 test('a JS CLI entry is still started through the node interpreter', (t) => {

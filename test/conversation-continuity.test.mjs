@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -23,8 +24,14 @@ import { createDiagnosticLogger } from '../src/service/diagnostics.mjs';
 
 const TOKEN = 'conversation-continuity-service-token-'.padEnd(48, 'x');
 
+// POSIX 的系统临时目录本身可能是符号链接；产品路径授权按契约拒绝穿越链接
+// 的路径，夹具必须建立在真实路径下。
+function fixtureTempRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
 function fixtureRoot() {
-  return mkdtempSync(path.join(os.tmpdir(), 'ugk-conversation-continuity-'));
+  return mkdtempSync(path.join(fixtureTempRoot(), 'ugk-conversation-continuity-'));
 }
 
 function initGit(root) {

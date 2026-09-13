@@ -8,9 +8,9 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 > 帮我按照 docs/AGENT_INSTALL.md 安装 UGK Cockpit，包括全部技能、MCP 连接和本机服务。验证完成后，带我开始使用。
 
-已有本仓库的 Windows 用户，也可以在程序目录执行对应命令：
+已有本仓库的用户，也可以在程序目录执行对应命令（Windows 在 PowerShell、macOS 与 Linux 在终端中运行）：
 
-```powershell
+```sh
 # Codex
 npm run setup:codex
 
@@ -20,7 +20,7 @@ npm run setup:zcode
 
 安装器将准备工作台、安装包含全部技能和 MCP 的对应宿主插件，并复用已经正常运行的服务。若当前聊天需要重新连接才能加载工具，会明确提示；实际调用验证通过后才算可以使用。之后直接说“帮我打开 Cockpit”或“这个工具怎么用”即可。
 
-目前提供 Windows 下 Codex 和 ZCode 两个安装入口，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
+目前提供 Windows 与 macOS 下 Codex 和 ZCode 两个安装入口，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备；macOS 的宿主聊天内工具调用验收进度见该说明。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
 
 2026-09-06 已按工作台试用反馈调整项目卡片、宽屏比例、时间线摘要、返回导航及 Logo，并修复提示语与加载占位重叠。完整问题清单和验证结果见 [工作台试用反馈](docs/WORKBENCH_FEEDBACK.md)。
 
@@ -54,7 +54,7 @@ npm run setup:zcode
 
 首次使用外部代码目录需在系统选择器中授权。审核可在隔离副本中进行，不占用正在开发的主项目；实际接入仍需用户授权，并满足原有干净工作区与 `ff-only` 门禁。远程 Agent 必须能连接本机 MCP 才能直接登记；不可连接时只能返回待接入交付信息，不共享本机 token。需求、阶段计划及验收记录见 [统一送审](docs/UNIFIED_SUBMIT.md)。
 
-当前通过置顶的 Windows 系统选择器逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
+当前通过操作系统文件夹选择器（Windows 置顶对话框、macOS 系统对话框）逐个手动选择项目文件夹，不扫描工作区，也不自动导入项目。文件夹授权绑定路径和仓库身份，可在瞬时失败或 service 重启后安全恢复；浏览器会在写操作前安全续期，不重放写请求，也不会接触本地 API token。选择器由独立交互 helper 承载并保留硬超时，不会再让页面无限等待。
 
 项目卡片现在统一通过 init 指令“交给 AI”：空项目、刚派发的新任务和已经开发到一半的项目使用同一入口。Agent 调用 `$cockpit-init` 后，Skill 通过 MCP 建立 active session；Cockpit 将调用时的代码状态作为接入基线，保留全部已有改动，并在存在标准交接手册时一并返回最近上下文。接入前的改动不会被自动归属给 Agent。
 
@@ -77,14 +77,16 @@ Phase 0 已验证的基础能力继续保留：
 
 要求 Node.js 24，最低 24.15.0（`>=24.15.0 <25`）：
 
-```powershell
+```sh
 npm install
 npm run serve
 ```
 
-然后打开 `http://127.0.0.1:41737`。数据默认保存在 `%LOCALAPPDATA%\UGK Cockpit`；安装器的 `dataDirectory` 返回实际使用的路径。项目代码不会被 Cockpit 自动清理、提交、上传或删除。
+Windows 用户也可运行 `launch-cockpit.cmd`，macOS 用户可执行 `./launch-cockpit.sh`；启动器会处理数据目录定位、Node 版本检查、必要的前端构建和后台运行。
 
-脚本可用 `curl.exe http://127.0.0.1:41737/health` 免认证检查存活，响应包含 `status` 和 `version`。它不代表项目数据验收通过；受保护的 `/api/*` 接口仍需认证。浅克隆 `git clone --depth 1 https://github.com/mhgd3250905/ugk-cockpit.git` 可用于安装、运行及通常的后续更新；需要完整历史时执行 `git fetch --unshallow`。
+然后打开 `http://127.0.0.1:41737`。数据默认保存在 Windows 的 `%LOCALAPPDATA%\UGK Cockpit`、macOS 的 `~/Library/Application Support/UGK Cockpit`、Linux 的 `$XDG_DATA_HOME/UGK Cockpit`（未设置时为 `~/.local/share/UGK Cockpit`）；也可以用 `--data-directory` 指定其他位置，安装器的 `dataDirectory` 返回实际使用的路径。项目代码不会被 Cockpit 自动清理、提交、上传或删除。
+
+脚本可用 `curl http://127.0.0.1:41737/health` 免认证检查存活，响应包含 `status` 和 `version`。它不代表项目数据验收通过；受保护的 `/api/*` 接口仍需认证。浅克隆 `git clone --depth 1 https://github.com/mhgd3250905/ugk-cockpit.git` 可用于安装、运行及通常的后续更新；需要完整历史时执行 `git fetch --unshallow`。
 
 启动验收还需确认已有项目列表及详情正常，不能仅检查 HTTP 200。不得在服务运行时覆盖数据目录；遇到项目突然消失，先按[本机服务数据一致性与故障恢复](docs/LOCAL_SERVICE_RECOVERY.md)排查，不要重新 init 或重新添加项目。
 
@@ -94,11 +96,11 @@ MCP server 通过 loopback service 使用同一数据库事实源，不直接接
 
 stdio 入口通过服务已有的本机 MCP 认证通道获取凭据，不读取客户端 AppData 的服务私有凭据；认证失效后有限续期，原样保留业务请求和会话绑定。支持稳定聊天元数据的宿主在桥接进程重载后自动恢复持久绑定；无法证明当前身份与旧持有人对应时，必须由用户在工作台授权转交。缺少宿主身份的普通 MCP 不能新增工作节点，详见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)。
 
-```powershell
+```sh
 npm run mcp
 ```
 
-手动接入时，stdio 配置执行 `node <仓库绝对路径>\src\mcp\main.mjs`。Codex 和 ZCode 安装入口通过各自宿主原生插件接口注册 MCP，无需用户填写程序路径；其他宿主仍需按各自配置方式接入。
+手动接入时，stdio 配置执行 `node <仓库绝对路径>/src/mcp/main.mjs`。Codex 和 ZCode 安装入口通过各自宿主原生插件接口注册 MCP，无需用户填写程序路径；其他宿主仍需按各自配置方式接入。
 
 ## 配套 Skills
 
@@ -106,7 +108,7 @@ npm run mcp
 
 推荐使用上方完整插件安装入口；插件还包含统一的 `$cockpit` 使用助手。仅需传统独立 Skills 安装时：
 
-```powershell
+```sh
 npm run install:skills:codex
 ```
 
@@ -116,7 +118,7 @@ npm run install:skills:codex
 
 要求 Node.js 24，最低 24.15.0（`>=24.15.0 <25`）：
 
-```powershell
+```sh
 npm test
 npm run test:phase0
 ```

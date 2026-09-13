@@ -213,6 +213,119 @@ test('resident picker rejects non-Windows platforms with actionable error', asyn
   assert.equal(spawned, false, 'Must not spawn on non-Windows platform');
 });
 
+// macOS opens one osascript per pick: no ready handshake, stdout carries the
+// POSIX path, and the child is observed via `close` (stdio flushed).
+function createDarwinChild({ stdout = '', stderr = '', code = 0, signal = null, autoClose = true } = {}) {
+  const proc = new EventEmitter();
+  proc.stdin = new PassThrough();
+  proc.stdout = new PassThrough();
+  proc.stderr = new PassThrough();
+  proc.killed = false;
+  proc.exitCode = null;
+  proc.kill = () => {
+    proc.killed = true;
+    queueMicrotask(() => proc.emit('close', null, 'SIGTERM'));
+  };
+  if (!autoClose) return proc;
+  queueMicrotask(() => {
+    if (stdout) proc.stdout.write(stdout);
+    if (stderr) proc.stderr.write(stderr);
+    proc.emit('close', code, signal);
+  });
+  return proc;
+}
+
+test('darwin picker resolves the osascript POSIX path without the trailing slash', async () => {
+  let invocation;
+  const mockSpawn = (file, args, options) => {
+    invocation = { file, args, options };
+    return createDarwinChild({ stdout: '/Users/dev/My Project/\n' });
+  };
+
+  const picker = new ResidentFolderPicker({ platform: 'darwin', spawn: mockSpawn });
+  const selected = await picker.selectFolder();
+  await picker.close();
+
+  assert.equal(selected, '/Users/dev/My Project');
+  assert.equal(invocation.file, 'osascript');
+  assert.equal(invocation.args[0], '-e');
+  assert.match(invocation.args[1], /choose folder/);
+  assert.deepEqual(invocation.options.stdio, ['ignore', 'pipe', 'pipe']);
+});
+
+test('darwin picker treats a user cancel as a cancelled result', async () => {
+  const mockSpawn = () => createDarwinChild({
+    code: 1,
+    stderr: 'execution error: User canceled. (-128)\n',
+  });
+
+  const picker = new ResidentFolderPicker({ platform: 'darwin', spawn: mockSpawn });
+  const selected = await picker.selectFolder();
+  await picker.close();
+
+  assert.equal(selected, null);
+});
+
+test('darwin picker maps a headless session failure to FOLDER_PICKER_UNAVAILABLE', async () => {
+  const mockSpawn = () => createDarwinChild({
+    code: 1,
+    stderr: 'execution error: Not authorized to send Apple events. (-1719)\n',
+  });
+
+  const picker = new ResidentFolderPicker({ platform: 'darwin', spawn: mockSpawn });
+  await assert.rejects(picker.selectFolder(), { code: 'FOLDER_PICKER_UNAVAILABLE' });
+  await picker.close();
+});
+
+test('darwin picker timeout kills osascript and rejects with FOLDER_PICKER_TIMEOUT', async () => {
+  let killed = false;
+  const mockSpawn = () => {
+    const proc = createDarwinChild({ autoClose: false });
+    const origKill = proc.kill;
+    proc.kill = () => {
+      killed = true;
+      origKill();
+    };
+    return proc;
+  };
+
+  const picker = new ResidentFolderPicker({ platform: 'darwin', spawn: mockSpawn });
+  await assert.rejects(picker.selectFolder({ timeout: 20 }), { code: 'FOLDER_PICKER_TIMEOUT' });
+  assert.equal(killed, true, 'osascript should be killed upon timeout');
+  await picker.close();
+});
+
+test('darwin picker serializes concurrent picks like the Windows resident worker', async () => {
+  let activePicks = 0;
+  let maxConcurrent = 0;
+
+  const mockSpawn = () => {
+    activePicks += 1;
+    if (activePicks > maxConcurrent) maxConcurrent = activePicks;
+    const proc = new EventEmitter();
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.killed = false;
+    proc.exitCode = null;
+    proc.kill = () => {};
+    setTimeout(() => {
+      activePicks -= 1;
+      proc.stdout.write('/Users/dev/queued/\n');
+      proc.emit('close', 0, null);
+    }, 10);
+    return proc;
+  };
+
+  const picker = new ResidentFolderPicker({ platform: 'darwin', spawn: mockSpawn });
+  const [first, second] = await Promise.all([picker.selectFolder(), picker.selectFolder()]);
+  await picker.close();
+
+  assert.equal(first, '/Users/dev/queued');
+  assert.equal(second, '/Users/dev/queued');
+  assert.equal(maxConcurrent, 1, 'macOS picks must be serialized sequentially');
+});
+
 test('Windows helper uses native IFileOpenDialog with folder options, client GUID, and foreground owner', async () => {
   const helper = await readFile(helperUrl, 'utf8');
 

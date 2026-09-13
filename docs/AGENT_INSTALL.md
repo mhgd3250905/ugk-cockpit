@@ -1,6 +1,6 @@
 # 让 Agent 安装并开始使用 Cockpit
 
-这份说明供收到用户“帮我安装这个工具”请求的 Agent 执行。自动安装目前支持 Windows 下的 Codex 和 ZCode。用户不需要理解 MCP 或记住技能名。
+这份说明供收到用户“帮我安装这个工具”请求的 Agent 执行。自动安装目前支持 Windows 与 macOS 下的 Codex 和 ZCode。用户不需要理解 MCP 或记住技能名。
 
 ## 取得程序并安装
 
@@ -14,7 +14,7 @@
 
 ## 命令
 
-```powershell
+```sh
 # Codex 完整安装
 npm run setup:codex
 
@@ -30,18 +30,22 @@ npm run setup:codex -- --start-only
 npm run setup:zcode -- --start-only
 ```
 
+以上命令在 Windows PowerShell 与 macOS/Linux 终端中相同。
+
 安装器的 `host_verification_pending` 表示程序、插件和本机服务已准备好，当前聊天的实际工具调用仍需验证。不要把它转述为全部可用。最后向用户分别确认网页可用和聊天工具可用；尚缺的一步明确说明。
 
-Codex 和 ZCode 的安装及 `--start-only` 结果提供 `dataDirectory`，表示服务实际使用的数据目录。Windows 默认位置为 `%LOCALAPPDATA%\UGK Cockpit`，设置了自定义目录时以返回路径为准；程序目录、插件目录与数据目录用途不同。
+Codex 和 ZCode 的安装及 `--start-only` 结果提供 `dataDirectory`，表示服务实际使用的数据目录。Windows 默认位置为 `%LOCALAPPDATA%\UGK Cockpit`，macOS 为 `~/Library/Application Support/UGK Cockpit`，Linux 为 `$XDG_DATA_HOME/UGK Cockpit`（未设置时为 `~/.local/share/UGK Cockpit`）；也可以用 `--data-directory` 或既存的 service-directory 记录指定其他目录，以返回路径为准。程序目录、插件目录与数据目录用途不同。
 
-alpha.41 修复插件输出目录解析对 Windows 环境变量的无条件依赖。可用绝对路径 `UGK_PLUGIN_OUTPUT_ROOT` 指定插件输出根目录；它不改变服务数据目录。ZCode CLI 路径解析支持 POSIX 无扩展名程序及经 Node 启动的 JS 入口。上述兼容性修复不代表完整非 Windows 安装、原生选择器或宿主调用已完成现场验收；当前承诺的自动安装范围仍是 Windows Codex / ZCode。
+macOS 补充：ZCode 安装器会自动定位 `/Applications/ZCode.app`（或 `~/Applications/ZCode.app`）内的 CLI，定位失败时按提示设置 `ZCODE_CLI_PATH`；系统文件夹选择器使用 macOS 原生对话框，首次弹窗可能需要允许终端/宿主控制“系统事件”或出现在前台。
+
+alpha.41 修复插件输出目录解析对 Windows 环境变量的无条件依赖。可用绝对路径 `UGK_PLUGIN_OUTPUT_ROOT` 指定插件输出根目录；它不改变服务数据目录。ZCode CLI 路径解析支持 POSIX 无扩展名程序及经 Node 启动的 JS 入口。这些修复加上后续的 macOS 数据目录、原生选择器与宿主定位支持，构成当前的 macOS 安装路径；宿主聊天内的实际工具调用验收状态见下方验收记录。
 
 ## 脚本存活检查
 
 可执行以下免认证检查；也可将安装结果中 `serviceUrl` 的路径替换为 `/health`：
 
-```powershell
-curl.exe http://127.0.0.1:41737/health
+```sh
+curl http://127.0.0.1:41737/health
 ```
 
 响应包含 `status` 和 `version`。该端点只用于确认服务存活与版本，不代表已有项目和数据库核对通过，也不替代宿主实际工具调用验收。不要用 `/api/health` 作为免认证检查；`/api/*` 接口受认证保护。
@@ -67,6 +71,16 @@ ZCode 安装器优先使用已提供的 `ZCODE_CLI_PATH`，也可从 PATH 或正
 验证至少包括：隔离 Codex 配置中的真实插件安装和重复安装、仓库外 MCP 初始化、全量 `npm test`、Phase 0 门禁，以及真实宿主中的工具调用。命令行打包测试不能证明宿主提供了项目目录和聊天身份；后两项必须按实际宿主返回事实判断。
 
 Codex 原生插件安装方式依据本机 `codex plugin --help` 与 [OpenAI 插件文档](https://learn.chatgpt.com/docs/plugins)。
+
+### 2026-09-14 macOS 现场验收
+
+macOS（Apple Silicon、Node.js 24.21.0、Codex CLI 0.142.5、ZCode 宿主随带 CLI）本机验收结果：
+
+- `setup:codex` 与 `setup:zcode` 的 `--dry-run` 与真实安装均通过：ZCode 自动定位 `/Applications/ZCode.app` 内置 CLI，Codex 使用 PATH 上的原生可执行；两宿主都返回 `pluginInstalled: true` 与 `host_verification_pending`，复用了正在运行的本机服务并核对了数据目录与项目数据。
+- 服务数据目录默认落在 `~/Library/Application Support/UGK Cockpit`；`launch-cockpit.sh` 完成真实启动、停旧启动与数据核对（health、空项目 dashboard、详情契约）。端口复用判断与安装器 probe 同强度：health 必须 `status=ok` 且版本一致，否则拒绝替换。
+- macOS 原生文件夹/图片选择器（osascript）已按与 Windows 相同的取消与超时契约实现，并有隔离夹具测试覆盖成功、取消、超时与非 GUI 失败映射；浏览器内真实对话框的人工点选验收仍待完成。
+- 测试：`npm test` 全量 591 项中 584 通过、0 失败（其余 7 项为 Windows 启动器专属用例，按设计跳过）；`npm run test:phase0` 97/97。修复了三处夹具在 POSIX 临时目录（`/tmp`、`/var` 为符号链接）下被路径授权按 `REPARSE_POINT` 拒绝的既有失败。
+- 尚未执行：用户在新聊天中对已安装插件的真实 `ugk_work_context` 调用验收。这一步不能由隔离安装或命令行初始化替代，完成前 macOS 安装状态停留在 `host_verification_pending`。
 
 ### 2026-09-09 Codex 本地验收（发布前历史）
 

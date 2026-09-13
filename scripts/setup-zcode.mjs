@@ -9,17 +9,32 @@ import { resolvePluginOutputRoot } from './plugin-output-root.mjs';
 // POSIX executables usually have no extension at all. Probing only `zcode.exe`
 // and `zcode.cjs` made the documented remedy — pointing ZCODE_CLI_PATH at the
 // installed binary — fail again with the same message.
-function zcodeCandidateNames() {
-  return process.platform === 'win32'
+function zcodeCandidateNames(platform) {
+  return platform === 'win32'
     ? ['zcode.exe', 'zcode.cjs']
     : ['zcode', 'zcode.cjs', 'zcode.js'];
 }
 
-export function resolveZcodeCli(env = process.env) {
+// macOS installs ship the CLI inside the app bundle; a desktop app on PATH is
+// not the CLI itself. Mirror the Windows bundled-entry lookup at the two
+// standard install locations.
+function darwinBundledCliEntries(platform, home) {
+  if (platform !== 'darwin') return [];
+  return ['/Applications/ZCode.app', path.join(home, 'Applications', 'ZCode.app')]
+    .map((application) => path.join(application, 'Contents', 'Resources', 'glm', 'zcode.cjs'));
+}
+
+export function resolveZcodeCli(env = process.env, {
+  platform = process.platform,
+  home = defaultHome(),
+  exists = existsSync,
+  stat = statSync,
+} = {}) {
   const explicit = env.ZCODE_CLI_PATH;
   const candidates = explicit ? [explicit] : (env.PATH ?? env.Path ?? '').split(path.delimiter)
-    .flatMap((directory) => zcodeCandidateNames().map((name) => path.join(directory, name)));
-  if (!explicit && process.platform === 'win32') {
+    .flatMap((directory) => zcodeCandidateNames(platform).map((name) => path.join(directory, name)));
+  candidates.push(...(explicit ? [] : darwinBundledCliEntries(platform, home)));
+  if (!explicit && platform === 'win32') {
     try {
       const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
         'Get-Process -Name ZCode -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -Unique'],
@@ -28,14 +43,14 @@ export function resolveZcodeCli(env = process.env) {
       if (locations.length === 1) candidates.push(path.join(path.dirname(locations[0]), 'resources/glm/zcode.cjs'));
     } catch { /* Explicit CLI path remains the fallback. */ }
   }
-  let file = candidates.find((candidate) => path.isAbsolute(candidate) && existsSync(candidate) && statSync(candidate).isFile());
+  let file = candidates.find((candidate) => path.isAbsolute(candidate) && exists(candidate) && stat(candidate).isFile());
   // A desktop ZCode.exe on PATH is not the CLI. Prefer its bundled CLI entry.
   if (file && path.extname(file).toLowerCase() === '.exe') {
     const bundled = path.join(path.dirname(file), 'resources/glm/zcode.cjs');
     if (existsSync(bundled)) file = bundled;
   }
   const extension = file ? path.extname(file).toLowerCase() : '';
-  const allowed = process.platform === 'win32' ? ['.exe', '.cjs', '.js'] : ['', '.exe', '.cjs', '.js', '.mjs', '.sh'];
+  const allowed = platform === 'win32' ? ['.exe', '.cjs', '.js'] : ['', '.exe', '.cjs', '.js', '.mjs', '.sh'];
   if (!file || !allowed.includes(extension)) {
     throw new Error('Set ZCODE_CLI_PATH to the installed native ZCode CLI executable or zcode.cjs entry.');
   }

@@ -428,7 +428,7 @@ const PUBLIC_ERRORS = {
     status: 504,
     message: '系统选择器没有正常返回。',
     impact: '没有添加项目，也没有修改文件。',
-    requiredAction: '请重新点击“选择项目文件夹”；如果窗口被其他应用遮住，请从任务栏切换到它。',
+    requiredAction: '请重新点击“选择项目文件夹”；如果窗口被其他应用窗口遮住，请切换到它。',
   },
   IMAGE_PICKER_UNAVAILABLE: {
     status: 503,
@@ -440,7 +440,7 @@ const PUBLIC_ERRORS = {
     status: 504,
     message: '系统图片选择器没有正常返回。',
     impact: '头像未被更改，代码和已有记录不受影响。',
-    requiredAction: '请重新点击“选择图片”；如果窗口被其他应用遮住，请从任务栏切换到它。',
+    requiredAction: '请重新点击“选择图片”；如果窗口被其他应用窗口遮住，请切换到它。',
   },
   FOLDER_NOT_CODE_PROJECT: {
     status: 422,
