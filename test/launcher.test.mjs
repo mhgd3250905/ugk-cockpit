@@ -812,6 +812,9 @@ function runShadowLauncher(shadow, envOverrides, timeoutMs = CHILD_TIMEOUT_MS) {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      // 真实用户终端通常是 UTF-8 locale；macOS 的 /bin/sh 在该 locale 下
+      // 会把紧跟裸变量的多字节字符解析进变量名，必须始终在此条件下测试。
+      LANG: process.env.LANG ?? 'en_US.UTF-8',
       ...envOverrides,
     },
   }, timeoutMs);
@@ -864,6 +867,8 @@ function runLauncherSh(envOverrides, timeoutMs = CHILD_TIMEOUT_MS) {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      // 与 runShadowLauncher 相同：始终在 UTF-8 locale 下覆盖变量名解析行为。
+      LANG: process.env.LANG ?? 'en_US.UTF-8',
       ...envOverrides,
     },
   }, timeoutMs);

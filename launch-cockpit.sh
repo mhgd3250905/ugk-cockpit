@@ -55,7 +55,9 @@ mkdir -p "$DATA_DIRECTORY/logs"
 # 才允许报告成功。失败只报告并引导恢复，绝不替换服务、清库或重新添加项目。
 # 函数定义必须在下方复用判断之前：/bin/sh 顺序执行，调用点不能先于定义。
 verify_data() {
-    echo "[VERIFY] 核对数据目录（$DATA_DIRECTORY）与服务的项目记录 ..."
+    # 变量一律花括号包裹：macOS 的 /bin/sh（bash 3.2）在 UTF-8 locale 下
+    # 会把紧跟变量的多字节字符解析进变量名，裸引用会报 unbound variable。
+    echo "[VERIFY] 核对数据目录（${DATA_DIRECTORY}）与服务的项目记录 ..."
     if ! node "$REPO_ROOT/scripts/verify-service-data.mjs" "$DATA_DIRECTORY" "$BASE_URL"; then
         echo "[ERROR] 服务数据核对失败：运行中的服务与数据目录的项目记录不一致，或所选数据目录无法读取。"
         echo "本脚本不会替换服务、清理数据库或重新添加项目；请按 docs/LOCAL_SERVICE_RECOVERY.md 排查。"
@@ -74,7 +76,7 @@ if [ -n "$HEALTH" ]; then
         if ! verify_data; then
             exit 1
         fi
-        echo "[OK] 已有 UGK Cockpit 服务在运行（版本 $RUNNING_VERSION），数据核对通过，直接复用。"
+        echo "[OK] 已有 UGK Cockpit 服务在运行（版本 ${RUNNING_VERSION}），数据核对通过，直接复用。"
         echo "URL: $BASE_URL"
         echo "$HEALTH"
         exit 0
@@ -122,7 +124,7 @@ fi
 # 一个跑在未核对数据上的后台服务。
 if ! verify_data; then
     kill "$SERVICE_PID" 2>/dev/null || true
-    echo "[NOTE] 已向刚才启动的服务进程（PID $SERVICE_PID）发送停止信号；未清理或重置数据目录。"
+    echo "[NOTE] 已向刚才启动的服务进程（PID ${SERVICE_PID}）发送停止信号；未清理或重置数据目录。"
     exit 1
 fi
 
