@@ -122,7 +122,7 @@ fi
 # 一个跑在未核对数据上的后台服务。
 if ! verify_data; then
     kill "$SERVICE_PID" 2>/dev/null || true
-    echo "[NOTE] 已停止刚才启动的服务进程（PID $SERVICE_PID）；数据目录未被修改。"
+    echo "[NOTE] 已向刚才启动的服务进程（PID $SERVICE_PID）发送停止信号；未清理或重置数据目录。"
     exit 1
 fi
 

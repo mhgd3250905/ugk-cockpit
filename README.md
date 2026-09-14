@@ -26,9 +26,11 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.44` — 完成本轮工作台验收修复：工作说明列表和固定复制区、开发空间删除图标、工作线聚焦淡化、会话按钮及提示间距。顶部显示服务状态、版本、访问端口和运行时长，可确认关闭本地服务；关闭等待在途请求结束后释放数据库。沿用 schema 29，无新增依赖。
+`0.1.0-alpha.45` — 合并 PR #14 的 macOS 安装与启动支持：统一平台数据目录、原生选择器、ZCode App 内置 CLI 定位和 macOS 启动器。显式数据目录优先，复用与新启动均核对项目数据。沿用 schema 29，无新增依赖。
 
-本轮页面与服务功能已于 2026-09-12 在本机更新并经用户验收；版本提交和运维核验见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)及[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。未创建新发布标签或 GitHub Release，未更新宿主插件；[alpha.41 预发布](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.41) 保留为历史发布入口。
+本轮完成源码合并与文档收束，未重启本机服务或更新宿主插件。macOS 真实聊天工具调用和原生对话框人工点选仍待验收；跨平台验证及部署边界见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)、[安装说明](docs/AGENT_INSTALL.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。未创建新发布标签或 GitHub Release；[alpha.41 预发布](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.41) 保留为历史发布入口。
+
+alpha.44 的工作说明复制区、开发空间操作、工作线聚焦及顶部服务控制已于 2026-09-12 在本机更新并经用户验收；该记录不表示本轮 alpha.45 已部署。
 
 2026-09-09 已发布 [alpha.40 预发布版本](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.40)，本机服务随后升级并核对 7 个已有项目及全部详情，用户确认使用指南页面正常。运行记录见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。插件中的新版对话指引仍需宿主更新并重新加载，服务重启不代表各宿主插件已同步更新。
 

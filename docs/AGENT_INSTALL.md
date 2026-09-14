@@ -72,12 +72,20 @@ ZCode 安装器优先使用已提供的 `ZCODE_CLI_PATH`，也可从 PATH 或正
 
 Codex 原生插件安装方式依据本机 `codex plugin --help` 与 [OpenAI 插件文档](https://learn.chatgpt.com/docs/plugins)。
 
-### 2026-09-14 macOS 现场验收
+### 2026-09-14 PR #14 返修与主线复审
 
-macOS（Apple Silicon、Node.js 24.21.0、Codex CLI 0.142.5、ZCode 宿主随带 CLI）本机验收结果：
+固定提交 `c3d6bddfa567690b238076922b6420cec6988897` 修复了启动测试的数据目录隔离、启动成功前的项目数据核对及 Windows 下 ZCode 路径测试。macOS 启动器的显式 `UGK_COCKPIT_DATA` 优先于保存目录；复用先检查 health 状态与版本，复用和新启动两条路径都核对磁盘记录、服务项目列表及全部详情。数据不一致时拒绝成功并引导恢复，不替换已有服务或清库。
+
+分支报告（macOS Apple Silicon / Node.js 24.21.0）：全量 `npm test` 593 项、586 通过、0 失败、7 跳过；Phase 0 97/97、构建与差异检查通过。main 独立复审（Windows / Node.js 24.15.0）：同一提交全量 593 项、586 通过、0 失败、7 跳过，1634.864 秒；Phase 0 97/97、构建与差异检查通过。两平台跳过项不同：Windows 跳过 POSIX 启动器与 macOS 现场探测，macOS 跳过 Windows 专属用例；不把跳过算作现场验收。
+
+alpha.45 主线收束仅更新版本、文档与失败提示文字；最终验证见[阶段记录](PHASE1_VERTICAL_SLICE.md)。本轮没有在 main 本机安装或更新插件，也没有完成 macOS 真实聊天 `ugk_work_context` 调用与原生对话框人工点选，以下初版现场记录继续保留这些边界。
+
+### 历史：2026-09-14 macOS 初版现场验收
+
+PR 分支初版 `79ff3a7` 报告的 macOS（Apple Silicon、Node.js 24.21.0、Codex CLI 0.142.5、ZCode 宿主随带 CLI）现场结果：
 
 - `setup:codex` 与 `setup:zcode` 的 `--dry-run` 与真实安装均通过：ZCode 自动定位 `/Applications/ZCode.app` 内置 CLI，Codex 使用 PATH 上的原生可执行；两宿主都返回 `pluginInstalled: true` 与 `host_verification_pending`，复用了正在运行的本机服务并核对了数据目录与项目数据。
-- 服务数据目录默认落在 `~/Library/Application Support/UGK Cockpit`；`launch-cockpit.sh` 的复用与新启动路径都在报告成功前核对数据（health 版本一致，且磁盘记录、服务项目列表及全部详情与所选数据目录一致，不一致时拒绝成功并引导恢复，不替换服务）。显式 `UGK_COCKPIT_DATA` 优先于已保存的目录记录，隔离验证不会触碰真实数据目录。
+- 服务数据目录默认落在 `~/Library/Application Support/UGK Cockpit`；分支报告已完成真实启动、停旧启动与空项目数据核对。初版启动器尚缺成功前的自动项目核对及显式数据目录优先级，已由上述返修补齐，不能将返修行为写成初版已完成的证据。
 - macOS 原生文件夹/图片选择器（osascript）已按与 Windows 相同的取消与超时契约实现，并有隔离夹具测试覆盖成功、取消、超时与非 GUI 失败映射；浏览器内真实对话框的人工点选验收仍待完成。
 - 测试：`npm test` 全量 591 项中 584 通过、0 失败（其余 7 项为 Windows 启动器专属用例，按设计跳过）；`npm run test:phase0` 97/97。修复了三处夹具在 POSIX 临时目录（`/tmp`、`/var` 为符号链接）下被路径授权按 `REPARSE_POINT` 拒绝的既有失败。
 - 尚未执行：用户在新聊天中对已安装插件的真实 `ugk_work_context` 调用验收。这一步不能由隔离安装或命令行初始化替代，完成前 macOS 安装状态停留在 `host_verification_pending`。
