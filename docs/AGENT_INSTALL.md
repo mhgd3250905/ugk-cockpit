@@ -77,7 +77,7 @@ Codex 原生插件安装方式依据本机 `codex plugin --help` 与 [OpenAI 插
 macOS（Apple Silicon、Node.js 24.21.0、Codex CLI 0.142.5、ZCode 宿主随带 CLI）本机验收结果：
 
 - `setup:codex` 与 `setup:zcode` 的 `--dry-run` 与真实安装均通过：ZCode 自动定位 `/Applications/ZCode.app` 内置 CLI，Codex 使用 PATH 上的原生可执行；两宿主都返回 `pluginInstalled: true` 与 `host_verification_pending`，复用了正在运行的本机服务并核对了数据目录与项目数据。
-- 服务数据目录默认落在 `~/Library/Application Support/UGK Cockpit`；`launch-cockpit.sh` 完成真实启动、停旧启动与数据核对（health、空项目 dashboard、详情契约）。端口复用判断与安装器 probe 同强度：health 必须 `status=ok` 且版本一致，否则拒绝替换。
+- 服务数据目录默认落在 `~/Library/Application Support/UGK Cockpit`；`launch-cockpit.sh` 的复用与新启动路径都在报告成功前核对数据（health 版本一致，且磁盘记录、服务项目列表及全部详情与所选数据目录一致，不一致时拒绝成功并引导恢复，不替换服务）。显式 `UGK_COCKPIT_DATA` 优先于已保存的目录记录，隔离验证不会触碰真实数据目录。
 - macOS 原生文件夹/图片选择器（osascript）已按与 Windows 相同的取消与超时契约实现，并有隔离夹具测试覆盖成功、取消、超时与非 GUI 失败映射；浏览器内真实对话框的人工点选验收仍待完成。
 - 测试：`npm test` 全量 591 项中 584 通过、0 失败（其余 7 项为 Windows 启动器专属用例，按设计跳过）；`npm run test:phase0` 97/97。修复了三处夹具在 POSIX 临时目录（`/tmp`、`/var` 为符号链接）下被路径授权按 `REPARSE_POINT` 拒绝的既有失败。
 - 尚未执行：用户在新聊天中对已安装插件的真实 `ugk_work_context` 调用验收。这一步不能由隔离安装或命令行初始化替代，完成前 macOS 安装状态停留在 `host_verification_pending`。

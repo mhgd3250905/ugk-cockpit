@@ -8,15 +8,19 @@ REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
 PORT="${UGK_COCKPIT_PORT:-41737}"
 BASE_URL="http://127.0.0.1:${PORT}"
 
-# 数据目录：优先使用已保存目录，否则用 macOS 标准位置
-# （与 scripts/plugin-output-root.mjs 的 darwin 分支一致）。
-DATA_DIRECTORY="${UGK_COCKPIT_DATA:-$HOME/Library/Application Support/UGK Cockpit}"
+# 数据目录优先级：显式 UGK_COCKPIT_DATA（隔离验证、多实例）> 已保存目录 >
+# macOS 标准位置（与 scripts/plugin-output-root.mjs 的 darwin 分支一致）。
+# 显式目录必须压过保存记录，否则隔离测试可能启动、迁移真实数据库。
+DATA_DIRECTORY="${UGK_COCKPIT_DATA:-}"
 SAVED_FILE="$REPO_ROOT/.data/service-directory.txt"
-if [ -f "$SAVED_FILE" ]; then
+if [ -z "$DATA_DIRECTORY" ] && [ -f "$SAVED_FILE" ]; then
     SAVED_DIR=$(tr -d '\n\r' < "$SAVED_FILE")
     case "$SAVED_DIR" in
         /*) DATA_DIRECTORY="$SAVED_DIR" ;;
     esac
+fi
+if [ -z "$DATA_DIRECTORY" ]; then
+    DATA_DIRECTORY="$HOME/Library/Application Support/UGK Cockpit"
 fi
 
 # 项目要求 Node.js >=24.15.0 <25（package.json engines）。默认 node 不满足时
@@ -45,6 +49,20 @@ if [ ! -f "$REPO_ROOT/dist/web/index.html" ] && [ "${UGK_COCKPIT_SKIP_BUILD:-}" 
     (cd "$REPO_ROOT" && npm run build:web)
 fi
 
+mkdir -p "$DATA_DIRECTORY/logs"
+
+# 项目数据核对（与安装器同一事实源）：磁盘记录、服务项目列表及全部详情一致
+# 才允许报告成功。失败只报告并引导恢复，绝不替换服务、清库或重新添加项目。
+# 函数定义必须在下方复用判断之前：/bin/sh 顺序执行，调用点不能先于定义。
+verify_data() {
+    echo "[VERIFY] 核对数据目录（$DATA_DIRECTORY）与服务的项目记录 ..."
+    if ! node "$REPO_ROOT/scripts/verify-service-data.mjs" "$DATA_DIRECTORY" "$BASE_URL"; then
+        echo "[ERROR] 服务数据核对失败：运行中的服务与数据目录的项目记录不一致，或所选数据目录无法读取。"
+        echo "本脚本不会替换服务、清理数据库或重新添加项目；请按 docs/LOCAL_SERVICE_RECOVERY.md 排查。"
+        return 1
+    fi
+}
+
 # 端口已被健康且版本一致的 Cockpit 占用时直接复用，不替换运行中的服务。
 # 与安装器 probe 同强度：health 必须是 status=ok 且版本与当前程序一致，
 # 否则按本机服务恢复流程处理，绝不自动重启或覆盖。
@@ -53,7 +71,10 @@ if [ -n "$HEALTH" ]; then
     EXPECTED_VERSION=$(tr -d '\n\r' < "$REPO_ROOT/VERSION" 2>/dev/null || echo "")
     RUNNING_VERSION=$(printf '%s' "$HEALTH" | node -e 'let d="";process.stdin.on("data",c=>{d+=c});process.stdin.on("end",()=>{try{const b=JSON.parse(d);console.log(b&&b.status==="ok"&&typeof b.version==="string"?b.version:"")}catch{console.log("")}})')
     if [ "$RUNNING_VERSION" = "$EXPECTED_VERSION" ]; then
-        echo "[OK] 已有 UGK Cockpit 服务在运行（版本 $RUNNING_VERSION），直接复用。"
+        if ! verify_data; then
+            exit 1
+        fi
+        echo "[OK] 已有 UGK Cockpit 服务在运行（版本 $RUNNING_VERSION），数据核对通过，直接复用。"
         echo "URL: $BASE_URL"
         echo "$HEALTH"
         exit 0
@@ -68,7 +89,6 @@ if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
     exit 1
 fi
 
-mkdir -p "$DATA_DIRECTORY/logs"
 STAMP=$(date +%Y%m%d-%H%M%S)
 LOG_OUT="$DATA_DIRECTORY/logs/service-$STAMP.log"
 LOG_ERR="$DATA_DIRECTORY/logs/service-$STAMP.err.log"
@@ -78,14 +98,11 @@ nohup node "$REPO_ROOT/src/main.mjs" --data-directory "$DATA_DIRECTORY" --port "
 SERVICE_PID=$!
 
 i=0
+READY=0
 while [ "$i" -lt 100 ]; do
     if curl -fsS --max-time 2 "$BASE_URL/health" >/dev/null 2>&1; then
-        echo "[OK] UGK Cockpit 已启动。"
-        echo "URL: $BASE_URL"
-        echo "PID: $SERVICE_PID"
-        echo "数据目录: $DATA_DIRECTORY"
-        echo "日志: $LOG_OUT"
-        exit 0
+        READY=1
+        break
     fi
     if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
         echo "[ERROR] 服务进程启动后立即退出，日志："
@@ -95,7 +112,23 @@ while [ "$i" -lt 100 ]; do
     i=$((i + 1))
     sleep 0.3
 done
+if [ "$READY" != "1" ]; then
+    echo "[ERROR] 服务在 30 秒内未就绪，日志："
+    tail -20 "$LOG_ERR" "$LOG_OUT" 2>/dev/null
+    exit 1
+fi
 
-echo "[ERROR] 服务在 30 秒内未就绪，日志："
-tail -20 "$LOG_ERR" "$LOG_OUT" 2>/dev/null
-exit 1
+# 新启动的服务也要先通过数据核对；失败时停掉刚启动的进程，不留下
+# 一个跑在未核对数据上的后台服务。
+if ! verify_data; then
+    kill "$SERVICE_PID" 2>/dev/null || true
+    echo "[NOTE] 已停止刚才启动的服务进程（PID $SERVICE_PID）；数据目录未被修改。"
+    exit 1
+fi
+
+echo "[OK] UGK Cockpit 已启动，数据核对通过。"
+echo "URL: $BASE_URL"
+echo "PID: $SERVICE_PID"
+echo "数据目录: $DATA_DIRECTORY"
+echo "日志: $LOG_OUT"
+exit 0

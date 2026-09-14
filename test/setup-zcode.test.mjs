@@ -134,7 +134,9 @@ test('the CLI resolver finds the platform-native executable name', (t) => {
 });
 
 test('the darwin CLI resolver falls back to the app bundle entry without PATH hits', () => {
-  const systemBundle = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+  // 与实现使用同一 path.join 语义：Windows 宿主上 mock 必须匹配目标平台的
+  // 分隔符，而不是硬编码 POSIX 字符串。
+  const systemBundle = path.join('/Applications/ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
   const userBundle = path.join('/Users/x', 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
 
   // A .cjs bundle entry is started through the node interpreter.

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -771,6 +772,92 @@ function randomListenPort() {
   return 41000 + Math.floor(Math.random() * 20_000);
 }
 
+// POSIX 的系统临时目录本身可能是符号链接；任何会被路径授权或脚本
+// 数据目录解析触及的夹具都必须建在真实路径下。
+function realTmpRoot() {
+  return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
+}
+
+// verify-service-data 只读 projects 表的 id 与 removed_at 形状。
+function writeEmptyCockpitDb(dataDir) {
+  mkdirSync(dataDir, { recursive: true });
+  const db = new DatabaseSync(path.join(dataDir, 'cockpit.db'));
+  db.exec('CREATE TABLE projects (id TEXT PRIMARY KEY, removed_at TEXT)');
+  db.close();
+}
+
+// 影子仓库根：脚本副本 + 指向真实仓库的入口 symlink，让 .data 保存记录
+// 可以被隔离注入，绝不读写真实程序目录下的记录。
+function makeShadowRepo(t) {
+  const shadow = mkdtempSync(path.join(realTmpRoot(), 'ugk-launcher-shadow-'));
+  t.after(() => rmSync(shadow, { recursive: true, force: true }));
+  writeFileSync(path.join(shadow, 'launch-cockpit.sh'), readFileSync(launcherShPath));
+  writeFileSync(path.join(shadow, 'VERSION'), readFileSync(path.join(repoRoot, 'VERSION')));
+  // verify-service-data.mjs 必须复制而非 symlink：Node ESM 会把模块解析到
+  // 真实路径，CLI 入口的 argv[1] 比对会失配，核对会被静默跳过。
+  mkdirSync(path.join(shadow, 'scripts'), { recursive: true });
+  writeFileSync(path.join(shadow, 'scripts/verify-service-data.mjs'), readFileSync(path.join(repoRoot, 'scripts/verify-service-data.mjs')));
+  symlinkSync(path.join(repoRoot, 'src'), path.join(shadow, 'src'), 'dir');
+  return shadow;
+}
+
+function saveDataDirectory(shadow, directory) {
+  mkdirSync(path.join(shadow, '.data'), { recursive: true });
+  writeFileSync(path.join(shadow, '.data/service-directory.txt'), `${directory}\n`);
+}
+
+function runShadowLauncher(shadow, envOverrides, timeoutMs = CHILD_TIMEOUT_MS) {
+  return runCaptured('/bin/sh', [path.join(shadow, 'launch-cockpit.sh')], {
+    cwd: shadow,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...envOverrides,
+    },
+  }, timeoutMs);
+}
+
+// 复用路径的 mock：health 携带当前版本，shell 提供 cookie，dashboard 返回
+// 可控的项目集合，verify-service-data 才有完整的核对输入。LISTEN 句柄由
+// helper 自己注册清理，避免任何调用方遗漏导致测试进程挂起。
+function createMockCockpitService(t, port, { projects = [] } = {}) {
+  const expectedVersion = readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim();
+  let dashboardRequests = 0;
+  const server = createServer((req, res) => {
+    const url = req.url.split('?')[0];
+    if (url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', version: expectedVersion }));
+      return;
+    }
+    if (url === '/') {
+      res.writeHead(200, {
+        'content-type': 'text/html',
+        'set-cookie': 'ugk_cockpit_session=fixture; HttpOnly; SameSite=Strict',
+      });
+      res.end('<!doctype html><title>launcher fixture</title>');
+      return;
+    }
+    if (url === '/api/v1/dashboard') {
+      dashboardRequests += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, refreshedAt: new Date().toISOString(), projects, archivedProjects: [] }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 'PROJECT_NOT_FOUND' }));
+  });
+  t.after(async () => closeHttpServer(server));
+  return {
+    dashboardRequests: () => dashboardRequests,
+    ready: new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', resolve);
+    }),
+    close: () => closeHttpServer(server),
+  };
+}
+
 function runLauncherSh(envOverrides, timeoutMs = CHILD_TIMEOUT_MS) {
   return runCaptured('/bin/sh', [launcherShPath], {
     cwd: repoRoot,
@@ -804,24 +891,25 @@ test('POSIX launcher rejects an unsupported Node runtime before touching anythin
   assert.ok(!existsSync(path.join(tempDir, 'data', 'service.lock')), 'refused run must not create a data directory lock');
 });
 
-test('POSIX launcher reuses a healthy matching-version service without starting a new one', { timeout: 30_000, skip: posixSkip }, async (t) => {
+test('POSIX launcher reuses a healthy matching-version service after verifying its data', { timeout: 30_000, skip: posixSkip }, async (t) => {
+  const tempDir = mkdtempSync(path.join(realTmpRoot(), 'ugk-launcher-reuse-'));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const dataDir = path.join(tempDir, 'data');
+  writeEmptyCockpitDb(dataDir);
   const port = randomListenPort();
-  const expectedVersion = readFileSync(path.join(repoRoot, 'VERSION'), 'utf8').trim();
-  const server = createServer((req, res) => {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', version: expectedVersion }));
-  });
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
-  t.after(async () => closeHttpServer(server));
+  const mock = createMockCockpitService(t, port);
+  await mock.ready;
 
   const result = await runLauncherSh({
     UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_DATA: dataDir,
     UGK_COCKPIT_SKIP_BUILD: '1',
   });
 
   assert.equal(result.status, 0, `expected reuse, got: ${result.stdout} ${result.stderr}`);
-  assert.match(result.stdout, /直接复用/);
+  assert.match(result.stdout, /数据核对通过，直接复用/);
   assert.doesNotMatch(result.stdout, /\[START\]/, 'a healthy matching service must never be replaced');
+  assert.ok(mock.dashboardRequests() > 0, 'reuse must verify project data before reporting success');
 });
 
 test('POSIX launcher refuses to replace a port occupied by an unverifiable process', { timeout: 30_000, skip: posixSkip }, async (t) => {
@@ -863,11 +951,14 @@ test('POSIX launcher starts an isolated service and passes readiness plus projec
     UGK_COCKPIT_SKIP_BUILD: '1',
   }, 45_000);
 
+  // 先登记清理所需的服务 PID，再做任何可能失败的断言，失败也不遗留后台进程。
+  const reportedPid = Number(/PID: (\d+)/.exec(result.stdout)?.[1]);
+  servicePid = Number.isInteger(reportedPid) && reportedPid > 0 ? reportedPid : null;
+
   assert.equal(result.status, 0, `launcher failed: ${result.stdout} ${result.stderr}`);
   assert.match(result.stdout, /\[OK\] UGK Cockpit 已启动/);
   assert.ok(result.stdout.includes(dataDir), 'launcher must report the data directory it used');
-  servicePid = Number(/PID: (\d+)/.exec(result.stdout)?.[1]);
-  assert.ok(Number.isInteger(servicePid) && servicePid > 0, 'launcher must report the service PID');
+  assert.ok(servicePid !== null, 'launcher must report the service PID');
 
   // AGENTS.md 验收：启动后必须核对项目列表及详情，不能只凭 /health 200。
   const health = await waitForHttp(`http://127.0.0.1:${port}/health`, (response, body) => {
@@ -888,4 +979,65 @@ test('POSIX launcher starts an isolated service and passes readiness plus projec
   const detail = await fetch(`http://127.0.0.1:${port}/api/v1/projects/fixture-nonexistent`, { headers });
   assert.equal(detail.status, 404);
   assert.equal((await detail.json()).code, 'PROJECT_NOT_FOUND');
+});
+
+test('POSIX launcher prefers an explicit data directory over a saved directory record', { timeout: 60_000, skip: posixSkip }, async (t) => {
+  const tempDir = mkdtempSync(path.join(realTmpRoot(), 'ugk-launcher-saved-'));
+  const shadow = makeShadowRepo(t);
+  const decoy = path.join(tempDir, 'decoy-data');
+  writeEmptyCockpitDb(decoy);
+  const canaryPath = path.join(decoy, 'canary.txt');
+  writeFileSync(canaryPath, 'do-not-touch');
+  saveDataDirectory(shadow, decoy);
+  const dataDir = path.join(tempDir, 'explicit-data');
+  const port = randomListenPort();
+  let servicePid = null;
+  t.after(async () => {
+    if (servicePid !== null) {
+      await terminateProcessTree(servicePid);
+      await waitForPidExit(servicePid);
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const result = await runShadowLauncher(shadow, {
+    UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_DATA: dataDir,
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  }, 45_000);
+
+  // 先登记清理所需的服务 PID，再做任何可能失败的断言。
+  const reportedPid = Number(/PID: (\d+)/.exec(result.stdout)?.[1]);
+  servicePid = Number.isInteger(reportedPid) && reportedPid > 0 ? reportedPid : null;
+
+  assert.equal(result.status, 0, `launcher failed: ${result.stdout} ${result.stderr}`);
+  assert.ok(servicePid !== null, 'launcher must report the service PID');
+  assert.ok(result.stdout.includes(dataDir), 'the explicit directory must win over the saved record');
+  assert.equal(readFileSync(canaryPath, 'utf8'), 'do-not-touch', 'the saved directory must never be touched');
+  assert.ok(!existsSync(path.join(decoy, 'service.lock')), 'the saved directory must never be locked or migrated');
+  assert.ok(existsSync(path.join(dataDir, 'cockpit.db')), 'the service must initialize the explicit directory');
+});
+
+test('POSIX launcher refuses to reuse a matching-version service whose project records disagree', { timeout: 30_000, skip: posixSkip }, async (t) => {
+  const tempDir = mkdtempSync(path.join(realTmpRoot(), 'ugk-launcher-mismatch-'));
+  const shadow = makeShadowRepo(t);
+  const savedDir = path.join(tempDir, 'saved-data');
+  writeEmptyCockpitDb(savedDir);
+  saveDataDirectory(shadow, savedDir);
+  const port = randomListenPort();
+  const mock = createMockCockpitService(t, port, { projects: [{ id: 'ghost-project' }] });
+  await mock.ready;
+
+  const result = await runShadowLauncher(shadow, {
+    UGK_COCKPIT_PORT: String(port),
+    UGK_COCKPIT_SKIP_BUILD: '1',
+  });
+
+  assert.equal(result.status, 1, `expected refusal, got: ${result.stdout} ${result.stderr}`);
+  assert.match(result.stdout, /服务数据核对失败/);
+  assert.match(result.stdout, /LOCAL_SERVICE_RECOVERY/);
+  assert.doesNotMatch(result.stdout, /\[START\]/, 'a mismatching service must never be replaced');
+  const ping = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) }).then((response) => response.json());
+  assert.equal(ping.status, 'ok', 'the running service must stay untouched');
+  assert.ok(!existsSync(path.join(savedDir, 'service.lock')), 'the saved directory must stay untouched');
 });
