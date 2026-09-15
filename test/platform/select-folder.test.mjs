@@ -383,3 +383,40 @@ test('worker startup that never becomes ready is bounded by the selection timeou
   assert.equal(selected, 'E:\\AII\\recovered');
   assert.equal(spawnCount, 2, '恢复请求必须重新拉起一个全新 worker');
 });
+
+test('a delayed exit from a timed-out worker cannot disturb the replacement pick', { timeout: 8000 }, async (t) => {
+  const children = [];
+  let spawnCount = 0;
+  const mockSpawn = () => {
+    const index = spawnCount++;
+    const child = createMockChildProcess(
+      index === 0
+        ? { autoReady: false }
+        : {
+            autoReady: true,
+            onInput: (text, proc) => {
+              if (text.includes('pick')) {
+                // 80ms 后才返回路径，窗口覆盖旧 worker 延迟 exit 的到达时间。
+                setTimeout(() => proc.stdout.write('{"ok":true,"path":"E:\\\\AII\\\\second-pick"}\n'), 80);
+              }
+            },
+          },
+    );
+    if (index === 0) {
+      // 真 worker 被杀死后，操作系统的 exit 事件是稍后才到的：不在 kill 里
+      // 同步 emit，改由测试在 30ms 后异步补发，模拟真实的延迟到达。
+      child.kill = () => { child.killed = true; child.exitCode = 1; };
+      setTimeout(() => child.emit('exit', 1, 'SIGTERM'), 30);
+    }
+    children.push(child);
+    return child;
+  };
+  const picker = new ResidentFolderPicker({ platform: 'win32', spawn: mockSpawn });
+  t.after(() => picker.close());
+
+  await assert.rejects(picker.selectFolder({ timeout: 20 }), { code: 'FOLDER_PICKER_TIMEOUT' });
+  const selected = await picker.selectFolder({ timeout: 200 });
+  assert.equal(selected, 'E:\\AII\\second-pick');
+  assert.equal(spawnCount, 2);
+  assert.equal(children[1].killed, false, '新 worker 不得被旧进程的延迟 exit 杀掉');
+});

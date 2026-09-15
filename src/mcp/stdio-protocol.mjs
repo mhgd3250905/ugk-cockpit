@@ -1411,12 +1411,15 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   let pendingLineBytes = 0;
   let failClosedInvoked = false;
   let readlineInterface = null;
-  const failClosedOnOversizeLine = () => {
+  // 超限行与输入读取错误共用同一条 fail-closed 路径：拆管道、销毁守卫层与
+  // 输入流、显式终结 readline —— rl 'close' 汇入唯一且幂等的 shutdown，
+  // 因此 onShutdown 恰好执行一次，在途服务调用由此被调用方中止。
+  const failClosedFromInput = (diagnostic) => {
     if (failClosedInvoked) return;
     failClosedInvoked = true;
     if (errStream?.write) {
       try {
-        errStream.write(`[ugk-mcp] stdio line exceeds the ${MCP_STDIO_LINE_LIMIT}-byte payload limit; closing the bridge.\n`);
+        errStream.write(`[ugk-mcp] ${diagnostic}\n`);
       } catch {}
     }
     inStream.unpipe(lineLimitGuard);
@@ -1446,14 +1449,18 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
         // 错误不在流机制内传播（同步写路径上的 error 事件会变成未捕获异常）：
         // 丢弃当前块，并在本次写入完成后走统一关停路径。
         pendingLineBytes = 0;
-        queueMicrotask(failClosedOnOversizeLine);
+        queueMicrotask(() => failClosedFromInput(
+          `stdio line exceeds the ${MCP_STDIO_LINE_LIMIT}-byte payload limit; closing the bridge.`));
         callback();
         return;
       }
       callback(null, chunk);
     },
   });
-  inStream?.on?.('error', () => lineLimitGuard.destroy());
+  // 宿主管道的读取错误（如 EPIPE）同样必须进入统一关停：只拆限流层不会终结
+  // readline，onShutdown 不执行，在途服务调用会挂到自身超时、进程滞留。
+  inStream?.on?.('error', (error) => failClosedFromInput(
+    `stdin read error (${error?.code ?? error?.message ?? 'unknown'}); closing the bridge.`));
   inStream.pipe(lineLimitGuard);
 
   const rl = readline.createInterface({

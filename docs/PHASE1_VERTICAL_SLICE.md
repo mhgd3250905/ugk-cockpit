@@ -12,7 +12,7 @@
 
 十项已验证缺陷的根因修复（每项先以回归测试复现为红，再修复转绿）：
 
-1. `saveDelivery` 依据写时重新解析的 `git rev-parse --git-path index` 执行 mkdtemp/copy/rename，全程未过路径授权；观察与保存之间 `.git` 指针被交换可把写入重定向到授权根之外。现要求并核验 `authorizedRoot`，写入前后各 revalidate 一次；送审服务传入 `delivery_sources.authorized_root`。
+1. `saveDelivery` 依据写时重新解析的 `git rev-parse --git-path index` 执行 mkdtemp/copy/rename，全程未过路径授权；观察与保存之间 `.git` 指针被交换可把写入重定向到授权根之外。现要求并核验 `authorizedRoots` 数组（含源授权根与项目授权根，与观察期 `authorizeDeliveryObservation` 的多根语义一致），并在 `copyFileSync` 与 `renameSync` 两个写入点之前各 revalidate 一次；送审服务传入 `[delivery_sources.authorized_root, projects.authorized_root]`。
 2. Windows 常驻文件夹选择器的 worker 就绪等待没有超时，PowerShell 挂起时 `selectFolder` 永不落定且串行队列级联阻塞"添加项目"。现就绪阶段与选取阶段共用同一超时，超时清理挂起 worker，后续请求重新拉起。
 3. `prepareDelivery` 的过期预检清理循环在 try 块之外，一行损坏的 `inspection_json` 会让此后每次预检在同一位置失败（命令滞留 received）。清理改为尽力而为，坏行跳过不阻塞。
 4. `fastForwardMain` 与 `isCommitDescendant` 把调用方数值直接放进 git 尾随 revision 位置，与本仓库自述的对象 ID 不变量不一致。现分别强制 40/64 位 hex（`INVALID_SOURCE_COMMIT`/`INVALID_COMMIT_ID`）。
@@ -26,6 +26,8 @@
 文档对齐：README 技能数量口径改为七个（含统一的 `$cockpit`）；移除 `docs/AGENT_INSTALL.md` 对不存在端点 `/api/health` 的引用；DESIGN.md 左侧导航枚举补「使用指南」；本段补记 alpha.45 收束后遗漏的 `d46ebc3` 启动器修复。
 
 审查同时证伪了四个初步怀疑并保留不改：`issueDispatchGrant` 的 pending 检查与事务之间无 await 让出点，单线程下竞态不可触发；`beginIntegrationReview` 的裸 UPDATE 在 claim 门禁串行化下无可达并发写者；进度/接力 git 证据字段全部来自服务内部 probe 输出且 HTTP 边界拒绝未知键；两处 CAS 更新缺 `changes()` 校验的前置条件已在同事务内复核。已知设计限制记录：MCP 会话身份为宿主自证头，同机其他用户进程可伪造（修复需协议级重设计）；MCP 会话表满 64 按插入序逐出；relay/takeover 串行队列的队头阻塞为刻意有序设计。
+
+返修轮（2026-09-15，PR #16 复审意见，三项 P2 + 文档同步，均先复现再修复）：其一，`openCockpitDatabase` 的 WAL/FULL 设置移到 schema 版本检查之后——`journal_mode` 是持久化写入文件头的设置，此前先设置再拒绝会让一个 `user_version=999` 的未来版本数据库在返回 `UNSUPPORTED_SCHEMA_VERSION` 的同时字节与日志模式已被改动；新增回归验证被拒绝打开的文件逐字节不变且保持 delete journal。其二，文件夹选择器就绪超时重建 worker 后，旧进程延迟到达的 exit/error 回调不再操作共享状态（回调按所属 worker 隔离，迟到的 `this._child !== child` 事件直接丢弃）；新增异步退出回归——首 worker 不 ready、20ms 超时、kill 后 30ms 才异步送达 exit，第二次选择在 200ms 超时内成功且新 worker 未被杀，未用同步 emit 掩盖竞态。其三，MCP stdio 桥的 stdin 读取错误显式进入与超限行共用的统一关停路径（拆管道、销毁守卫与输入、终结 readline，`onShutdown` 经幂等 shutdown 恰好执行一次）；新增进程内回归（关停恰一次、关停后不再消费输入、`close()` 与输入错误共享同一幂等关停）与真实子进程验证（挂起 handler + 输入错误下桥进程按关停退出码退出而非滞留）。文档同步：本条目第 1 项的守卫参数更正为 `authorizedRoots` 数组（源授权根 + 项目授权根），revalidate 时机更正为 copy 与 rename 两个写入点之前。
 
 验证（Windows / Node.js 24.15.0，2026-09-15，本分支工作树）：独立全量 `npm test` **602 项，595 通过、0 失败、7 跳过**，约 965 秒；`npm run test:phase0` **97/97**，74.050 秒；`npm run build:web` 与 `git diff --check` 通过；跳过项与 alpha.45 基线同为平台相关 7 项。9 个新增回归用例均先在未修复源码上复现为红再转绿。独立只读复审按需求完整性、逻辑正确性、边界情况、代码质量、测试覆盖与实际运行六维度复核，A–F 全部 PASS；其两条建议（测试内重复属性行去重、`probeGitWorktree` 自身 maxBuffer 默认对齐 4MB）已采纳并纳入本次全量，第三条（revalidate 与 rename 之间的固有 TOCTOU 微窗口）为仓库既有 authorize/revalidate 防护模式的已知限制，不另行处理。
 

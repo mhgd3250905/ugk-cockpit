@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { createServiceHandlers } from '../src/mcp/service-client.mjs';
@@ -1466,4 +1467,67 @@ test('a stdio line beyond the payload limit fails closed: bridge shuts down with
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.doesNotMatch(stdoutText, /"ping"/, '关停后不再处理新请求');
   server.close();
+});
+
+test('an input stream read error enters the unified shutdown exactly once and cancels in-flight work', { timeout: 8000 }, async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let stderrText = '';
+  stderr.on('data', (chunk) => { stderrText += chunk.toString('utf8'); });
+
+  let shutdownCount = 0;
+  const releaseInflight = new Promise((resolve) => { globalThis.__releaseInflight = resolve; });
+  const inflightStarted = new Promise((resolve) => { globalThis.__inflightStarted = resolve; });
+  const server = createMcpStdioServer({
+    stdin,
+    stdout,
+    stderr,
+    handlers: {
+      ugk_work_context: async () => {
+        globalThis.__inflightStarted();
+        await releaseInflight;
+        return { ok: true };
+      },
+    },
+    onShutdown: () => { shutdownCount += 1; },
+  });
+
+  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'inflight', method: 'tools/call',
+    params: { name: 'ugk_work_context', arguments: {} } }) + '\n');
+  await inflightStarted;
+
+  // 模拟宿主管道断裂：read error 必须进入统一关停（而不是只拆限流层）。
+  stdin.emit('error', Object.assign(new Error('read EPIPE'), { code: 'EPIPE' }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(shutdownCount, 1, '输入流读取错误必须触发一次且仅一次统一关停');
+  assert.match(stderrText, /read EPIPE|input error|EPIPE/i);
+
+  // 关停后桥不再消费输入，也不产生新响应。
+  const stdoutText = stdout.read()?.toString('utf8') ?? '';
+  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'after-error', method: 'ping' }) + '\n');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const afterText = (stdout.read()?.toString('utf8') ?? '') + stdoutText;
+  assert.doesNotMatch(afterText, /"after-error"/, '关停后不得继续处理新请求');
+  globalThis.__releaseInflight();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  server.close();
+  assert.equal(shutdownCount, 1, 'close() 与输入错误共享同一幂等关停');
+});
+
+test('a real bridge child process exits through the unified shutdown on an input read error', { timeout: 15000 }, async (t) => {
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', `
+    import { createMcpStdioServer } from ${JSON.stringify(new URL('../src/mcp/stdio-protocol.mjs', import.meta.url).href)};
+    createMcpStdioServer({
+      handlers: { ugk_work_context: () => new Promise(() => {}) },
+      onShutdown: () => process.exit(23),
+    });
+    process.stdin.write('');
+    setTimeout(() => process.stdin.emit('error', Object.assign(new Error('read EPIPE'), { code: 'EPIPE' })), 100);
+  `], { stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true });
+  t.after(() => { try { child.kill(); } catch {} });
+  child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'ugk_work_context', arguments: {} } }) + '\n');
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 23, '挂起 handler + 输入错误下，桥进程必须经统一关停退出而不是滞留');
 });

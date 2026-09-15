@@ -109,6 +109,11 @@ export class ResidentFolderPicker {
       });
 
       const onExitOrError = (err) => {
+        // A retired worker's exit can arrive long after it was killed (the OS
+        // delivers it asynchronously). By then this picker may already be
+        // serving from a fresh spawn: a stale event must not reject the new
+        // pending request or kill the replacement worker, so it is dropped.
+        if (this._child !== child) return;
         clearReadyTimer();
         if (!readyReceived) {
           rejectReady(pickerError('FOLDER_PICKER_UNAVAILABLE', 'Native folder picker failed to initialize.', err));
