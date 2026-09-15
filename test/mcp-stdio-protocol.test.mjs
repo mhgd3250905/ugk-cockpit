@@ -1515,19 +1515,69 @@ test('an input stream read error enters the unified shutdown exactly once and ca
   assert.equal(shutdownCount, 1, 'close() 与输入错误共享同一幂等关停');
 });
 
-test('a real bridge child process exits through the unified shutdown on an input read error', { timeout: 15000 }, async (t) => {
+test('a real bridge child process cancels an in-flight request and exits naturally on an input read error', { timeout: 15000 }, async (t) => {
+  // 桥进程按 src/mcp/main.mjs 的真实接线组合：onShutdown 中止 AbortController，
+  // 在途 handler 在该信号上落定；不使用 process.exit，退出必须来自事件循环
+  // 自然排空。
   const child = spawn(process.execPath, ['--input-type=module', '--eval', `
     import { createMcpStdioServer } from ${JSON.stringify(new URL('../src/mcp/stdio-protocol.mjs', import.meta.url).href)};
+    const shutdownController = new AbortController();
     createMcpStdioServer({
-      handlers: { ugk_work_context: () => new Promise(() => {}) },
-      onShutdown: () => process.exit(23),
+      handlers: {
+        ugk_work_context: () => new Promise((resolve, reject) => {
+          process.stdout.write('EVENT handler-started\\n');
+          shutdownController.signal.addEventListener('abort', () => {
+            process.stdout.write('EVENT handler-canceled\\n');
+            reject(new Error('in-flight request aborted by shutdown'));
+          }, { once: true });
+        }),
+      },
+      onShutdown: () => {
+        process.stdout.write('EVENT shutdown\\n');
+        shutdownController.abort(new Error('MCP stdio server closed.'));
+      },
     });
-    process.stdin.write('');
-    setTimeout(() => process.stdin.emit('error', Object.assign(new Error('read EPIPE'), { code: 'EPIPE' })), 100);
-  `], { stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true });
+    // 父进程确认在途请求已开始后，经 stdin 控制行指示注入读取错误；
+    // stdin 全程保持开放，EOF 关停路径不得先行触发。
+    let injected = false;
+    process.stdin.on('data', (chunk) => {
+      if (!injected && chunk.toString('utf8').includes('"action":"inject-error"')) {
+        injected = true;
+        process.stdin.emit('error', Object.assign(new Error('read EPIPE'), { code: 'EPIPE' }));
+      }
+    });
+  `], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   t.after(() => { try { child.kill(); } catch {} });
-  child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+
+  let stdoutText = '';
+  child.stdout.on('data', (chunk) => { stdoutText += chunk.toString('utf8'); });
+  let stderrText = '';
+  child.stderr.on('data', (chunk) => { stderrText += chunk.toString('utf8'); });
+
+  // stdin 保持开放（不 end）：写入在途请求并等桥确认 handler 已开始，
+  // 跨进程确认后才注入读取错误。
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'inflight-1', method: 'tools/call',
     params: { name: 'ugk_work_context', arguments: {} } }) + '\n');
-  const [code] = await once(child, 'exit');
-  assert.equal(code, 23, '挂起 handler + 输入错误下，桥进程必须经统一关停退出而不是滞留');
+  await waitForCondition(() => stdoutText.includes('EVENT handler-started'),
+    { timeoutMs: 5000, message: '在途请求必须已经进入 handler，才能注入读取错误' });
+
+  child.stdin.write('{"action":"inject-error"}\n');
+  const [code, signal] = await once(child, 'exit');
+
+  assert.equal(signal, null);
+  assert.equal(code, 0, `进程必须在统一关停后自然退出（无 process.exit）；stderr: ${stderrText.slice(0, 200)}`);
+  assert.match(stdoutText, /EVENT handler-canceled/, '在途请求必须经 AbortController 被实际取消');
+  assert.equal((stdoutText.match(/EVENT shutdown/g) ?? []).length, 1, '关停必须恰好执行一次');
+  assert.match(stderrText, /stdin read error \(EPIPE\)/, '输入错误必须留下可诊断的 stderr 记录');
+  assert.match(stdoutText, /"id":"inflight-1"/, '被取消的请求必须收到 JSON-RPC 错误响应');
 });
+
+async function waitForCondition(predicate, { timeoutMs, message }) {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      assert.fail(message ?? 'condition not met before timeout');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
