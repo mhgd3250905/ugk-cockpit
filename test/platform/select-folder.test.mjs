@@ -356,3 +356,30 @@ test('Windows helper uses encoding-safe Unicode escape sequences for localized d
   assert.match(helper, /\\u9009\\u62E9\\u8981\\u6DFB\\u52A0\\u5230 UGK Cockpit \\u7684\\u9879\\u76EE\\u6587\\u4EF6\\u5939/);
   assert.match(helper, /\\u9009\\u62E9\\u6587\\u4EF6\\u5939/);
 });
+
+test('worker startup that never becomes ready is bounded by the selection timeout and the picker recovers', { timeout: 8000 }, async (t) => {
+  const children = [
+    createMockChildProcess({ autoReady: false }),
+    createMockChildProcess({
+      autoReady: true,
+      onInput: (text, proc) => {
+        if (text.includes('pick')) {
+          proc.stdout.write('{"ok":true,"path":"E:\\\\AII\\\\recovered"}\n');
+        }
+      },
+    }),
+  ];
+  let spawnCount = 0;
+  const picker = new ResidentFolderPicker({
+    platform: 'win32',
+    spawn: () => children[spawnCount++] ?? children[children.length - 1],
+  });
+  t.after(() => picker.close());
+
+  await assert.rejects(picker.selectFolder({ timeout: 120 }), { code: 'FOLDER_PICKER_TIMEOUT' });
+  assert.equal(spawnCount >= 1, true);
+  assert.equal(picker.isRunning, false, '超时后挂起的 worker 必须被清理');
+  const selected = await picker.selectFolder({ timeout: 2000 });
+  assert.equal(selected, 'E:\\AII\\recovered');
+  assert.equal(spawnCount, 2, '恢复请求必须重新拉起一个全新 worker');
+});

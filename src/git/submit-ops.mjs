@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { git } from './probe.mjs';
+import { git, GIT_OBJECT_ID_PATTERN } from './probe.mjs';
 import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES, mirrorResetArguments } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
@@ -115,7 +115,20 @@ export function isRecoverableSubmissionCommit(metadata, { commandId, startHead }
     && metadata.body.split(/\r?\n/).some((line) => line.trim() === `UGK-Cockpit-Command: ${commandId}`);
 }
 
+function assertCommitId(value, name) {
+  if (typeof value !== 'string' || !GIT_OBJECT_ID_PATTERN.test(value)) {
+    const error = new Error(`${name} must be a full git object id (40 or 64 hex characters).`);
+    error.code = 'INVALID_COMMIT_ID';
+    throw error;
+  }
+}
+
 export async function isCommitDescendant(worktreePath, ancestor, descendant, overrides = {}) {
+  // Both ids sit in revision positions of `merge-base --is-ancestor`, where
+  // git still parses leading-dash tokens as OPTIONS. Callers always mean full
+  // object ids read back from git, so accept exactly that.
+  assertCommitId(ancestor, 'ancestor');
+  assertCommitId(descendant, 'descendant');
   const result = await git(
     worktreePath,
     ['merge-base', '--is-ancestor', ancestor, descendant],

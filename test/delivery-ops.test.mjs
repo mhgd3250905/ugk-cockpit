@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, ftruncateSync, renameSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -102,7 +102,7 @@ test('selected index-only differences reuse the existing commit instead of makin
   writeFileSync(path.join(f.sourcePath,'README.md'),original);
   const inspection = await inspectDelivery({ ...f, files:['README.md'] });
   t.after(() => discardDeliveryCache(inspection));
-  const result = await saveDelivery({sourcePath:f.sourcePath,inspection,commandId:'index-only',summary:'保存现有成果'});
+  const result = await saveDelivery({sourcePath:f.sourcePath,inspection,commandId:'index-only',summary:'保存现有成果',authorizedRoots: [f.root]});
   assert.equal(result.sourceCommit,head);
   assert.equal(gitSync(f.sourcePath,['status','--porcelain']),'');
 });
@@ -203,7 +203,7 @@ test('linked worktree and cross-volume save recover index after commit without c
   gitSync(sourcePath,['add','unrelated.txt']);
   const inspection = await inspectDelivery({sourcePath,targetPath,files:['feature.txt']});
   t.after(()=>discardDeliveryCache(inspection));
-  const request = {sourcePath,inspection,commandId:'cross-drive-crash',summary:'保存选中文件'};
+  const request = {sourcePath,inspection,commandId:'cross-drive-crash',summary:'保存选中文件',authorizedRoots: [root] };
   await assert.rejects(saveDelivery({...request,afterRefUpdate:()=>{throw new Error('simulated crash after ref update');}}),error=>error.localSaved===true);
   const saved = gitSync(sourcePath,['rev-parse','HEAD']);
   const recovered = await saveDelivery(request);
@@ -213,13 +213,13 @@ test('linked worktree and cross-volume save recover index after commit without c
 });
 
 for (const recoveryMode of ['same command', 'new preflight command']) test(`a killed delivery process resumes its owned index lock with ${recoveryMode} while preserving unrelated staging`, { timeout: 60000 }, async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
   writeFileSync(path.join(sourcePath, 'feature.txt'), 'feature\n');
   writeFileSync(path.join(sourcePath, 'unrelated.txt'), 'keep staged\n');
   gitSync(sourcePath, ['add', 'unrelated.txt']);
   const inspection = await inspectDelivery({ sourcePath, targetPath, files: ['feature.txt'] });
   t.after(() => discardDeliveryCache(inspection));
-  const request = { sourcePath, inspection, commandId: 'real-process-kill', summary: '保存选中文件' };
+  const request = { sourcePath, inspection, commandId: 'real-process-kill', summary: '保存选中文件', authorizedRoots: [root] };
   const script = `
     import { readFileSync } from 'node:fs';
     const { saveDelivery } = await import(process.argv[1]);
@@ -395,7 +395,7 @@ test('未提交内容纳入冲突检查', async (t) => {
 });
 
 test('范围外staged/unstaged保留', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   // 3 files:
   // 1. selected.txt (in delivery files)
@@ -418,6 +418,7 @@ test('范围外staged/unstaged保留', async (t) => {
     inspection,
     commandId: 'cmd-scope-1',
     summary: 'Save selected file',
+    authorizedRoots: [root],
   });
 
   assert.ok(saved.localSaved);
@@ -436,7 +437,7 @@ test('范围外staged/unstaged保留', async (t) => {
 });
 
 test('提交后恢复幂等', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   writeFileSync(path.join(sourcePath, 'feature.txt'), 'feature content\n');
   const inspection = await inspectDelivery({
@@ -451,6 +452,7 @@ test('提交后恢复幂等', async (t) => {
     inspection,
     commandId: 'cmd-idempotent-2',
     summary: 'Idempotent test',
+    authorizedRoots: [root],
   });
 
   // Second save with same commandId
@@ -459,6 +461,7 @@ test('提交后恢复幂等', async (t) => {
     inspection,
     commandId: 'cmd-idempotent-2',
     summary: 'Idempotent test',
+    authorizedRoots: [root],
   });
 
   assert.equal(firstSave.sourceCommit, secondSave.sourceCommit);
@@ -545,7 +548,7 @@ test('敏感文件', async (t) => {
 });
 
 test('内容变但status相同', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   writeFileSync(path.join(sourcePath, 'work.txt'), 'initial version\n');
   const inspection = await inspectDelivery({
@@ -559,13 +562,13 @@ test('内容变但status相同', async (t) => {
   writeFileSync(path.join(sourcePath, 'work.txt'), 'tampered version\n');
 
   await assert.rejects(
-    () => saveDelivery({ sourcePath, inspection, commandId: 'cmd-tamper', summary: 'Tampered' }),
+    () => saveDelivery({ sourcePath, inspection, commandId: 'cmd-tamper', summary: 'Tampered', authorizedRoots: [root] }),
     { code: 'SOURCE_CONTENT_CHANGED' },
   );
 });
 
 test('目标前进', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   writeFileSync(path.join(sourcePath, 'feature.txt'), 'feature\n');
   const inspection = await inspectDelivery({
@@ -580,6 +583,7 @@ test('目标前进', async (t) => {
     inspection,
     commandId: 'cmd-target-advance',
     summary: 'Target advance feature',
+    authorizedRoots: [root],
   });
 
   await pushDelivery({
@@ -602,7 +606,7 @@ test('目标前进', async (t) => {
 });
 
 test('pushDelivery and verifyDeliveryRemote succeed and tolerate local main dirty changes', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   writeFileSync(path.join(sourcePath, 'delivery.txt'), 'delivery content\n');
   const inspection = await inspectDelivery({
@@ -617,6 +621,7 @@ test('pushDelivery and verifyDeliveryRemote succeed and tolerate local main dirt
     inspection,
     commandId: 'cmd-push-test',
     summary: 'Push test',
+    authorizedRoots: [root],
   });
 
   const pushed = await pushDelivery({
@@ -675,7 +680,7 @@ test('files parameter rejects invalid inputs, traversal, pathspec magic, and non
 });
 
 test('unselected large files and target main >128MiB untracked files do not block delivery; selected oversize fails with details', async (t) => {
-  const { sourcePath, targetPath } = createDeliveryFixture(t);
+  const { root, sourcePath, targetPath } = createDeliveryFixture(t);
 
   // 1. Target main has untracked sparse file > 128MiB
   const targetHuge = path.join(targetPath, 'target_huge.bin');
@@ -718,6 +723,7 @@ test('unselected large files and target main >128MiB untracked files do not bloc
     inspection: smallInspection,
     commandId: 'cmd-save-small',
     summary: 'Save small file',
+    authorizedRoots: [root],
   });
   assert.ok(saved.localSaved);
 
@@ -731,5 +737,43 @@ test('unselected large files and target main >128MiB untracked files do not bloc
       assert.equal(err.details?.actualBytes, 140 * 1024 * 1024);
       return true;
     },
+  );
+});
+
+test('saveDelivery refuses to touch a git index that resolves outside the authorized root', async (t) => {
+  const f = createDeliveryFixture(t);
+  const head = gitSync(f.sourcePath, ['rev-parse', 'HEAD']);
+  // 与 index-only 用例同型：只有暂存区差异，工作区干净，保证换指针对象后所有前置校验都通过。
+  const original = readFileSync(path.join(f.sourcePath, 'README.md'));
+  writeFileSync(path.join(f.sourcePath, 'README.md'), 'staged-only\n');
+  gitSync(f.sourcePath, ['add', 'README.md']);
+  writeFileSync(path.join(f.sourcePath, 'README.md'), original);
+  const inspection = await inspectDelivery({ sourcePath: f.sourcePath, targetPath: f.targetPath, files: ['README.md'] });
+  t.after(() => discardDeliveryCache(inspection));
+
+  // 观察之后、保存之前的窗口内，把 .git 目录换成指向授权根之外的指针文件。
+  const outsideDir = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-deliv-escape-'));
+  t.after(() => rmSync(outsideDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const outsideGit = path.join(outsideDir, 'redirected.git');
+  cpSync(path.join(f.sourcePath, '.git'), outsideGit, { recursive: true });
+  rmSync(path.join(f.sourcePath, '.git'), { recursive: true, force: true });
+  writeFileSync(path.join(f.sourcePath, '.git'), `gitdir: ${outsideGit.split(path.sep).join('/')}\n`);
+  assert.equal(gitSync(f.sourcePath, ['rev-parse', 'HEAD']), head, '指针替换后 git 仍必须可用，前置校验才会通过');
+
+  const resolvedIndex = path.resolve(
+    f.sourcePath,
+    gitSync(f.sourcePath, ['rev-parse', '--git-path', 'index']),
+  );
+  assert.ok(resolvedIndex.toLowerCase().startsWith(outsideDir.toLowerCase()), '复现前提：index 必须解析到授权根之外');
+
+  await assert.rejects(
+    saveDelivery({
+      sourcePath: f.sourcePath,
+      inspection,
+      commandId: 'index-path-escape',
+      summary: '授权根之外必须被拒绝',
+      authorizedRoots: [f.root],
+    }),
+    { code: 'PATH_OUTSIDE_SCOPE' },
   );
 });

@@ -1,10 +1,15 @@
 import readline from 'node:readline';
+import { Transform } from 'node:stream';
 import { conversationIdentity } from './conversation-identity.mjs';
 import { VERSION } from '../version.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { sanitizeIntegrationErrorPayload } from './service-client.mjs';
 import { normalizeReferences } from '../core/submit-notes-contract.mjs';
 import { PROGRESS_STATUSES } from '../core/assignments-contract.mjs';
+
+// 与服务端 HTTP MCP 路由的 18MB 请求体上限对齐：stdio 桥进程不能被一条无上限
+// 的入站行无限缓冲。超限即 fail-closed 关停，stderr 留下可诊断的说明。
+const MCP_STDIO_LINE_LIMIT = 18 * 1024 * 1024;
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const STRUCTURED_TOOL_NAMES = new Set([
@@ -1401,11 +1406,62 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   const outStream = stdout || process.stdout;
   const errStream = stderr || process.stderr;
 
+  // readline 会无条件缓冲整行，因此在上游加一层按行计数的限流：单行超过上限
+  // 时立即销毁输入并触发同一条关停路径，避免桥进程被异常宿主无限喂大内存。
+  let pendingLineBytes = 0;
+  let failClosedInvoked = false;
+  let readlineInterface = null;
+  const failClosedOnOversizeLine = () => {
+    if (failClosedInvoked) return;
+    failClosedInvoked = true;
+    if (errStream?.write) {
+      try {
+        errStream.write(`[ugk-mcp] stdio line exceeds the ${MCP_STDIO_LINE_LIMIT}-byte payload limit; closing the bridge.\n`);
+      } catch {}
+    }
+    inStream.unpipe(lineLimitGuard);
+    lineLimitGuard.destroy();
+    inStream.destroy?.();
+    // 输入被销毁不会自动终结 readline，显式关停以触发同一条 shutdown 路径。
+    readlineInterface?.close();
+  };
+  const lineLimitGuard = new Transform({
+    transform(chunk, encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+      // 每遇到一个换行就结算当前行的总长（含换行本身）；未终结的尾部累积
+      // 计数。两条路径都查上限，完整长行和无限增长的前缀都无法绕过。
+      let overLimit = false;
+      let from = 0;
+      for (;;) {
+        const newline = bytes.indexOf(0x0a, from);
+        if (newline === -1) break;
+        const lineBytes = pendingLineBytes + (newline - from) + 1;
+        pendingLineBytes = 0;
+        from = newline + 1;
+        if (lineBytes > MCP_STDIO_LINE_LIMIT) overLimit = true;
+      }
+      pendingLineBytes += bytes.length - from;
+      if (pendingLineBytes > MCP_STDIO_LINE_LIMIT) overLimit = true;
+      if (overLimit) {
+        // 错误不在流机制内传播（同步写路径上的 error 事件会变成未捕获异常）：
+        // 丢弃当前块，并在本次写入完成后走统一关停路径。
+        pendingLineBytes = 0;
+        queueMicrotask(failClosedOnOversizeLine);
+        callback();
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  inStream?.on?.('error', () => lineLimitGuard.destroy());
+  inStream.pipe(lineLimitGuard);
+
   const rl = readline.createInterface({
-    input: inStream,
+    input: lineLimitGuard,
     crlfDelay: Infinity,
     terminal: false
   });
+  readlineInterface = rl;
 
   // The host can destroy the pipes at any moment (crash, restart, user
   // cancel). An 'error' event with no listener would escape the request queue
@@ -1416,7 +1472,15 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   const writeResponse = (response) => {
     try {
       outStream.write(`${JSON.stringify(response)}\n`);
-    } catch {}
+    } catch (writeErr) {
+      // A lost response would leave the host waiting on its own timeout with
+      // no signal at all. Surface the failure on stderr and answer with a
+      // generic JSON-RPC error so the channel degrades loudly, not silently.
+      try {
+        errStream?.write?.(`[ugk-mcp] Failed to write response: ${writeErr?.message ?? writeErr}\n`);
+        outStream.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Internal error' } })}\n`);
+      } catch {}
+    }
   };
 
   // Hosts close stdin when the session ends. In-flight service calls must be
@@ -1499,6 +1563,10 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   return {
     close() {
       rl.close();
+      // 拆除限流管道并释放守卫流：否则持久的 pipe 引用会让进程事件循环永不
+      // 排空，宿主（和测试运行器）在关停后仍无法退出。
+      inStream.unpipe(lineLimitGuard);
+      lineLimitGuard.destroy();
       // EOF and an explicit close() both converge on the same shutdown path;
       // whichever arrives first aborts in-flight service calls exactly once.
       shutdown();

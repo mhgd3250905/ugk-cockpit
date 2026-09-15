@@ -1475,6 +1475,16 @@ function sendError(response, code, { commandId = null, extra = {}, context = nul
   });
 }
 
+// Only curated `publicMessage` values may override a whitelisted message.
+// A raw err.message can carry internal detail (paths, library text), so it
+// never reaches the client; errors without one fall back to the whitelisted
+// message for their code.
+function publicMessageExtra(err) {
+  return typeof err?.publicMessage === 'string' && err.publicMessage.trim()
+    ? { message: err.publicMessage }
+    : {};
+}
+
 function requireString(body, field) {
   if (typeof body?.[field] !== 'string' || body[field].trim() === '') {
     const error = new Error(`Missing ${field}`);
@@ -2248,6 +2258,15 @@ function readMcpBody(request) {
   return readJson(request, { maxBytes: MCP_PAYLOAD_LIMIT });
 }
 
+// Avatar routes surface this text verbatim via publicMessageExtra; keep the
+// message curated Chinese and pair it with a whitelisted code.
+function avatarRequestError(message, code = 'INVALID_IMAGE_PATH') {
+  const error = new Error(message);
+  error.code = code;
+  error.publicMessage = message;
+  return error;
+}
+
 async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
   // The JSON path carries base64 (4/3 size inflation), so the transport-level
   // cap must allow an encoded 5MB image; the decoded buffer is still enforced
@@ -2258,9 +2277,7 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
   for await (const chunk of request) {
     size += chunk.length;
     if (size > hardLimit) {
-      const error = new Error('所选头像超过 5MB。');
-      error.code = 'IMAGE_TOO_LARGE';
-      throw error;
+      throw avatarRequestError('所选头像超过 5MB。', 'IMAGE_TOO_LARGE');
     }
     chunks.push(chunk);
   }
@@ -2276,9 +2293,7 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
     const formData = await webReq.formData();
     const file = formData.get('file') || formData.get('avatar');
     if (!file || typeof file.arrayBuffer !== 'function') {
-      const error = new Error('未提供有效的头像文件。');
-      error.code = 'INVALID_IMAGE_PATH';
-      throw error;
+      throw avatarRequestError('未提供有效的头像文件。');
     }
     const buf = Buffer.from(await file.arrayBuffer());
     if (buf.length > maxBytes) {
@@ -2303,17 +2318,17 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
     try {
       parsed = JSON.parse(rawBuffer.toString('utf8'));
     } catch {
-      const error = new Error('提交的信息不完整或格式不正确。');
-      error.code = 'INVALID_REQUEST';
-      throw error;
+      throw avatarRequestError('提交的信息不完整或格式不正确。', 'INVALID_REQUEST');
     }
     if (parsed.content || parsed.data) {
       const b64 = parsed.content || parsed.data;
+      // 校验类型后再交给 Buffer.from，避免原生 TypeError 的内部文本进入响应。
+      if (typeof b64 !== 'string') {
+        throw avatarRequestError('未提供有效的头像文件。');
+      }
       const buf = Buffer.from(b64, 'base64');
       if (buf.length > maxBytes) {
-        const error = new Error('所选头像超过 5MB。');
-        error.code = 'IMAGE_TOO_LARGE';
-        throw error;
+        throw avatarRequestError('所选头像超过 5MB。', 'IMAGE_TOO_LARGE');
       }
       return {
         content: buf,
@@ -2321,9 +2336,7 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
         mimeType: parsed.mimeType || parsed.type || '',
       };
     }
-    const error = new Error('未提供有效的头像文件。');
-    error.code = 'INVALID_IMAGE_PATH';
-    throw error;
+    throw avatarRequestError('未提供有效的头像文件。');
   }
 
   if (rawBuffer.length > maxBytes) {
@@ -3744,7 +3757,7 @@ export async function createCockpitHttpServer({
             upload = await readAvatarUploadBody(request);
           } catch (err) {
             sendError(response, err.code || 'INVALID_IMAGE_PATH', {
-              extra: { message: err.message },
+              extra: publicMessageExtra(err),
             });
             return;
           }
@@ -3764,7 +3777,7 @@ export async function createCockpitHttpServer({
             });
           } catch (err) {
             sendError(response, err.code || 'INVALID_IMAGE_PATH', {
-              extra: { message: err.message },
+              extra: publicMessageExtra(err),
             });
             return;
           }
@@ -3785,7 +3798,7 @@ export async function createCockpitHttpServer({
           selectedPath = await imagePicker();
         } catch (err) {
           sendError(response, err.code || 'IMAGE_PICKER_UNAVAILABLE', {
-            extra: { message: err.message },
+            extra: publicMessageExtra(err),
           });
           return;
         }
@@ -3804,7 +3817,7 @@ export async function createCockpitHttpServer({
           });
         } catch (err) {
           sendError(response, err.code || 'INVALID_IMAGE_PATH', {
-            extra: { message: err.message },
+            extra: publicMessageExtra(err),
           });
           return;
         }
@@ -3843,7 +3856,7 @@ export async function createCockpitHttpServer({
           });
         } catch (err) {
           sendError(response, err.code || 'INVALID_IMAGE_PATH', {
-            extra: { message: err.message },
+            extra: publicMessageExtra(err),
           });
           return;
         }
@@ -3896,7 +3909,7 @@ export async function createCockpitHttpServer({
           if (err.code === 'COMMAND_CONFLICT') {
             sendError(response, 'COMMAND_CONFLICT', {
               commandId: body.commandId,
-              extra: { message: err.message },
+              extra: publicMessageExtra(err),
             });
             return;
           }

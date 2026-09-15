@@ -838,7 +838,7 @@ export async function inspectDelivery({ sourcePath, targetPath, files, targetBra
   } catch (error) { discardDeliveryCache(cache); throw error; }
 }
 
-export async function saveDelivery({ sourcePath, inspection, commandId, summary, beforeWrite = () => {}, afterRefUpdate = () => {} }) {
+export async function saveDelivery({ sourcePath, inspection, commandId, summary, authorizedRoots, beforeWrite = () => {}, afterRefUpdate = () => {} }) {
   let current = await readDeliveryLocation(sourcePath, { files: inspection.files });
   if (current.branch !== inspection.branch) throw Object.assign(new Error('Source branch changed'), { code: 'BRANCH_MISMATCH' });
   let recoveredCommit = null;
@@ -853,7 +853,27 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
     throw Object.assign(new Error('Source contents changed'), { code: 'SOURCE_CONTENT_CHANGED' });
   }
   if (!inspection.files.length) return { sourceCommit: current.head, localSaved: true };
+  // 与观察期的 authorizeDeliveryObservation 同一语义：index 允许落在源或项目
+  // 任一授权根内（linked worktree 的 gitdir 合法地位于主仓库侧）。
+  const permittedRoots = Array.isArray(authorizedRoots) ? authorizedRoots.filter(Boolean) : [];
+  if (!permittedRoots.length) {
+    throw Object.assign(new Error('saveDelivery requires the authorized roots of the delivery source and project.'), {
+      code: 'PATH_OUTSIDE_SCOPE',
+    });
+  }
   const indexPath = path.resolve(sourcePath, (await runGit(sourcePath, ['rev-parse', '--git-path', 'index'])).stdout);
+  // The index path is re-resolved from the repository at save time, so a `.git`
+  // pointer swapped after observation can redirect it outside the granted
+  // folders. Fail closed before any byte is written there.
+  let indexScope = null;
+  for (const root of permittedRoots) {
+    try { indexScope = authorizeExistingPath(path.dirname(indexPath), root); break; } catch {}
+  }
+  if (!indexScope) {
+    throw Object.assign(new Error('Resolved git index path is outside the authorized folders.'), {
+      code: 'PATH_OUTSIDE_SCOPE',
+    });
+  }
   const temporary = mkdtempSync(path.join(path.dirname(indexPath), 'ugk-delivery-save-'));
   const temporaryIndex = path.join(temporary, 'index');
   const env = { GIT_INDEX_FILE: temporaryIndex, GIT_LITERAL_PATHSPECS: '1' };
@@ -888,6 +908,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
     if (recoveredCommit && ![beforeSelected, afterSelected].includes(selectedEntries(currentEntries))) {
       throw Object.assign(new Error('Selected index entries changed after commit; not overwriting them'), { code: 'DELIVERY_INDEX_CHANGED' });
     }
+    revalidateAuthorizedPath(indexScope);
     copyFileSync(indexPath, temporaryIndex);
     for (const file of inspection.files) {
       const blob = blobs.get(file);
@@ -915,6 +936,7 @@ export async function saveDelivery({ sourcePath, inspection, commandId, summary,
       }
     }
     assertDeliveryIndexLock(indexLock);
+    revalidateAuthorizedPath(indexScope);
     renameSync(temporaryIndex, indexPath);
     return { sourceCommit: savedCommit, localSaved: true };
   } catch (error) {

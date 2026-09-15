@@ -330,3 +330,27 @@ test('http-server: DNS rebinding 防护——Host 白名单之外的请求整体
   const ipv6Ok = await rawRequest(service.port, '/health', { hostHeader: `[::1]:${service.port}` });
   assert.equal(ipv6Ok.status, 200);
 });
+
+test('git boundary asserts object ids in trailing revision positions (merge/merge-base)', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-object-id-'));
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const git = (args) => execFileSync('git', args, { cwd: root, windowsHide: true, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.name', 'Guard']);
+  git(['config', 'user.email', 'guard@localhost']);
+  writeFileSync(path.join(root, 'a.txt'), 'a\n');
+  git(['add', 'a.txt']);
+  git(['commit', '-m', 'first']);
+  git(['commit', '--allow-empty', '-m', 'second']);
+  const head = String(git(['rev-parse', 'HEAD'])).trim();
+  const headParent = String(git(['rev-parse', 'HEAD~1'])).trim();
+
+  const { fastForwardMain } = await import('../src/git/integration-ops.mjs');
+  const { isCommitDescendant } = await import('../src/git/submit-ops.mjs');
+
+  await assert.rejects(fastForwardMain(root, '--upload-pack=pwn'), { code: 'INVALID_SOURCE_COMMIT' });
+  await assert.rejects(isCommitDescendant(root, '--exec=pwn', head), { code: 'INVALID_COMMIT_ID' });
+  await assert.rejects(isCommitDescendant(root, head, 'not-an-object-id'), { code: 'INVALID_COMMIT_ID' });
+
+  assert.equal(await isCommitDescendant(root, headParent, head), true, '合法对象 ID 的行为必须保持不变');
+});

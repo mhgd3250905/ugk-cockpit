@@ -1437,3 +1437,33 @@ test('dispatchMessage formats submit-note errors as safe structured JSON with no
   assert.equal(payloadTransport.noteId, 'note-transport');
   assert.equal(payloadTransport.retryable, true);
 });
+
+test('a stdio line beyond the payload limit fails closed: bridge shuts down with a clear diagnostic', { timeout: 10000 }, async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let stderrText = '';
+  stderr.on('data', (chunk) => { stderrText += chunk.toString('utf8'); });
+  let stdoutText = '';
+  stdout.on('data', (chunk) => { stdoutText += chunk.toString('utf8'); });
+
+  let shutdownCalled = false;
+  const server = createMcpStdioServer({
+    stdin,
+    stdout,
+    stderr,
+    handlers: { ugk_work_context: async () => ({ ok: true }) },
+    onShutdown: () => { shutdownCalled = true; },
+  });
+
+  const oversized = `{"jsonrpc":"2.0","id":"big","method":"tools/call","params":{"name":"ugk_work_context","arguments":{"pad":"${'x'.repeat(19 * 1024 * 1024)}"}}}`;
+  stdin.write(`${oversized}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(shutdownCalled, true, '超限行必须触发 fail-closed 关停，而不是无限缓冲');
+  assert.match(stderrText, /payload limit|payload 上限|too large/i);
+
+  stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'ping', method: 'tools/list' }) + '\n');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.doesNotMatch(stdoutText, /"ping"/, '关停后不再处理新请求');
+  server.close();
+});

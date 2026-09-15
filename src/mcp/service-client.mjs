@@ -279,12 +279,18 @@ export function createServiceHandlers({
       // while a host without its own durable credential asks for a fresh scoped
       // token.  One short retry handles that transport hand-off without turning
       // a persistent outage into an unbounded reconnect loop.
+      // Host shutdown must abort the bootstrap exactly like regular calls:
+      // otherwise a process whose stdin closed can linger for the full
+      // bootstrap timeout (and its retry) on a stalled connection.
+      const bootstrapSignal = () => (shutdownSignal
+        ? AbortSignal.any([AbortSignal.timeout(5000), shutdownSignal])
+        : AbortSignal.timeout(5000));
       for (let attempt = 0; attempt < 2; attempt += 1) {
         let response;
         try {
           response = await fetchImpl(new URL('/api/v1/mcp/session', baseUrl), {
             method: 'POST',
-            signal: AbortSignal.timeout(5000),
+            signal: bootstrapSignal(),
             headers: {
               'content-type': 'application/json',
               'x-ugk-diagnostic-id': diagnosticId,

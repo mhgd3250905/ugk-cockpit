@@ -93,7 +93,9 @@ export function safeGitEnvironment() {
 
 export async function git(cwd, args, {
   timeoutMs = 5_000,
-  maxBuffer = 2 * 1024 * 1024,
+  // 与 delivery-ops 的 runGit 上限对齐：大仓库的 ls-files/status 输出很容易
+  // 超过 1MB 级别，超限必须是可诊断的专用错误而不是原始 libuv 错误。
+  maxBuffer = 4 * 1024 * 1024,
   acceptExitCodes = [0],
   config = [],
 } = {}) {
@@ -114,6 +116,11 @@ export async function git(cwd, args, {
   } catch (error) {
     if (acceptExitCodes.includes(error?.code)) {
       return { exitCode: error.code, stdout: (error.stdout ?? '').trim() };
+    }
+    if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      const bufErr = new Error('Git command output exceeded maximum safe buffer size');
+      bufErr.code = 'GIT_BUFFER_LIMIT_EXCEEDED';
+      throw bufErr;
     }
     throw error;
   }
@@ -211,7 +218,9 @@ export async function probeGitWorktree(
   worktreePath,
   {
     timeoutMs = 5_000,
-    maxBuffer = 2 * 1024 * 1024,
+    // 与 git() 的默认上限一致：观察通道的 ls-files/status 输出在大仓库上
+    // 很容易超过 2MB，上限口径必须和错误映射一起对齐。
+    maxBuffer = 4 * 1024 * 1024,
     onBetweenObservations,
     expectedBaselineHead = null,
   } = {},

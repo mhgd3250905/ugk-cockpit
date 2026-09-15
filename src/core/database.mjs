@@ -1164,10 +1164,12 @@ export function openCockpitDatabase(filePath, { migrate = true } = {}) {
   });
   try {
     db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 150;');
+    // 连接级持久性设置不依赖是否执行迁移：任何 migrate:false 的只读/检查
+    // 入口也必须获得同一套 WAL + FULL 语义，而不是静默回落到 delete journal。
+    db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = schemaVersion(db);
     if (version > SUPPORTED_SCHEMA_VERSION) throw unsupportedSchemaError(version);
     if (migrate) {
-      db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
       migrateDatabase(db);
     }
     return db;

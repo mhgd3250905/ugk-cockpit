@@ -26,7 +26,9 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.45` — 合并 PR #14 的 macOS 安装与启动支持：统一平台数据目录、原生选择器、ZCode App 内置 CLI 定位和 macOS 启动器。显式数据目录优先，复用与新启动均核对项目数据。沿用 schema 29，无新增依赖。
+`0.1.0-alpha.46` — 独立安全审计修复：送审保存的 Git index 路径在写入前重新经过路径授权核验，Windows 文件夹选择器启动就绪纳入超时，损坏的送审预检记录不再阻塞后续预检；`merge --ff-only` 与 `merge-base --is-ancestor` 的尾随 revision 补齐对象 ID 断言，头像路由错误响应只透出受控文案，MCP stdio 桥补齐行长度上限、写失败兜底和凭据引导的关停信号；probe 通道对齐 maxBuffer 上限与专用错误码，WAL 连接设置不再依赖迁移分支。沿用 schema 29，无新增依赖。
+
+本轮同时修正文档失实项：README 技能数量口径（六个 → 七个，含 `$cockpit`）、移除不存在的 `/api/health` 引用、DESIGN.md 导航枚举补「使用指南」，并补记 alpha.45 收束后遗漏的启动器修复 `d46ebc3`。验证与遗留项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
 本轮完成源码合并与文档收束，未重启本机服务或更新宿主插件。macOS 真实聊天工具调用和原生对话框人工点选仍待验收；跨平台验证及部署边界见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)、[安装说明](docs/AGENT_INSTALL.md)和[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。未创建新发布标签或 GitHub Release；[alpha.41 预发布](https://github.com/mhgd3250905/ugk-cockpit/releases/tag/v0.1.0-alpha.41) 保留为历史发布入口。
 
@@ -106,9 +108,9 @@ npm run mcp
 
 ## 配套 Skills
 
-仓库内置六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有其他持有人时，用户可返回原聊天，或到工作台授权转交并将完整指令交给目标聊天；`ugk_work_takeover` 仅消费该授权。平台持久保存可靠宿主聊天身份；历史连接身份只读保留，不能根据同目录或时间相近认领。context 查询不改变业务会话、归属、租约、心跳或 revision，旧回执不恢复当前权限。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+仓库内置七个 Skill：统一的 `$cockpit` 使用助手，以及六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有其他持有人时，用户可返回原聊天，或到工作台授权转交并将完整指令交给目标聊天；`ugk_work_takeover` 仅消费该授权。平台持久保存可靠宿主聊天身份；历史连接身份只读保留，不能根据同目录或时间相近认领。context 查询不改变业务会话、归属、租约、心跳或 revision，旧回执不恢复当前权限。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
-推荐使用上方完整插件安装入口；插件还包含统一的 `$cockpit` 使用助手。仅需传统独立 Skills 安装时：
+推荐使用上方完整插件安装入口。仅需传统独立 Skills 安装时：
 
 ```sh
 npm run install:skills:codex

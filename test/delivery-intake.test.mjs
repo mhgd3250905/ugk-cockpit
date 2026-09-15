@@ -269,3 +269,22 @@ test('intake succeeds when main has untracked files >128MiB; oversize selected f
   assert.equal(preflightOversize.details?.limitBytes, 32 * 1024 * 1024);
   assert.equal(preflightOversize.details?.actualBytes, 140 * 1024 * 1024);
 });
+
+test('a corrupt retained preflight row cannot wedge future preflights', async (t) => {
+  const f = await fixture(t);
+  const registration = await f.register();
+  // 模拟外部损坏/遗留脏行：过期的 inspection_json 不是合法 JSON。
+  const nowIso = new Date().toISOString();
+  f.db.prepare(`INSERT INTO commands (id,kind,request_digest,request_json,state,created_at,updated_at)
+    VALUES ('corrupt-cmd','delivery.preflight','x','{}','failed',?,?)`).run(nowIso, nowIso);
+  f.db.prepare(`INSERT INTO delivery_preflights
+    (id,command_id,source_id,session_id,session_revision,inspection_json,created_at,expires_at)
+    VALUES ('corrupt-row','corrupt-cmd',?,NULL,NULL,'{not-json',?,?)`)
+    .run(registration.id, nowIso, Date.now() - 1);
+
+  writeFileSync(path.join(f.source, 'feature.txt'), 'feature\n');
+  const result = await f.preflight(['feature.txt'], 'after-poison');
+  assert.equal(result.ready, true, JSON.stringify(result));
+  const submit = await f.submit(result.preflightId);
+  assert.equal(submit.ok, true, JSON.stringify(submit));
+});

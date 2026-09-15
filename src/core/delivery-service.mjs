@@ -50,7 +50,10 @@ async function prepareDeliveryOnce(db, request, options = {}) {
   if (['committed', 'failed'].includes(begun.command.state)) return parseCommandResponse(begun.command);
   for (const expired of db.prepare(`SELECT inspection_json FROM delivery_preflights p
     LEFT JOIN delivery_attempts a ON a.preflight_id = p.id
-    WHERE p.expires_at < ? AND (a.state IS NULL OR a.state = 'completed')`).all(Date.now())) discardDeliveryCache(JSON.parse(expired.inspection_json));
+    WHERE p.expires_at < ? AND (a.state IS NULL OR a.state = 'completed')`).all(Date.now())) {
+    // 缓存清理必须尽力而为：一行损坏的历史数据绝不允许卡死之后的所有预检。
+    try { discardDeliveryCache(JSON.parse(expired.inspection_json)); } catch {}
+  }
   let inspection = null;
   let retained = false;
   try {
@@ -226,6 +229,7 @@ async function submitDeliveryOnce(db, request, options = {}) {
       }
       assertLocks();
       const saved = await (options.save ?? saveDelivery)({ sourcePath: source.canonical_path, inspection, commandId, summary: request.summary,
+        authorizedRoots: [source.authorized_root, project.authorized_root],
         beforeWrite: () => { assertLocks(); checkLease(db, source, prepared.session_id, prepared.session_revision, { readOnly: inspection.readOnly }); },
         afterRefUpdate: () => options.faultInjector?.('after_delivery_ref_update') });
       localSaveEvidence = saved;

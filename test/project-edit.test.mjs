@@ -896,3 +896,39 @@ test('updateProject: strict terminal replay returns cached result before filesys
   const httpConflictBody = await httpConflict.json();
   assert.equal(httpConflictBody.code, 'COMMAND_CONFLICT');
 });
+
+test('HTTP API: avatar upload routes only surface curated public messages, never raw internal errors', async (t) => {
+  const { container, repoRoot, dbPath, avatarStorageRoot, db, cleanup } = createFixture(t, { registerHook: false });
+  const reg = registerProject(db, {
+    commandId: 'reg-avatar-message',
+    name: 'Avatar Message Test',
+    observation: sampleObservation(repoRoot),
+  });
+  db.close();
+  const service = await createCockpitHttpServer({
+    dbPath,
+    token: TOKEN,
+    authorizedRoots: [repoRoot],
+    avatarStorageRoot,
+  });
+  t.after(async () => {
+    await service.close();
+    cleanup();
+  });
+  const req = (pathname, options = {}) =>
+    fetch(`http://${service.host}:${service.port}${pathname}`, {
+      ...options,
+      headers: { authorization: `Bearer ${TOKEN}`, ...(options.headers || {}) },
+    });
+
+  // content 携带非字符串值时，旧实现会让 Buffer.from 的原生 TypeError 文本直达响应体。
+  const response = await req(`/api/v1/projects/${reg.projectId}/avatar/upload`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 123 }),
+  });
+  const body = await response.json();
+  assert.doesNotMatch(body.message ?? '', /first argument|Received type/i,
+    `内部错误文本不得进入响应：${body.message}`);
+  assert.match(body.message ?? '', /头像/);
+});

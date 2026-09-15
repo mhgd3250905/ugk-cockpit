@@ -33,7 +33,7 @@ export class ResidentFolderPicker {
     return Boolean(this._child && !this._child.killed && this._child.exitCode === null);
   }
 
-  _ensureWorker() {
+  _ensureWorker(timeout = 0) {
     // macOS opens one osascript process per pick (NSOpenPanel dies with it),
     // so there is no resident worker to keep alive.
     if (this._platform === 'darwin') return Promise.resolve();
@@ -53,6 +53,17 @@ export class ResidentFolderPicker {
       resolveReady = resolve;
       rejectReady = reject;
     });
+
+    // Worker startup must be bounded by the same selection timeout: a spawned
+    // PowerShell that never prints its ready line and never exits would
+    // otherwise leave every queued selection request pending forever.
+    let readyTimer = null;
+    const clearReadyTimer = () => {
+      if (readyTimer) {
+        clearTimeout(readyTimer);
+        readyTimer = null;
+      }
+    };
 
     try {
       const child = this._spawn(
@@ -78,6 +89,7 @@ export class ResidentFolderPicker {
           if (!readyReceived) {
             if (message.ready || message.ok) {
               readyReceived = true;
+              clearReadyTimer();
               resolveReady();
               return;
             }
@@ -97,6 +109,7 @@ export class ResidentFolderPicker {
       });
 
       const onExitOrError = (err) => {
+        clearReadyTimer();
         if (!readyReceived) {
           rejectReady(pickerError('FOLDER_PICKER_UNAVAILABLE', 'Native folder picker failed to initialize.', err));
         }
@@ -112,6 +125,17 @@ export class ResidentFolderPicker {
       child.on('exit', (code, signal) => {
         onExitOrError(new Error(`Process exited with code ${code}, signal ${signal}`));
       });
+
+      if (timeout > 0 && timeout < Infinity) {
+        readyTimer = setTimeout(() => {
+          if (readyReceived) return;
+          const timeoutError = pickerError('FOLDER_PICKER_TIMEOUT', 'Native folder picker did not return in time.');
+          rejectReady(timeoutError);
+          // Kill the stuck worker; its exit handler re-enters the same cleanup
+          // path, so later selection requests start from a fresh spawn.
+          this._cleanup();
+        }, timeout);
+      }
 
     } catch (spawnError) {
       this._cleanup();
@@ -194,7 +218,7 @@ export class ResidentFolderPicker {
 
   async selectFolder({ timeout = 120_000 } = {}) {
     const runSelection = async () => {
-      await this._ensureWorker();
+      await this._ensureWorker(timeout);
       if (this._platform === 'darwin') return this._selectMacOSFolder(timeout);
 
       return new Promise((resolve, reject) => {
