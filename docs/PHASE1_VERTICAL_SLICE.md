@@ -8,12 +8,12 @@
 
 ### alpha.46：独立审计修复与文档对齐（2026-09-15）
 
-- `0.1.0-alpha.46`：外部深度审查驱动的修复轮。基线为 main `d46ebc3`（含 alpha.45 收束后未登记的启动器 UTF-8 修复，本条一并补记）。沿用 schema 29，无新增生产依赖。
+- `0.1.0-alpha.46`：外部深度审查驱动的修复轮。基线为 main `d46ebc3`（含 alpha.45 收束后未在阶段文档补记的启动器 UTF-8 修复，本条一并补记）。沿用 schema 29，无新增生产依赖。
 
 十项已验证缺陷的根因修复（每项先以回归测试复现为红，再修复转绿）：
 
 1. `saveDelivery` 依据写时重新解析的 `git rev-parse --git-path index` 执行 mkdtemp/copy/rename，全程未过路径授权；观察与保存之间 `.git` 指针被交换可把写入重定向到授权根之外。现要求并核验 `authorizedRoots` 数组（含源授权根与项目授权根，与观察期 `authorizeDeliveryObservation` 的多根语义一致），并在 `copyFileSync` 与 `renameSync` 两个写入点之前各 revalidate 一次；送审服务传入 `[delivery_sources.authorized_root, projects.authorized_root]`。
-2. Windows 常驻文件夹选择器的 worker 就绪等待没有超时，PowerShell 挂起时 `selectFolder` 永不落定且串行队列级联阻塞"添加项目"。现就绪阶段与选取阶段共用同一超时，超时清理挂起 worker，后续请求重新拉起。
+2. Windows 常驻文件夹选择器的 worker 就绪等待没有超时，PowerShell 挂起时 `selectFolder` 永不落定且串行队列级联阻塞"添加项目"。现就绪阶段也受调用方指定的超时约束，超时清理挂起 worker，后续请求重新拉起。
 3. `prepareDelivery` 的过期预检清理循环在 try 块之外，一行损坏的 `inspection_json` 会让此后每次预检在同一位置失败（命令滞留 received）。清理改为尽力而为，坏行跳过不阻塞。
 4. `fastForwardMain` 与 `isCommitDescendant` 把调用方数值直接放进 git 尾随 revision 位置，与本仓库自述的对象 ID 不变量不一致。现分别强制 40/64 位 hex（`INVALID_SOURCE_COMMIT`/`INVALID_COMMIT_ID`）。
 5. `sendError` 的 `extra` 无校验展开，头像路由把原始 `err.message`（含 Node 内部 TypeError 文本）直通响应体。现统一只透出受控 `publicMessage`，`readAvatarUploadBody` 对 base64 字段先做类型校验。
@@ -21,7 +21,7 @@
 7. MCP 凭据引导（bootstrap）的 fetch 未接关停信号，stdin 关闭后进程可滞留约 10 秒。现与常规调用同一 `AbortSignal.any` 组合。
 8. stdio 入站行没有长度上限，与服务端 18MB 上限不对称，宿主异常可无限缓冲。现加按行计数的限流 Transform，超限 fail-closed 关停并留下 stderr 诊断。
 9. probe 通道 `git()` 的 maxBuffer 超限抛原始 libuv 错误、默认 2MB 偏小。现对齐 runGit 的 4MB 与 `GIT_BUFFER_LIMIT_EXCEEDED` 专用错误码。
-10. WAL/synchronous 连接设置只在 migrate 分支生效，`migrate:false` 的只读入口会静默回落 delete journal。现移出条件，任何打开方式一致。
+10. WAL/synchronous 连接设置只在 migrate 分支生效，`migrate:false` 会跳过连接设置。现将设置移出迁移条件，并在设置前拒绝未来 schema 版本，避免拒绝打开时修改数据库。
 
 文档对齐：README 技能数量口径改为七个（含统一的 `$cockpit`）；移除 `docs/AGENT_INSTALL.md` 对不存在端点 `/api/health` 的引用；DESIGN.md 左侧导航枚举补「使用指南」；本段补记 alpha.45 收束后遗漏的 `d46ebc3` 启动器修复。
 
@@ -29,7 +29,13 @@
 
 返修轮（2026-09-15，PR #16 复审意见，三项 P2 + 文档同步，均先复现再修复）：其一，`openCockpitDatabase` 的 WAL/FULL 设置移到 schema 版本检查之后——`journal_mode` 是持久化写入文件头的设置，此前先设置再拒绝会让一个 `user_version=999` 的未来版本数据库在返回 `UNSUPPORTED_SCHEMA_VERSION` 的同时字节与日志模式已被改动；新增回归验证被拒绝打开的文件逐字节不变且保持 delete journal。其二，文件夹选择器就绪超时重建 worker 后，旧进程延迟到达的 exit/error 回调不再操作共享状态（回调按所属 worker 隔离，迟到的 `this._child !== child` 事件直接丢弃）；新增异步退出回归——首 worker 不 ready、20ms 超时、kill 后 30ms 才异步送达 exit，第二次选择在 200ms 超时内成功且新 worker 未被杀，未用同步 emit 掩盖竞态。其三，MCP stdio 桥的 stdin 读取错误显式进入与超限行共用的统一关停路径（拆管道、销毁守卫与输入、终结 readline，`onShutdown` 经幂等 shutdown 恰好执行一次）；新增进程内回归（关停恰一次、关停后不再消费输入、`close()` 与输入错误共享同一幂等关停）与真实子进程验证。子进程用例在复审指出空洞后重写：旧版 `stdin.end()` 会先触发正常 EOF 关停、`process.exit(23)` 又代替了自然退出断言，测试在缺陷实现下也能假绿。重写后 stdin 全程保持开放，父进程跨进程确认在途 handler 已开始（stdout 标记）才注入读取错误，桥进程按 `src/mcp/main.mjs` 的真实接线经 AbortController 取消在途请求；断言取消标记、关停恰好一次、stderr 诊断、被取消请求收到 JSON-RPC 错误响应，且进程以自然退出码结束（无 `process.exit`）。该用例已在还原为旧缺陷接线（stdin 错误只拆限流层）时复现为红，证明覆盖真实行为。文档同步：本条目第 1 项的守卫参数更正为 `authorizedRoots` 数组（源授权根 + 项目授权根），revalidate 时机更正为 copy 与 rename 两个写入点之前。
 
-验证（Windows / Node.js 24.15.0，2026-09-15，本分支工作树）：独立全量 `npm test` **602 项，595 通过、0 失败、7 跳过**，约 965 秒；`npm run test:phase0` **97/97**，74.050 秒；`npm run build:web` 与 `git diff --check` 通过；跳过项与 alpha.45 基线同为平台相关 7 项。9 个新增回归用例均先在未修复源码上复现为红再转绿。独立只读复审按需求完整性、逻辑正确性、边界情况、代码质量、测试覆盖与实际运行六维度复核，A–F 全部 PASS；其两条建议（测试内重复属性行去重、`probeGitWorktree` 自身 maxBuffer 默认对齐 4MB）已采纳并纳入本次全量，第三条（revalidate 与 rename 之间的固有 TOCTOU 微窗口）为仓库既有 authorize/revalidate 防护模式的已知限制，不另行处理。
+初版验证（分支报告，Windows / Node.js 24.15.0，2026-09-15，提交 `0e3277fb1166188a8d585018b3846d44993e7651`；不代表后续返修版本）：全量 `npm test` **602 项，595 通过、0 失败、7 跳过**，约 965 秒；`npm run test:phase0` **97/97**，74.050 秒；`npm run build:web` 与 `git diff --check` 通过；跳过项与 alpha.45 基线同为平台相关 7 项。9 个新增回归用例均先在未修复源码上复现为红再转绿。独立只读复审按需求完整性、逻辑正确性、边界情况、代码质量、测试覆盖与实际运行六维度复核，A–F 全部 PASS；其两条建议（测试内重复属性行去重、`probeGitWorktree` 自身 maxBuffer 默认对齐 4MB）已采纳并纳入本次全量，第三条（revalidate 与 rename 之间的固有 TOCTOU 微窗口）为仓库既有 authorize/revalidate 防护模式的已知限制，不另行处理。
+
+主线合并与收束（2026-09-16）：以合并前 main `d46ebc324e9c94547ad5bb281049495a71f47ab1` 为基线，快进接入 PR #16 最终返修 `b8fe28add6822922662d525477cdc33739d59929`；阶段增量 3 提交、26 文件，完整工作区在收束前干净。复审确认未来 schema 无写入拒绝、旧选择器回调隔离、stdin 错误统一关停，以及保持 stdin 开放的真实子进程取消与自然退出验证均已落实。
+
+返修验证来源：分支在 `288a54efa7f4ca605ba6f1e304d0ef44c8426aa4` 报告 `npm test` **606 项，599 通过、0 失败、7 跳过**，Phase 0 **97/97**、网页构建通过；主线未将该报告冒记为独立全量。该提交至最终 `b8fe28a` 仅修改子进程回归测试与阶段文档，生产代码不变。主线在最终提交独立运行数据库、选择器、stdio、bootstrap 与版本五组专项测试 **38/38**，并完成差异检查。
+
+最终收束验证（2026-09-16，Windows / Node.js 24.15.0，`b8fe28a` 加 README、阶段记录、本机恢复三份文档改动）：`npm test -- test/database-open-settings.test.mjs test/platform/select-folder.test.mjs test/mcp-stdio-protocol.test.mjs test/mcp-bootstrap-shutdown.test.mjs test/phase0/version.test.mjs` **38/38**（2.797 秒）；`npm run test:phase0` **97/97**（94.735 秒）；`npm run build:web -- --outDir E:/AII/ugk-cockpit-review-pr16/dist/closeout-alpha46` 通过，产物写入隔离审核副本；50 处本地文档链接与 `git diff --check` 通过。随后仅补记本段验证事实，生产代码、测试和版本未变；文档独立复核无阻断项。
 
 本轮不创建发布标签或 GitHub Release，不重启本机服务，不覆盖运行网页产物或更新宿主插件。已证伪与设计限制各条如上，未登记工作链的写入归属约束、会话身份自证模型等既有契约不变。
 
