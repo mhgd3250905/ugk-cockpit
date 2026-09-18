@@ -347,7 +347,7 @@ export async function assertRepositoryAllowed(cwd, overrides = {}) {
 // Flows that only observe a path (folder selection, registration, refresh,
 // runs) gate BEFORE their first probe. The repository check itself must not
 // turn "not a repository yet" into its own error: those paths are owned by the
-// probe that follows and already report FOLDER_NOT_CODE_PROJECT / PROBE_FAILED.
+// project observation that follows; plain folders do not require Git.
 // Only a readable repository with hostile config is rejected here.
 export async function assertRepositoryAllowedForProbe(cwd, overrides = {}) {
   try {

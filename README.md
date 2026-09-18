@@ -26,6 +26,10 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.47` — 添加项目支持空文件夹、资料文件夹和未使用 Git 的普通目录，无需代码文件或项目清单。只登记所选文件夹，不创建 Git 仓库、不修改已有文件；列表、详情、刷新和 AI 接入支持文件夹项目，版本状态未采集时如实显示。沿用 schema 29。
+
+以下为 alpha.46 的历史修复与部署边界：
+
 `0.1.0-alpha.46` — 独立安全审计修复：送审保存的 Git index 路径在写入前重新经过路径授权核验，Windows 文件夹选择器启动就绪纳入超时，损坏的送审预检记录不再阻塞后续预检；`merge --ff-only` 与 `merge-base --is-ancestor` 的尾随 revision 补齐对象 ID 断言，头像路由错误响应只透出受控文案，MCP stdio 桥补齐行长度上限、写失败兜底和凭据引导的关停信号；probe 通道对齐 maxBuffer 上限与专用错误码，WAL 连接设置不再依赖迁移分支。沿用 schema 29，无新增依赖。
 
 本轮同时修正文档失实项：README 技能数量口径（六个 → 七个，含 `$cockpit`）、移除不存在的 `/api/health` 引用、DESIGN.md 导航枚举补「使用指南」，并补记 alpha.45 收束后遗漏的启动器修复 `d46ebc3`。验证与遗留项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。

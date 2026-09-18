@@ -69,6 +69,12 @@ import './project-experience.css';
 import './submit-notes.css';
 
 const STATUS = {
+  folder_ready: {
+    eyebrow: '可以继续',
+    title: '项目文件夹已准备好',
+    detail: '可以交给 AI 开始工作；此项目按文件夹管理，版本状态未采集。',
+    action: '交给 AI',
+  },
   preexisting_changes: {
     eyebrow: '需要你确认',
     title: '开始前已经有本地改动',
@@ -1945,7 +1951,7 @@ function EmptyState({ busy, onChoose }) {
       <div className="empty-badge">第一步 · 约一分钟</div>
       <h2 className="empty-title">先把一个项目放到这里</h2>
       <p className="empty-desc">
-        从电脑中手动选择一个项目文件夹。我们只读取必要的代码状态，绝不会自动清理、覆盖、提交、上传或删除你的任何文件。
+        从电脑中选择一个文件夹即可添加项目，无需已有代码或版本管理。已有文件会原样保留。
       </p>
       <div className="empty-actions">
         <Button

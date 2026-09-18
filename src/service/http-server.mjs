@@ -68,7 +68,8 @@ import {
   mergeApprovedSubmission,
   recordSessionIntegrationReview,
 } from '../core/integration-service.mjs';
-import { probeGitWorktree } from '../git/probe.mjs';
+import { git, probeGitWorktree } from '../git/probe.mjs';
+import { probeFolder, hasOwnGitMetadata } from '../core/folder-observation.mjs';
 import { assertRepositoryAllowedForProbe } from '../git/repository-policy.mjs';
 import { GIT_OBJECT_ID_PATTERN } from '../git/workspace-ops.mjs';
 import { closeFolderPicker, selectFolder } from '../platform/select-folder.mjs';
@@ -441,12 +442,6 @@ const PUBLIC_ERRORS = {
     message: '系统图片选择器没有正常返回。',
     impact: '头像未被更改，代码和已有记录不受影响。',
     requiredAction: '请重新点击“选择图片”；如果窗口被其他应用窗口遮住，请切换到它。',
-  },
-  FOLDER_NOT_CODE_PROJECT: {
-    status: 422,
-    message: '这个文件夹里没有找到可识别的代码项目。',
-    impact: '没有添加项目，也没有修改文件。',
-    requiredAction: '请重新选择包含项目代码的文件夹。',
   },
   REPARSE_POINT: {
     status: 400,
@@ -2482,7 +2477,9 @@ function findGrant(candidatePath, roots) {
 }
 
 function authorizeObservation(observation, roots) {
-  const paths = [
+  const paths = observation.repositoryIdentity?.startsWith('folder:')
+    ? [observation.canonicalPath]
+    : [
     observation.canonicalPath,
     observation.repositoryCommonDir,
     observation.gitDirectory,
@@ -2573,21 +2570,35 @@ export async function createCockpitHttpServer({
     return [...roots];
   }
 
-  async function prepareFolderSelection(selectedPath, principalHash) {
-    if (!selectedPath) return { ok: true, cancelled: true };
-    const binding = authorizeExistingPath(selectedPath, selectedPath);
-    await assertRepositoryAllowedForProbe(binding.candidateReal);
-    let observation;
+  async function observeProjectFolder(candidate, options, expectedRepositoryIdentity) {
+    // Once registered as a folder, keep its durable identity even if the user
+    // later initializes Git. Never borrow a parent directory's repository.
+    if (expectedRepositoryIdentity?.startsWith('folder:')
+      || (!expectedRepositoryIdentity && !await hasOwnGitMetadata(candidate))) {
+      return probeFolder(candidate);
+    }
+    await assertRepositoryAllowedForProbe(candidate);
+    if (!expectedRepositoryIdentity && probe === probeGitWorktree) {
+      const head = await git(candidate, ['rev-parse', '--verify', 'HEAD'], { acceptExitCodes: [0, 128] });
+      if (head.exitCode === 128) return probeFolder(candidate);
+    }
     try {
-      observation = await probe(binding.candidateReal);
+      return await probe(candidate, options);
     } catch (error) {
-      if (error?.code === 128 && /not a git repository/i.test(error?.stderr ?? '')) {
-        const publicError = new Error('Selected folder is not a Git repository.', { cause: error });
-        publicError.code = 'FOLDER_NOT_CODE_PROJECT';
-        throw publicError;
+      // Missing Git/history is not an admission requirement for a folder.
+      // Existing Git registrations must still report identity/probe failures.
+      if (!expectedRepositoryIdentity && error?.code === 128
+        && /not a git repository|unknown revision|ambiguous argument.*HEAD|Needed a single revision/i.test(error?.stderr ?? '')) {
+        return probeFolder(candidate);
       }
       throw error;
     }
+  }
+
+  async function prepareFolderSelection(selectedPath, principalHash) {
+    if (!selectedPath) return { ok: true, cancelled: true };
+    const binding = authorizeExistingPath(selectedPath, selectedPath);
+    const observation = await observeProjectFolder(binding.candidateReal);
     revalidateAuthorizedPath(binding);
     authorizeObservation(observation, [binding.rootReal]);
     const grant = activeFolderGrants.issue({
@@ -2603,7 +2614,7 @@ export async function createCockpitHttpServer({
       folderName: path.basename(binding.candidateReal),
       folderPath: binding.candidateReal,
       expiresAt: grant.expiresAt,
-      promise: '只读取必要的代码状态；不会清理、覆盖、提交、上传或删除文件。',
+      promise: '可以添加任意内容的文件夹；不会清理、覆盖、提交、上传或删除文件。',
     };
   }
 
@@ -2667,10 +2678,10 @@ export async function createCockpitHttpServer({
     const binding = authorizeExistingPath(expectedCanonicalPath, authorizedRoot);
     const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE id = ?')
       .get(targetWorktreeId)?.lifecycle_epoch ?? 0;
-    await assertRepositoryAllowedForProbe(binding.candidateReal);
-    const observation = { ...await probe(
+    const observation = { ...await observeProjectFolder(
       binding.candidateReal,
       expected?.baselineHead ? { expectedBaselineHead: expected.baselineHead } : undefined,
+      project.repository_identity,
     ), lifecycleEpoch };
     revalidateAuthorizedPath(binding);
     authorizeObservation(observation, [authorizedRoot, project.authorized_root]);
@@ -3409,8 +3420,7 @@ export async function createCockpitHttpServer({
             return;
         }
         const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
-        await assertRepositoryAllowedForProbe(binding.candidateReal);
-        const observation = await probe(binding.candidateReal);
+        const observation = await observeProjectFolder(binding.candidateReal, undefined, grant.repository_identity);
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, [binding.rootReal]);
         if (
@@ -4895,8 +4905,8 @@ export async function createCockpitHttpServer({
         }
         const lifecycleEpoch = db.prepare('SELECT lifecycle_epoch FROM worktrees WHERE canonical_path = ?')
           .get(binding.candidateReal)?.lifecycle_epoch ?? 0;
-        await assertRepositoryAllowedForProbe(binding.candidateReal);
-        const observation = { ...await probe(binding.candidateReal), lifecycleEpoch };
+        const storedIdentity = db.prepare('SELECT repository_identity FROM worktrees WHERE canonical_path = ?').get(binding.candidateReal)?.repository_identity;
+        const observation = { ...await observeProjectFolder(binding.candidateReal, undefined, storedIdentity), lifecycleEpoch };
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, requestAuthorizedRoots);
         const result = startWriteRun(db, {
@@ -4958,10 +4968,10 @@ export async function createCockpitHttpServer({
           });
           return;
         }
-        await assertRepositoryAllowedForProbe(binding.candidateReal);
-        const observation = await probe(binding.candidateReal, {
+        const storedIdentity = db.prepare('SELECT repository_identity FROM worktrees WHERE canonical_path = ?').get(binding.candidateReal)?.repository_identity;
+        const observation = await observeProjectFolder(binding.candidateReal, {
           expectedBaselineHead: row.baseline_head,
-        });
+        }, storedIdentity);
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, requestAuthorizedRoots);
         assertConversationWrite(key, body.sessionId);

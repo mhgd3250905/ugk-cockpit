@@ -446,7 +446,7 @@ test('a manually selected folder can enter the confirmation flow', async (t) => 
   assert.equal(typeof body.grantId, 'string');
 });
 
-test('a selected folder without a Git project returns a human recovery action', async (t) => {
+test('a selected folder without Git can enter the confirmation flow', async (t) => {
   const root = createRepository();
   const service = await createCockpitHttpServer({
     dbPath: dataPath(root),
@@ -465,11 +465,13 @@ test('a selected folder without a Git project returns a human recovery action', 
     cleanup(root);
   });
 
-  await assertUserError(await request(service, '/api/v1/folders/select', {
+  const selected = await request(service, '/api/v1/folders/select', {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     body: '{}',
-  }), 422, 'FOLDER_NOT_CODE_PROJECT');
+  });
+  assert.equal(selected.status, 200);
+  assert.equal(typeof (await selected.json()).grantId, 'string');
 });
 
 test('a manually selected folder below a junction ancestor cannot receive a grant', async (t) => {

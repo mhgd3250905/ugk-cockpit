@@ -302,7 +302,9 @@ export function finalizeFinish(db, request, options = {}) {
       return failCommand(db, commandId, 'observing', response);
     }
 
-    if (outcome === 'completed' && finalSnapshot.coherence !== 'coherent') {
+    const folderRun = baseline?.repository_identity?.startsWith('folder:')
+      && finalSnapshot.repositoryIdentity === baseline.repository_identity;
+    if (outcome === 'completed' && !folderRun && finalSnapshot.coherence !== 'coherent') {
       const response = {
         ok: false,
         code: 'INCOHERENT_FINAL_SNAPSHOT',
@@ -354,7 +356,7 @@ export function finalizeFinish(db, request, options = {}) {
     }
 
     const hasUnattributedChanges = (
-      baseline.index_fingerprint !== finalSnapshot.indexFingerprint
+      folderRun || baseline.index_fingerprint !== finalSnapshot.indexFingerprint
       || baseline.worktree_fingerprint !== finalSnapshot.worktreeFingerprint
     );
     if (outcome === 'completed' && hasUnattributedChanges && acknowledgeUnattributed !== true) {

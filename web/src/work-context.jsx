@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import './work-context.css';
 
 function fileStatus(git) {
+  if (git?.available === false) return '未采集版本状态';
   if (git?.hasChanges === true) return '有本地改动';
   if (git?.hasChanges === false && git?.coherence === 'coherent') return '没有本地改动';
   return '尚未记录';

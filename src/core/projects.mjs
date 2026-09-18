@@ -115,12 +115,13 @@ export function registerProject(db, request) {
       observation.worktreeIdentity,
       timestamp,
     );
+    const folderProject = observation.repositoryIdentity.startsWith('folder:');
     const status = stage === 'paused'
       ? 'paused'
       : (observation.after.hasChanges ? 'attention' : 'ready');
     const statusReason = stage === 'paused'
       ? 'user_paused'
-      : (observation.after.hasChanges ? 'preexisting_changes' : 'ready_to_start');
+      : (folderProject ? 'folder_ready' : (observation.after.hasChanges ? 'preexisting_changes' : 'ready_to_start'));
     const projectInsert = db.prepare(`
       INSERT OR IGNORE INTO projects (
         id, name, stage, worktree_id, status, status_reason,
@@ -221,15 +222,16 @@ export function refreshProject(db, request) {
       });
     }
 
+    const folderProject = observation.repositoryIdentity.startsWith('folder:');
     const hasChanges = observation.after.hasChanges ? 1 : 0;
     const status = project.stage === 'paused'
       ? 'paused'
-      : (observation.coherence !== 'coherent' || hasChanges ? 'attention' : 'ready');
+      : (!folderProject && (observation.coherence !== 'coherent' || hasChanges) ? 'attention' : 'ready');
     const statusReason = project.stage === 'paused'
       ? 'user_paused'
-      : (observation.coherence !== 'coherent'
+      : (folderProject ? 'folder_ready' : (observation.coherence !== 'coherent'
         ? 'status_check_incomplete'
-        : (hasChanges ? 'preexisting_changes' : 'ready_to_start'));
+        : (hasChanges ? 'preexisting_changes' : 'ready_to_start')));
     const timestamp = now();
     db.prepare(`
       INSERT INTO project_observations (
@@ -262,7 +264,8 @@ export function refreshProject(db, request) {
       git: {
         head: observation.after.head ?? null,
         branch: observation.after.branch ?? null,
-        hasChanges: Boolean(observation.after.hasChanges),
+        available: !folderProject,
+        hasChanges: folderProject ? null : Boolean(observation.after.hasChanges),
         coherence: observation.coherence ?? 'unknown',
       },
     };
@@ -280,7 +283,7 @@ export function readDashboard(db, { archived = false } = {}) {
            projects.archived_at, projects.archive_revision,
            projects.last_observed_at, observations.has_changes,
            observations.coherence,
-           worktrees.canonical_path,
+           worktrees.canonical_path, worktrees.repository_identity,
            runs.id AS active_run_id, runs.agent_claim, runs.goal,
            runs.health AS run_health, runs.last_heartbeat_at,
            runs.revision AS run_revision, runs.lease_generation,
@@ -312,7 +315,8 @@ export function readDashboard(db, { archived = false } = {}) {
       AND projects.archived_at IS ${archived === true ? 'NOT NULL' : 'NULL'}
     ORDER BY
       CASE
-        WHEN observations.coherence != 'coherent' OR observations.has_changes = 1 THEN 0
+        WHEN worktrees.repository_identity NOT LIKE 'folder:%'
+          AND (observations.coherence != 'coherent' OR observations.has_changes = 1) THEN 0
         WHEN runs.id IS NOT NULL THEN 1
         WHEN projects.stage != 'paused' THEN 2 ELSE 3
       END,
@@ -344,6 +348,7 @@ export function readDashboard(db, { archived = false } = {}) {
   `);
   const nowAt = Date.now();
   return rows.map((row) => {
+    const folderProject = row.repository_identity.startsWith('folder:');
     const assignment = activeAssignmentQuery.get(row.id) ?? null;
     const lastProgress = assignment ? lastProgressQuery.get(assignment.id) ?? null : null;
     const latestHandoff = latestHandoffQuery.get(row.id) ?? null;
@@ -373,7 +378,7 @@ export function readDashboard(db, { archived = false } = {}) {
         ? 'active'
         : (row.stage === 'paused'
           ? 'paused'
-          : (row.coherence !== 'coherent' || row.has_changes ? 'attention' : 'ready')),
+          : (!folderProject && (row.coherence !== 'coherent' || row.has_changes) ? 'attention' : 'ready')),
       statusReason: isWorking
         ? (isRelayWaiting
           ? 'relay_waiting'
@@ -382,11 +387,16 @@ export function readDashboard(db, { archived = false } = {}) {
           ? 'agent_waiting'
           : (assignment?.status === 'pending'
           ? 'assignment_waiting'
-          : (row.coherence !== 'coherent'
+          : (folderProject ? 'folder_ready' : (row.coherence !== 'coherent'
             ? 'status_check_incomplete'
-            : (row.has_changes ? 'preexisting_changes' : 'ready_to_start')))),
+            : (row.has_changes ? 'preexisting_changes' : 'ready_to_start'))))),
       lastObservedAt: row.last_observed_at,
       path: row.canonical_path,
+      git: {
+        available: !folderProject,
+        hasChanges: folderProject ? null : Boolean(row.has_changes),
+        coherence: row.coherence ?? 'unknown',
+      },
       lastHandoffManual: latestHandoff ? {
         id: latestHandoff.id,
         summary: latestHandoff.summary,

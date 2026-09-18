@@ -744,6 +744,7 @@ export function readProjectDetail(db, projectId, options = {}) {
     finishedAt: row.finished_at,
   } : null;
 
+  const folderProject = row.repository_identity.startsWith('folder:');
   const project = {
     id: row.id,
     name: row.name,
@@ -756,16 +757,16 @@ export function readProjectDetail(db, projectId, options = {}) {
       ? 'active'
       : (row.stage === 'paused'
         ? 'paused'
-        : (row.obs_coherence !== 'coherent' || row.obs_has_changes ? 'attention' : 'ready')),
+        : (!folderProject && (row.obs_coherence !== 'coherent' || row.obs_has_changes) ? 'attention' : 'ready')),
     statusReason: isWorking
       ? (isRelayWaiting ? 'relay_waiting' : 'active_work')
       : (isWaiting
         ? 'agent_waiting'
         : (activeAssignment?.status === 'pending'
           ? 'assignment_waiting'
-          : (row.obs_coherence !== 'coherent'
+          : (folderProject ? 'folder_ready' : (row.obs_coherence !== 'coherent'
             ? 'status_check_incomplete'
-            : (row.obs_has_changes ? 'preexisting_changes' : 'ready_to_start')))),
+            : (row.obs_has_changes ? 'preexisting_changes' : 'ready_to_start'))))),
     lastObservedAt: row.last_observed_at,
     path: row.canonical_path,
     authorizedRoot: row.authorized_root,
@@ -773,7 +774,8 @@ export function readProjectDetail(db, projectId, options = {}) {
       head: row.obs_head ?? null,
       shortHead: row.obs_head ? row.obs_head.slice(0, 7) : null,
       branch: row.obs_branch ?? null,
-      hasChanges: Boolean(row.obs_has_changes),
+      available: !folderProject,
+      hasChanges: folderProject ? null : Boolean(row.obs_has_changes),
       coherence: row.obs_coherence ?? 'unknown',
     },
     currentAgent: activeAssignment?.agent_id || row.agent_claim || row.last_agent_claim || null,
