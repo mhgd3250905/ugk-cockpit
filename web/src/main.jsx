@@ -1075,12 +1075,17 @@ function App() {
       });
       setDispatch(result);
     } catch (error) {
+      const identityChanged = error.code === 'WORKTREE_IDENTITY_CHANGED';
       setNotice(createErrorNotice(error, {
-        message: '还没有重新生成接入指令。',
-        impact: '原接手任务和项目代码保持不变。',
-        requiredAction: '请刷新状态后重试。',
-        actionLabel: '重试生成',
-        retry: () => reissueInit(project, agent),
+        message: identityChanged ? '这个项目的代码位置需要重新确认。' : '还没有重新生成接入指令。',
+        impact: identityChanged
+          ? '没有重新生成接入指令；项目记录和代码都不受影响。'
+          : '原接手任务和项目代码保持不变。',
+        requiredAction: identityChanged
+          ? `请点击“确认新代码位置”，并在系统选择器中选择 ${project.name} 原本的文件夹。`
+          : '请刷新状态后重试。',
+        actionLabel: identityChanged ? '确认新代码位置' : '重试生成',
+        retry: identityChanged ? () => confirmProjectLocationFlow(project) : () => reissueInit(project, agent),
       }));
     } finally {
       setBusy(false);
@@ -1287,13 +1292,16 @@ function App() {
     } catch (error) {
       setBusy(false);
       if (!isCurrentDetailRequest(requestId, projectId)) return;
+      const identityChanged = error.code === 'WORKTREE_IDENTITY_CHANGED';
       setProjectDetail((previous) => previous ? {
         ...previous,
         ...(previous.requestId === requestId && previous.seed.id === projectId ? {
           actionNotice: {
             error: true,
-            message: error.message || '还没有生成开发空间接入消息。',
-            detail: error.required_action || '请刷新当前项目后重试。',
+            message: identityChanged ? '这个项目的代码位置需要重新确认。' : (error.message || '还没有生成开发空间接入消息。'),
+            detail: identityChanged
+              ? `请在项目页点击“确认新代码位置”，并选择 ${project.name} 原本的文件夹；也可以重新打开此窗口重试。`
+              : (error.required_action || '请刷新当前项目后重试。'),
           },
         } : {}),
       } : previous);
