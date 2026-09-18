@@ -277,6 +277,108 @@ export function refreshProject(db, request) {
   });
 }
 
+export function confirmProjectLocation(db, request) {
+  const { commandId, projectId, observation, grantId } = request;
+  const frozenRequest = {
+    commandId,
+    projectId,
+    canonicalPath: observation.canonicalPath,
+    repositoryIdentity: observation.repositoryIdentity,
+    worktreeIdentity: observation.worktreeIdentity,
+    ...(grantId ? { grantId } : {}),
+  };
+  const begun = beginCommand(db, {
+    commandId,
+    kind: 'project.confirm-location',
+    request: frozenRequest,
+  });
+  if (begun.command.state === 'committed' || begun.command.state === 'failed') {
+    return parseCommandResponse(begun.command);
+  }
+
+  return withImmediateTransaction(db, () => {
+    const command = readCommand(db, commandId);
+    if (command.state === 'committed' || command.state === 'failed') {
+      return parseCommandResponse(command);
+    }
+    const project = readProjectContext(db, projectId);
+    if (!project) {
+      return failCommand(db, commandId, { ok: false, code: 'PROJECT_NOT_FOUND' });
+    }
+    // The user re-selected a folder through the system picker; rebinding is
+    // only sanctioned for the exact same path. A different path keeps the
+    // original project untouched.
+    if (project.canonical_path !== observation.canonicalPath) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'PROJECT_LOCATION_CHANGED',
+        projectId,
+      });
+    }
+    const hasChanges = observation.after.hasChanges ? 1 : 0;
+    const status = project.stage === 'paused'
+      ? 'paused'
+      : (observation.coherence !== 'coherent' || hasChanges ? 'attention' : 'ready');
+    const statusReason = project.stage === 'paused'
+      ? 'user_paused'
+      : (observation.coherence !== 'coherent'
+        ? 'status_check_incomplete'
+        : (hasChanges ? 'preexisting_changes' : 'ready_to_start'));
+    const timestamp = now();
+    db.prepare(`
+      INSERT INTO project_observations (
+        id, project_id, head, branch, index_fingerprint, worktree_fingerprint,
+        has_changes, coherence, observed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      `project_observation_${commandId.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+      projectId,
+      observation.after.head ?? null,
+      observation.after.branch ?? null,
+      observation.after.indexFingerprint ?? null,
+      observation.after.worktreeFingerprint ?? null,
+      hasChanges,
+      observation.coherence ?? 'unknown',
+      observation.observedAt,
+    );
+    db.prepare(`
+      UPDATE worktrees
+      SET repository_identity = ?, identity_fingerprint = ?
+      WHERE id = ?
+    `).run(observation.repositoryIdentity, observation.worktreeIdentity, project.worktree_id);
+    db.prepare(`
+      UPDATE projects
+      SET repository_identity = ?, status = ?, status_reason = ?,
+          last_observed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      observation.repositoryIdentity, status, statusReason,
+      observation.observedAt, timestamp, projectId,
+    );
+    const response = {
+      ok: true,
+      commandId,
+      projectId,
+      name: project.name,
+      status,
+      statusReason,
+      observedAt: observation.observedAt,
+      locationConfirmed: true,
+      git: {
+        head: observation.after.head ?? null,
+        branch: observation.after.branch ?? null,
+        hasChanges: Boolean(observation.after.hasChanges),
+        coherence: observation.coherence ?? 'unknown',
+      },
+    };
+    db.prepare(`
+      UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?
+      WHERE id = ? AND state = 'received'
+    `).run(canonicalJson(response), timestamp, commandId);
+    return response;
+  });
+}
+
 export function readDashboard(db, { archived = false } = {}) {
   const rows = db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.avatar_path,

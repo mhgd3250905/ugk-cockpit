@@ -953,6 +953,52 @@ function App() {
     }
   }
 
+  // WORKTREE_IDENTITY_CHANGED 的用户确认出路：重新选择同一文件夹后，由服务端
+  // 在事务和命令日志中把项目身份更新为当前这份代码，保留全部历史记录。
+  async function confirmProjectLocationFlow(project) {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const selection = await api('/api/v1/folders/select', { method: 'POST', body: '{}' });
+      if (selection.cancelled) {
+        setNotice({
+          tone: 'error',
+          message: '还没有确认代码位置。',
+          impact: '项目记录保持原样，项目代码不受影响。',
+          required_action: '请在系统选择器中选择该项目原本的文件夹完成确认。',
+          actionLabel: '重新选择项目文件夹',
+          retry: () => confirmProjectLocationFlow(project),
+        });
+        return;
+      }
+      const result = await api(`/api/v1/projects/${encodeURIComponent(project.id)}/confirm-location`, {
+        method: 'POST',
+        body: JSON.stringify({ commandId: crypto.randomUUID(), grantId: selection.grantId }),
+      });
+      await refresh({
+        successNotice: {
+          tone: 'success',
+          message: `已确认 ${result.name} 的当前代码位置。`,
+          impact: '项目的历史记录全部保留，现在可以继续交给 AI 接手。',
+          actionLabel: '知道了',
+          retry: () => setNotice(null),
+        },
+      });
+    } catch (error) {
+      setNotice(createErrorNotice(error, {
+        message: '没有完成代码位置确认。',
+        impact: '项目记录保持原样，项目代码不受影响。',
+        requiredAction: error.code === 'PROJECT_LOCATION_CHANGED'
+          ? '刚才选择的是另一个文件夹；请重新选择该项目原本的文件夹。'
+          : '请重新打开选择窗口后再试。',
+        actionLabel: '重新选择项目文件夹',
+        retry: () => confirmProjectLocationFlow(project),
+      }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function register(projectName, projectStage) {
     if (!selection) {
       await chooseFolder();
@@ -1061,12 +1107,17 @@ function App() {
       setDispatch(result);
       await refresh();
     } catch (error) {
+      const identityChanged = error.code === 'WORKTREE_IDENTITY_CHANGED';
       setNotice(createErrorNotice(error, {
-        message: '还没有创建接手任务。',
-        impact: '没有确认创建新的接手任务，项目代码不受影响。',
-        requiredAction: '请检查任务目标和当前项目状态后重试。',
-        actionLabel: '重试创建',
-        retry: () => createHandoff(),
+        message: identityChanged ? '这个项目的代码位置需要重新确认。' : '还没有创建接手任务。',
+        impact: identityChanged
+          ? '没有创建接手任务；项目记录和代码都不受影响。'
+          : '没有确认创建新的接手任务，项目代码不受影响。',
+        requiredAction: identityChanged
+          ? `请点击“确认新代码位置”，并在系统选择器中选择 ${handoffProject.name} 原本的文件夹。`
+          : '请检查任务目标和当前项目状态后重试。',
+        actionLabel: identityChanged ? '确认新代码位置' : '重试创建',
+        retry: identityChanged ? () => confirmProjectLocationFlow(handoffProject) : () => createHandoff(),
       }));
     } finally {
       setBusy(false);

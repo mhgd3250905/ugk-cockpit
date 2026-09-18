@@ -35,6 +35,7 @@ import {
   revalidateEmptyDirectory,
 } from '../core/path-guard.mjs';
 import {
+  confirmProjectLocation,
   readDashboard,
   readProjectContext,
   refreshProject,
@@ -3467,6 +3468,72 @@ export async function createCockpitHttpServer({
         });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, { commandId: body.commandId });
+        return;
+      }
+
+      const projectConfirmLocationMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/confirm-location$/);
+      if (request.method === 'POST' && projectConfirmLocationMatch) {
+        const projectId = decodeURIComponent(projectConfirmLocationMatch[1]);
+        // Rebinding a project onto a re-identified folder is an explicit user
+        // action: only the same-origin browser session may confirm it.
+        if (authentication.kind !== 'browser') {
+          sendError(response, 'AUTH_REQUIRED');
+          return;
+        }
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        requireString(body, 'grantId');
+        if (Object.keys(body).some((key) => !['commandId', 'grantId'].includes(key))) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        const project = readProjectContext(db, projectId);
+        if (!project) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const grant = activeFolderGrants.claim(body.grantId, body.commandId, authentication.principalHash);
+        const replay = readCommand(db, body.commandId);
+        if (replay?.kind === 'project.confirm-location' && ['committed', 'failed'].includes(replay.state)) {
+          const frozen = JSON.parse(replay.request_json);
+          if (frozen.grantId !== body.grantId || frozen.projectId !== projectId) {
+            const error = new Error('Command payload changed during replay.');
+            error.code = 'COMMAND_CONFLICT';
+            throw error;
+          }
+          activeFolderGrants.complete(body.grantId, body.commandId);
+          const result = parseCommandResponse(replay);
+          if (result.ok) sendJson(response, 200, result);
+          else sendError(response, result.code, { commandId: body.commandId });
+          return;
+        }
+        const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
+        await assertRepositoryAllowedForProbe(binding.candidateReal);
+        const observation = await probe(binding.candidateReal);
+        revalidateAuthorizedPath(binding);
+        authorizeObservation(observation, [binding.rootReal]);
+        if (
+          observation.canonicalPath !== grant.canonical_path
+          || observation.repositoryIdentity !== grant.repository_identity
+          || observation.worktreeIdentity !== grant.worktree_identity
+        ) {
+          activeFolderGrants.complete(body.grantId, body.commandId);
+          const error = new Error('Folder identity changed after selection.');
+          error.code = 'FOLDER_SELECTION_CHANGED';
+          throw error;
+        }
+        const result = confirmProjectLocation(db, {
+          commandId: body.commandId,
+          projectId,
+          observation,
+          grantId: body.grantId,
+        });
+        activeFolderGrants.complete(body.grantId, body.commandId);
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          commandId: body.commandId,
+          extra: { project_id: result.projectId ?? null },
+        });
         return;
       }
 

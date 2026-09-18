@@ -102,7 +102,12 @@ export function authorizeEmptyDirectory(candidatePath, grantedRoot = candidatePa
     inode: details.ino.toString(),
     birthtimeNs: details.birthtimeNs.toString(),
   };
-  const fileIdentity = createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
+  // 与 src/git/probe.mjs 的 fileIdentity 同一规则：指纹不含 device，
+  // macOS 的卷号会随重启/系统更新漂移，inode+birthtimeNs 足以定位目录条目。
+  const fileIdentity = createHash('sha256').update(JSON.stringify({
+    inode: evidence.inode,
+    birthtimeNs: evidence.birthtimeNs,
+  })).digest('hex');
   return Object.freeze({
     rootInput,
     candidateInput,
@@ -134,7 +139,10 @@ export function revalidateEmptyDirectory(binding) {
     inode: details.ino.toString(),
     birthtimeNs: details.birthtimeNs.toString(),
   };
-  const currentFileIdentity = createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
+  const currentFileIdentity = createHash('sha256').update(JSON.stringify({
+    inode: evidence.inode,
+    birthtimeNs: evidence.birthtimeNs,
+  })).digest('hex');
   if (binding.fileIdentity && currentFileIdentity !== binding.fileIdentity) {
     throw new PathScopeError('目录身份在确认后发生变化，已停止访问。', 'DIRECTORY_IDENTITY_CHANGED');
   }

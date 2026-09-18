@@ -6,8 +6,15 @@ export async function verifyServiceData(directory, url) {
   const db = new DatabaseSync(path.join(directory, 'cockpit.db'), { readOnly: true });
   let projects;
   try {
-    const hasRemovedAt = db.prepare('PRAGMA table_info(projects)').all().some((column) => column.name === 'removed_at');
-    projects = db.prepare(`SELECT id FROM projects${hasRemovedAt ? ' WHERE removed_at IS NULL' : ''}`).all();
+    // Match the dashboard's visible-project scope: removed and user-archived
+    // projects are intentionally absent from the active list; counting them
+    // here would refuse a perfectly consistent service after any archive.
+    const columns = db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name);
+    const visibility = ['removed_at', 'archived_at']
+      .filter((column) => columns.includes(column))
+      .map((column) => `${column} IS NULL`)
+      .join(' AND ');
+    projects = db.prepare(`SELECT id FROM projects${visibility ? ` WHERE ${visibility}` : ''}`).all();
   } finally {
     db.close();
   }

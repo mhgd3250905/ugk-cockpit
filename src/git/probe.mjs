@@ -137,9 +137,17 @@ export async function fileIdentity(targetPath) {
     inode: details.ino.toString(),
     birthtimeNs: details.birthtimeNs.toString(),
   };
+  // The fingerprint deliberately excludes `device`: on macOS the APFS volume
+  // device number drifts across reboots and OS updates (observed 16777231 →
+  // 16777234) while inode and birthtime are untouched, which would misreport
+  // an untouched working copy as replaced. inode+birthtimeNs already pinpoints
+  // one directory entry per volume; path-anchored comparisons cover the rest.
   return {
     evidence,
-    fingerprint: digest(JSON.stringify(evidence)),
+    fingerprint: digest(JSON.stringify({
+      inode: evidence.inode,
+      birthtimeNs: evidence.birthtimeNs,
+    })),
   };
 }
 
