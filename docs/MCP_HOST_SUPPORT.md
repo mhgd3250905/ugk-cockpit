@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Codex | 每次请求的 `_meta.threadId` | 已适配，保留既有验收记录 |
 | ZCode | `_meta['com.zcode/request-context'].session_id`，以及命名空间存在时的镜像 `session_id` | 已适配，保留既有验收记录 |
-| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增适配；本机 CLI 实际请求已验证，IDE 原聊天恢复待重连验收 |
+| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增适配；本机 CLI 实际请求已验证；2026-09-20 用户重载 IDE MCP 后确认接力测试通过 |
 | Claude Code | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持；进程环境变量会过时 |
 | Cursor | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持 |
 | Gemini CLI | 核对源码的 `_meta` 只有每次生成的 `progressToken` | 不接受进度编号作为聊天身份 |
@@ -22,7 +22,7 @@
 
 验证分两步：先在目标聊天调用 `ugk_work_context({})` 核对身份识别与绑定状态；有用户明确提供的接力指令时再执行该指令，只有返回的 sessionId、revision 和可继续状态才是恢复成功证据。身份被识别不自动取得已有工作会话的写权限。
 
-本机实际 CLI 探针收到的 `_meta` 字段为 `antigravity.google/artifacts_dir`、`antigravity.google/conversation_id`、`progressToken`。连续两次调用与重建 CLI 后恢复同一聊天的身份摘要相同，新聊天摘要不同，共 4 次真实调用通过；临时探针配置已移除。只使用聊天字段；不从 artifacts 目录推断身份。本机 IDE 程序包含同名字段，但这不是原 IDE 聊天业务恢复成功的证明。
+本机实际 CLI 探针收到的 `_meta` 字段为 `antigravity.google/artifacts_dir`、`antigravity.google/conversation_id`、`progressToken`。连续两次调用与重建 CLI 后恢复同一聊天的身份摘要相同，新聊天摘要不同，共 4 次真实调用通过；临时探针配置已移除。只使用聊天字段；不从 artifacts 目录推断身份。本机 IDE 程序包含同名字段，程序字段和 CLI 探针本身不代表 IDE 业务验收；2026-09-20 的 IDE 接力通过来自用户重载后的现场确认，未另行取得其 sessionId/revision 回执。
 
 ## 其他常用宿主的已知边界
 
