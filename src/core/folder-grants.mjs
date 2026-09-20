@@ -102,7 +102,7 @@ export class EmptyFolderGrantStore {
         error.code = 'FOLDER_GRANT_EXPIRED';
         throw error;
       }
-      if (principalHash && grant.principal_hash !== principalHash) {
+      if (grant.principal_hash !== principalHash) {
         const error = new Error('Empty folder grant is missing or expired.');
         error.code = 'FOLDER_GRANT_EXPIRED';
         throw error;

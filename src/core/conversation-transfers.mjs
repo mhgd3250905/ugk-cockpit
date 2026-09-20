@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { beginCommand, canonicalJson, parseCommandResponse } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { readSessionContext } from './assignments.mjs';
@@ -102,7 +102,13 @@ export function consumeConversationTransfer(db, request = {}, options = {}) {
   if (!text(request.transferCode) || !text(request.conversationKey) || request.binding?.bindingKind !== 'host'
     || !text(request.binding.host) || !text(request.binding.locator)) return failure('CONVERSATION_IDENTITY_REQUIRED');
   return execute(db, 'consume', request, options, ({ commandId, at }) => {
-    const row = db.prepare('SELECT * FROM conversation_transfers WHERE session_id = ? AND code_hash = ?').get(request.sessionId, hash(request.transferCode));
+    const providedHash = hash(request.transferCode);
+    const providedBuffer = Buffer.from(providedHash, 'hex');
+    const row = db.prepare('SELECT * FROM conversation_transfers WHERE session_id = ?').all(request.sessionId)
+      .find((candidate) => {
+        const storedBuffer = Buffer.from(candidate.code_hash, 'hex');
+        return storedBuffer.length === providedBuffer.length && timingSafeEqual(storedBuffer, providedBuffer);
+      }) ?? null;
     if (!row || row.state !== 'pending') return failure('CONVERSATION_TRANSFER_INVALID');
     if (row.expires_at <= Date.parse(at)) return failure('CONVERSATION_TRANSFER_EXPIRED');
     if (row.target_host && (row.target_host !== request.binding.host || row.target_conversation_id !== request.binding.locator)) return failure('CONVERSATION_TRANSFER_TARGET_MISMATCH');
