@@ -26,6 +26,10 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.48` — 补齐 Antigravity 原生 MCP 聊天身份识别，沿用既有持久绑定与接力协议。Codex、ZCode、Antigravity 的支持入口，以及 Claude Code、Cursor、Gemini CLI 的已核实限制，见[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。自动安装与聊天身份支持分别验收，不把工具连接成功当成接力成功。
+
+以下为 alpha.47 的文件夹支持记录：
+
 `0.1.0-alpha.47` — 添加项目支持空文件夹、资料文件夹和未使用 Git 的普通目录，无需代码文件或项目清单。只登记所选文件夹，不创建 Git 仓库、不修改已有文件；列表、详情、刷新和 AI 接入支持文件夹项目，版本状态未采集时如实显示。沿用 schema 29。
 
 以下为 alpha.46 的历史修复与部署边界：

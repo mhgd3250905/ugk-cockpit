@@ -2,6 +2,8 @@
 
 这份说明供收到用户“帮我安装这个工具”请求的 Agent 执行。自动安装目前支持 Windows 与 macOS 下的 Codex 和 ZCode。用户不需要理解 MCP 或记住技能名。
 
+其他宿主及聊天身份支持范围见[宿主支持清单](MCP_HOST_SUPPORT.md)。Antigravity 已适配原生逐请求身份；这不表示已有 Codex/ZCode 自动安装器可直接套用到其他宿主。
+
 ## 取得程序并安装
 
 1. 在用户的软件目录取得本仓库。新安装可使用 `git clone https://github.com/mhgd3250905/ugk-cockpit.git`；已有目录先核对来源和状态，不能覆盖、清理或重置已有修改，也不要为了安装自动拉取合并。不要把用户的业务项目当成 Cockpit 程序目录。

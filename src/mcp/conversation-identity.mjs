@@ -7,6 +7,11 @@ export function conversationIdentity(meta) {
   const candidates = [];
   if (explicit != null) candidates.push(explicit);
   if (meta?.threadId !== undefined) candidates.push({ host: 'codex', id: meta.threadId });
+  // Antigravity attaches its conversation identity to each tools/call request.
+  // IDE and CLI use the same namespace; a bare conversation_id is ambiguous.
+  if (meta && Object.hasOwn(meta, 'antigravity.google/conversation_id')) {
+    candidates.push({ host: 'antigravity', id: meta['antigravity.google/conversation_id'] });
+  }
   // ZCode emits both its namespaced request context and mirrored top-level
   // fields. A bare session_id is not enough to identify the host.
   if (meta && Object.hasOwn(meta, 'com.zcode/request-context')) {

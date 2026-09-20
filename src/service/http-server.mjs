@@ -261,7 +261,7 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '当前宿主没有提供可核验的平台和会话 ID，不能写入 AI 工作节点。',
     impact: '代码、会话归属和已有记录都没有被修改。',
-    requiredAction: '请升级并加载支持当前宿主会话元数据的 MCP 接入；身份就绪后查询，必要时由用户在工作台授权转交。不要重新 init 或猜身份。',
+    requiredAction: '请核对 docs/MCP_HOST_SUPPORT.md 并重新加载对应宿主的 MCP 接入；当前请求缺少支持的聊天身份，工作台转交也不能代替身份适配。不要重新 init 或猜身份。',
   },
   CONVERSATION_TAKEOVER_NOT_REQUIRED: {
     status: 409,

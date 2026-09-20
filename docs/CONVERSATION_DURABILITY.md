@@ -39,7 +39,7 @@ schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_
 
 ### 身份与授权事实源
 
-每次 MCP 请求从宿主元数据取得身份：Codex 的 `_meta.threadId`；ZCode 的 `_meta['com.zcode/request-context'].session_id`，以及该命名空间存在时的镜像 `_meta.session_id`；通用适配的 `_meta['io.ugk.cockpit/conversation'] = { host, id }`。多个来源必须一致，冲突或格式错误直接拒绝。平台与会话 ID 不接受模型普通工具参数注入，不从目录、PID、最新聊天或继承环境猜测。
+每次 MCP 请求从宿主元数据取得身份：Codex 的 `_meta.threadId`；Antigravity 的 `_meta['antigravity.google/conversation_id']`；ZCode 的 `_meta['com.zcode/request-context'].session_id`，以及该命名空间存在时的镜像 `_meta.session_id`；通用适配的 `_meta['io.ugk.cockpit/conversation'] = { host, id }`。多个来源必须一致，冲突或格式错误直接拒绝。平台与会话 ID 不接受模型普通工具参数注入，不从目录、PID、最新聊天或继承环境猜测。
 
 ZCode 传递机制已从本机安装代码查明并接入；原聊天授权接手及后续 context 可写结果另由用户在本对话提供并确认。该现场结果不扩大为所有 ZCode 重启、分叉、并行场景均已现场验证，后者仍以各自测试证据为准。
 
