@@ -478,7 +478,7 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '这份代码还有进行中的工作，位置确认被暂缓。',
     impact: 'Cockpit 没有修改代码，也没有改变任何身份绑定。',
-    requiredAction: '请先在工作台完成这个项目的接管或结束当前工作，再回到项目卡片确认代码位置。',
+    requiredAction: '请先在工作台处理进行中的工作：正常完成结束；若结束也被“代码位置已变化”拒绝，则按指引释放写入租约（不改动代码）。之后再回到项目卡片确认代码位置。',
   },
   PROJECT_NOT_FOUND: {
     status: 404,
