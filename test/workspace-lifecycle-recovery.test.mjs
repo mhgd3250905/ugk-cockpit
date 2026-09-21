@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { openCockpitDatabase } from '../src/core/database.mjs';
+import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../src/core/database.mjs';
 import { EmptyFolderGrantStore } from '../src/core/folder-grants.mjs';
 import { authorizeEmptyDirectory } from '../src/core/path-guard.mjs';
 import { setWorkLineClosed } from '../src/core/manual-records.mjs';
@@ -133,7 +133,7 @@ test('schema 26 history upgrades repeatedly without changing existing work, leas
   for (let pass = 0; pass < 2; pass += 1) {
     const upgraded = openCockpitDatabase(f.dbPath);
     try {
-      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, 29);
+      assert.equal(upgraded.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 27').get().n, 1);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 28').get().n, 1);
       assert.equal(upgraded.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version = 29').get().n, 1);

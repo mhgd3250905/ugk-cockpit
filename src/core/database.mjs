@@ -1,8 +1,9 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { migrateLegacyFileIdentities } from './identity-migration.mjs';
 
-export const SUPPORTED_SCHEMA_VERSION = 29;
+export const SUPPORTED_SCHEMA_VERSION = 30;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1113,6 +1114,16 @@ END;
       if (!columns.some((column) => column.name === 'removed_at')) {
         db.exec('ALTER TABLE projects ADD COLUMN removed_at TEXT;');
       }
+    },
+  },
+  {
+    version: 30,
+    name: 'identity-fingerprint-device-drift',
+    apply(db) {
+      // Rewrite legacy device-bound fingerprints that still match a
+      // recomputation against the current stat, in place and idempotently.
+      // See src/core/identity-migration.mjs for the full contract.
+      migrateLegacyFileIdentities(db);
     },
   },
 ];

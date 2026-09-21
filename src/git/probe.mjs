@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -128,6 +128,36 @@ export async function git(cwd, args, {
 
 export async function gitText(cwd, args, options) {
   return (await git(cwd, args, options)).stdout;
+}
+
+// Synchronous twin of git(): only for pre-listen database migrations, where no
+// event loop exists yet. remoteAuthArguments is async and exclusively serves
+// fetch/push/ls-remote, so this read-only helper never needs it.
+export function gitSync(cwd, args, {
+  timeoutMs = 5_000,
+  maxBuffer = 4 * 1024 * 1024,
+  acceptExitCodes = [0],
+} = {}) {
+  try {
+    const stdout = execFileSync('git', [...SAFE_GIT_PREFIX, ...args], {
+      cwd,
+      timeout: timeoutMs,
+      maxBuffer,
+      windowsHide: true,
+      shell: false,
+      encoding: 'utf8',
+      env: safeGitEnvironment(),
+    });
+    return { exitCode: 0, stdout: stdout.trim() };
+  } catch (error) {
+    // execFileSync reports a non-zero exit through error.status; error.code
+    // only carries spawn failures (ENOENT and friends).
+    const exitCode = typeof error?.status === 'number' ? error.status : error?.code;
+    if (acceptExitCodes.includes(exitCode)) {
+      return { exitCode, stdout: (error.stdout ?? '').toString().trim() };
+    }
+    throw error;
+  }
 }
 
 export async function fileIdentity(targetPath) {

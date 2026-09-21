@@ -474,6 +474,12 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 没有自动改变绑定，也没有修改代码。',
     requiredAction: '请从原项目卡片进入“重新选择位置”并确认。',
   },
+  PROJECT_LOCATION_CONFIRMATION_BUSY: {
+    status: 409,
+    message: '这份代码还有进行中的工作，位置确认被暂缓。',
+    impact: 'Cockpit 没有修改代码，也没有改变任何身份绑定。',
+    requiredAction: '请先在工作台完成这个项目的接管或结束当前工作，再回到项目卡片确认代码位置。',
+  },
   PROJECT_NOT_FOUND: {
     status: 404,
     message: '找不到这个项目。',
@@ -3396,15 +3402,14 @@ export async function createCockpitHttpServer({
           error.code = 'INVALID_REQUEST';
           throw error;
         }
-        const grant = activeFolderGrants.claim(
-          body.grantId,
-          body.commandId,
-          authentication.principalHash,
-        );
+        // Terminal journal entries replay without re-claiming the grant: the
+        // selection TTL must not invalidate the receipt of a completed or
+        // failed registration (same rule as confirm-location).
         const replay = readCommand(db, body.commandId);
         if (replay?.kind === 'project.register' && ['committed', 'failed'].includes(replay.state)) {
           const frozen = JSON.parse(replay.request_json);
-          const expectedName = body.name?.trim() || path.basename(grant.canonical_path);
+          const grantRow = activeFolderGrants.read(body.grantId);
+          const expectedName = body.name?.trim() || (grantRow ? path.basename(grantRow.canonical_path) : '');
           if (
             frozen.grantId !== body.grantId
             || frozen.name !== expectedName
@@ -3420,6 +3425,11 @@ export async function createCockpitHttpServer({
             else sendError(response, result.code, { commandId: body.commandId });
             return;
         }
+        const grant = activeFolderGrants.claim(
+          body.grantId,
+          body.commandId,
+          authentication.principalHash,
+        );
         const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
         const observation = await observeProjectFolder(binding.candidateReal, undefined, grant.repository_identity);
         revalidateAuthorizedPath(binding);
@@ -3492,7 +3502,9 @@ export async function createCockpitHttpServer({
           sendError(response, 'PROJECT_NOT_FOUND');
           return;
         }
-        const grant = activeFolderGrants.claim(body.grantId, body.commandId, authentication.principalHash);
+        // A terminal command replays from the journal before the grant is
+        // touched: the 5-minute selection TTL must not rob a retry of the
+        // receipt for work the platform already committed.
         const replay = readCommand(db, body.commandId);
         if (replay?.kind === 'project.confirm-location' && ['committed', 'failed'].includes(replay.state)) {
           const frozen = JSON.parse(replay.request_json);
@@ -3504,12 +3516,18 @@ export async function createCockpitHttpServer({
           activeFolderGrants.complete(body.grantId, body.commandId);
           const result = parseCommandResponse(replay);
           if (result.ok) sendJson(response, 200, result);
-          else sendError(response, result.code, { commandId: body.commandId });
+          else sendError(response, result.code, {
+            commandId: body.commandId,
+            extra: { project_id: result.projectId ?? null },
+          });
           return;
         }
+        const grant = activeFolderGrants.claim(body.grantId, body.commandId, authentication.principalHash);
         const binding = authorizeExistingPath(grant.folder_path, grant.folder_path);
-        await assertRepositoryAllowedForProbe(binding.candidateReal);
-        const observation = await probe(binding.candidateReal);
+        // Folder-registered projects carry no Git metadata; observation must
+        // use the same route registration does, keeping the durable folder:
+        // identity instead of failing on a git probe.
+        const observation = await observeProjectFolder(binding.candidateReal, undefined, grant.repository_identity);
         revalidateAuthorizedPath(binding);
         authorizeObservation(observation, [binding.rootReal]);
         if (

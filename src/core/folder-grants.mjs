@@ -28,7 +28,12 @@ export class FolderGrantStore {
   claim(grantId, commandId, principalHash) {
     return withImmediateTransaction(this.db, () => {
       const grant = this.db.prepare('SELECT * FROM folder_grants WHERE id = ?').get(grantId);
-      if (!grant || grant.expires_at <= this.clock() || grant.principal_hash !== principalHash) {
+      if (!grant) {
+        const error = new Error('Folder grant is missing or expired.');
+        error.code = 'FOLDER_GRANT_EXPIRED';
+        throw error;
+      }
+      if (grant.principal_hash !== principalHash) {
         const error = new Error('Folder grant is missing or expired.');
         error.code = 'FOLDER_GRANT_EXPIRED';
         throw error;
@@ -38,14 +43,54 @@ export class FolderGrantStore {
         error.code = 'FOLDER_GRANT_IN_USE';
         throw error;
       }
+      if (grant.state === 'consumed') {
+        const error = new Error('Folder grant has already been consumed.');
+        error.code = 'FOLDER_GRANT_CONSUMED';
+        throw error;
+      }
+      // A same-command re-claim of a claimed grant survives expiry: the TTL
+      // gates first use only, so a crashed attempt stays retryable with the
+      // original commandId instead of stranding the grant.
+      if (grant.state === 'claimed') return grant;
       if (grant.state === 'active') {
+        if (grant.expires_at <= this.clock()) {
+          const error = new Error('Folder grant is missing or expired.');
+          error.code = 'FOLDER_GRANT_EXPIRED';
+          throw error;
+        }
         this.db.prepare(`
           UPDATE folder_grants SET state = 'claimed', claimed_by_command = ?
           WHERE id = ? AND state = 'active'
         `).run(commandId, grantId);
+        return this.db.prepare('SELECT * FROM folder_grants WHERE id = ?').get(grantId);
       }
-      return this.db.prepare('SELECT * FROM folder_grants WHERE id = ?').get(grantId);
+      const error = new Error('Folder grant is missing or expired.');
+      error.code = 'FOLDER_GRANT_EXPIRED';
+      throw error;
     });
+  }
+
+  unclaim(grantId, commandId) {
+    return withImmediateTransaction(this.db, () => {
+      const grant = this.db.prepare('SELECT * FROM folder_grants WHERE id = ?').get(grantId);
+      if (!grant) return false;
+      if (grant.state === 'claimed' && grant.claimed_by_command === commandId) {
+        this.db.prepare(`
+          UPDATE folder_grants SET state = 'active', claimed_by_command = NULL
+          WHERE id = ? AND state = 'claimed' AND claimed_by_command = ?
+        `).run(grantId, commandId);
+        return true;
+      }
+      return false;
+    });
+  }
+
+  release(grantId, commandId) {
+    return this.unclaim(grantId, commandId);
+  }
+
+  read(grantId) {
+    return this.db.prepare('SELECT * FROM folder_grants WHERE id = ?').get(grantId) ?? null;
   }
 
   complete(grantId, commandId) {

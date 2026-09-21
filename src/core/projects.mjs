@@ -7,6 +7,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { statIdentityPair } from './identity-migration.mjs';
 import { resolveProjectAvatar } from './project-avatars.mjs';
 
 function now() {
@@ -277,6 +278,36 @@ export function refreshProject(db, request) {
   });
 }
 
+function readRebindConflict(db, projectId, scopeWorktreeIds, oldRepositoryIdentity) {
+  const placeholders = scopeWorktreeIds.map(() => '?').join(', ');
+  const activeRun = db.prepare(`
+    SELECT id FROM runs WHERE worktree_id IN (${placeholders}) AND lifecycle = 'active' LIMIT 1
+  `).get(...scopeWorktreeIds);
+  if (activeRun) return { blockingRunId: activeRun.id };
+  const lease = db.prepare(`
+    SELECT worktree_id FROM write_leases WHERE worktree_id IN (${placeholders}) LIMIT 1
+  `).get(...scopeWorktreeIds);
+  if (lease) return { blockingWorktreeId: lease.worktree_id };
+  const assignment = db.prepare(`
+    SELECT id, status FROM assignments
+    WHERE (project_id = ? OR worktree_id IN (${placeholders}))
+      AND status IN ('pending', 'accepted', 'active')
+    LIMIT 1
+  `).get(projectId, ...scopeWorktreeIds);
+  if (assignment) return { blockingAssignmentId: assignment.id, assignmentStatus: assignment.status };
+  if (oldRepositoryIdentity) {
+    const lock = db.prepare(
+      'SELECT lock_id FROM repository_locks WHERE repository_identity = ? AND expires_at > ? LIMIT 1',
+    ).get(oldRepositoryIdentity, Date.now());
+    if (lock) return { blockingLockId: lock.lock_id };
+    const reservation = db.prepare(
+      'SELECT command_id FROM workspace_lifecycle_reservations WHERE repository_identity = ? LIMIT 1',
+    ).get(oldRepositoryIdentity);
+    if (reservation) return { blockingCommandId: reservation.command_id };
+  }
+  return null;
+}
+
 export function confirmProjectLocation(db, request) {
   const { commandId, projectId, observation, grantId } = request;
   const frozenRequest = {
@@ -315,15 +346,41 @@ export function confirmProjectLocation(db, request) {
         projectId,
       });
     }
+    const oldRepositoryIdentity = project.worktree_repository_identity || null;
+    const oldWorktreeIdentity = project.identity_fingerprint || null;
+    const siblings = oldRepositoryIdentity
+      ? db.prepare('SELECT id FROM worktrees WHERE repository_identity = ?').all(oldRepositoryIdentity)
+      : [];
+    const scopeWorktreeIds = siblings.length
+      ? siblings.map((row) => row.id)
+      : [project.worktree_id];
+
+    // An in-flight work chain must never have the ground pulled out from
+    // under it: its snapshots would no longer reconcile with the rebound
+    // identities and the run could never finish. The user has to end or
+    // take over first, in the workbench.
+    const conflict = readRebindConflict(db, projectId, scopeWorktreeIds, oldRepositoryIdentity);
+    if (conflict) {
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'PROJECT_LOCATION_CONFIRMATION_BUSY',
+        projectId,
+        ...conflict,
+      });
+    }
+
     const hasChanges = observation.after.hasChanges ? 1 : 0;
+    const folderProject = observation.repositoryIdentity.startsWith('folder:');
     const status = project.stage === 'paused'
       ? 'paused'
-      : (observation.coherence !== 'coherent' || hasChanges ? 'attention' : 'ready');
+      : (!folderProject && (observation.coherence !== 'coherent' || hasChanges) ? 'attention' : 'ready');
     const statusReason = project.stage === 'paused'
       ? 'user_paused'
-      : (observation.coherence !== 'coherent'
-        ? 'status_check_incomplete'
-        : (hasChanges ? 'preexisting_changes' : 'ready_to_start'));
+      : (folderProject
+        ? 'folder_ready'
+        : (observation.coherence !== 'coherent'
+          ? 'status_check_incomplete'
+          : (hasChanges ? 'preexisting_changes' : 'ready_to_start')));
     const timestamp = now();
     db.prepare(`
       INSERT INTO project_observations (
@@ -341,11 +398,62 @@ export function confirmProjectLocation(db, request) {
       observation.coherence ?? 'unknown',
       observation.observedAt,
     );
-    db.prepare(`
-      UPDATE worktrees
-      SET repository_identity = ?, identity_fingerprint = ?
-      WHERE id = ?
-    `).run(observation.repositoryIdentity, observation.worktreeIdentity, project.worktree_id);
+
+    // Every worktree row that shares this repository's identity belongs to the
+    // same physical code family (spaces, delivery sources): rebind them all,
+    // each to its own current recomputed fingerprint, so no row keeps a
+    // stale legacy identity the next probe can never match again.
+    const reboundWorktreeIds = [];
+    for (const worktreeId of scopeWorktreeIds) {
+      let identityFingerprint = observation.worktreeIdentity;
+      if (worktreeId !== project.worktree_id) {
+        const sibling = db.prepare('SELECT canonical_path FROM worktrees WHERE id = ?').get(worktreeId);
+        try {
+          identityFingerprint = sibling && statIdentityPair(sibling.canonical_path).current;
+        } catch {
+          continue; // Gone or unreadable: the row keeps its old identity.
+        }
+      }
+      db.prepare(`
+        UPDATE worktrees SET repository_identity = ?, identity_fingerprint = ?
+        WHERE id = ?
+      `).run(observation.repositoryIdentity, identityFingerprint, worktreeId);
+      reboundWorktreeIds.push(worktreeId);
+    }
+
+    // Retire the old keys instead of orphaning them: locks and lifecycle
+    // reservations addressed by the legacy repository identity are moved onto
+    // the new one. Expired collisions are deleted outright.
+    if (oldRepositoryIdentity && oldRepositoryIdentity !== observation.repositoryIdentity) {
+      try {
+        db.prepare('UPDATE repository_locks SET repository_identity = ? WHERE repository_identity = ?')
+          .run(observation.repositoryIdentity, oldRepositoryIdentity);
+      } catch {
+        db.prepare('DELETE FROM repository_locks WHERE repository_identity = ? AND expires_at <= ?')
+          .run(oldRepositoryIdentity, Date.now());
+      }
+      try {
+        db.prepare('UPDATE workspace_lifecycle_reservations SET repository_identity = ? WHERE repository_identity = ?')
+          .run(observation.repositoryIdentity, oldRepositoryIdentity);
+      } catch {
+        // A live colliding reservation stays: dropping it would un-fence an
+        // operation that is still executing.
+      }
+    }
+
+    // Historical evidence follows the rebind so finished runs, projects and
+    // snapshots keep reconciling against the same identity domain.
+    if (oldRepositoryIdentity) {
+      db.prepare('UPDATE snapshots SET repository_identity = ? WHERE repository_identity = ?')
+        .run(observation.repositoryIdentity, oldRepositoryIdentity);
+      db.prepare('UPDATE projects SET repository_identity = ? WHERE repository_identity = ?')
+        .run(observation.repositoryIdentity, oldRepositoryIdentity);
+    }
+    if (oldWorktreeIdentity && oldWorktreeIdentity !== observation.worktreeIdentity) {
+      db.prepare('UPDATE snapshots SET worktree_identity = ? WHERE worktree_identity = ?')
+        .run(observation.worktreeIdentity, oldWorktreeIdentity);
+    }
+
     db.prepare(`
       UPDATE projects
       SET repository_identity = ?, status = ?, status_reason = ?,
@@ -364,10 +472,12 @@ export function confirmProjectLocation(db, request) {
       statusReason,
       observedAt: observation.observedAt,
       locationConfirmed: true,
+      reboundWorktreeIds,
       git: {
         head: observation.after.head ?? null,
         branch: observation.after.branch ?? null,
-        hasChanges: Boolean(observation.after.hasChanges),
+        available: !folderProject,
+        hasChanges: folderProject ? null : Boolean(observation.after.hasChanges),
         coherence: observation.coherence ?? 'unknown',
       },
     };

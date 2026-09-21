@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { openCockpitDatabase } from '../src/core/database.mjs';
+import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../src/core/database.mjs';
 import {
   readDashboard,
   readProjectContext,
@@ -64,7 +64,8 @@ test('schema 28 projects migrate without replacing owner identity and survive a 
   const file = path.join(root, 'db.sqlite');
   let db = openCockpitDatabase(file);
   const project = registerProject(db, { commandId: 'old-register', name: 'Old', observation: observation() });
-  db.exec('ALTER TABLE projects DROP COLUMN removed_at; DELETE FROM schema_migrations WHERE version = 29; PRAGMA user_version = 28;');
+  // 回拨到 schema 28：连同台账移除 28 之后的所有迁移记录。
+  db.exec('ALTER TABLE projects DROP COLUMN removed_at; DELETE FROM schema_migrations WHERE version > 28; PRAGMA user_version = 28;');
   const historicalMigration = db.prepare('SELECT * FROM schema_migrations WHERE version = 28').get();
   assert.equal(historicalMigration.name, 'workspace-lifecycle-reservation-owner-identity');
   assert.ok(db.prepare('PRAGMA table_info(workspace_lifecycle_reservations)').all()
@@ -72,7 +73,7 @@ test('schema 28 projects migrate without replacing owner identity and survive a 
   db.close();
   db = openCockpitDatabase(file);
   assert.deepEqual(db.prepare('SELECT * FROM schema_migrations WHERE version = 28').get(), historicalMigration);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 29);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, SUPPORTED_SCHEMA_VERSION);
   assert.equal(readDashboard(db).length, 1);
   assert.equal(removeProjectFromDashboard(db, { commandId: 'old-remove', projectId: project.projectId, expectedRevision: 0 }).ok, true);
   db.close();

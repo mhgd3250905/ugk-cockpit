@@ -1,5 +1,13 @@
 # 会话身份与中断恢复
 
+## 文件身份指纹与 schema 30 原地迁移（PR #17 引入）
+
+目录文件身份指纹不再包含 stat device 编号（macOS APFS 卷号会随重启/系统更新漂移，inode+birthtime 已唯一定位目录条目）；device 仅保留在诊断证据中。漂移不等于目录被替换：目录真的被 `cp -R`/替换时 inode 变化，仍会被 100% 拒绝。
+
+schema 30 迁移对每个 worktree 记录按 `canonical_path` 以当前 stat 重算旧格式指纹，与库存旧值精确相等者原地改写为新格式；`repository_identity` 同法，其 common dir 经 `git -C <path> rev-parse --git-common-dir` 求得，并先通过 repository-policy 安全校验（hostile 配置仓库一律不探测、保持原样）。同一轮改写覆盖全部以指纹为键或存指纹的域：`worktrees`、`projects`、`snapshots`、`repository_locks`、`workspace_lifecycle_reservations`，升级前已开始的 run 迁移后仍可正常结束。路径不可达、旧 device 已真漂移或指纹仍不匹配的行保持旧格式，其唯一出路是下面的用户确认重绑；支持本迁移的代码不可被 schema ≤29 的旧程序打开（UNSUPPORTED_SCHEMA_VERSION 拒绝未来版本）。迁移可重复执行，覆盖真实历史数据与全新进程重建验证：`test/confirm-location.test.mjs`。
+
+`POST /api/v1/projects/:id/confirm-location`（仅浏览器会话）在同路径不变式下由用户确认重绑：拒绝存在活跃 run/租约、pending/accepted/active 邀请或同仓库未过期锁/预留的工作链（409 `PROJECT_LOCATION_CONFIRMATION_BUSY`，先在工作台完成接管或结束）；确认范围内同 `repository_identity` 的全部 worktree 行（含开发空间与送审来源）一并重绑并退休旧键控锁与预留，不留永久孤儿行。普通文件夹项目（`folder:` 身份）走 `observeProjectFolder` 同一口径，状态豁免为 `folder_ready`。命令日志幂等重放在选择授权 5 分钟 TTL 过后仍返回原回执；`FolderGrantStore` 与空目录授权同语义（TTL 只把守首次使用，同命令崩溃可恢复，支持 unclaim 释放）。
+
 ## 项目展示与工作线操作（alpha.43 引入 / schema 29）
 
 2026-09-12 本机服务已加载 schema 29，运行与用户验收记录见本机服务恢复文档。alpha.44 增加显式关闭本地服务，等待在途请求后关闭数据库，不结束持久工作会话或变更其归属。下方 alpha.42 的未部署表述保留其实现时点边界。

@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { git } from './probe.mjs';
+import { git, gitSync } from './probe.mjs';
 
 // Repository-local configuration is attacker-controlled whenever Cockpit is
 // pointed at a repository it did not author. Git reads classes of settings that
@@ -375,4 +376,121 @@ export function repositoryConfigurationError(kind, { messages }) {
     transport: 'Repository-owned Git transport settings that change where a connection goes, who it trusts, or what it sends are not supported.',
   }[kind];
   return Object.assign(new Error(detail), { code: messages[kind] });
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous twins. The database migration that rewrites device-drifted
+// fingerprints runs inside openCockpitDatabase, before any event loop exists,
+// so it needs the same hostile-configuration gate without promises. The query
+// set, scopes, patterns and parsers are shared with the async path above; only
+// the process runner differs.
+// ---------------------------------------------------------------------------
+
+function gitSyncOptions(overrides = {}) {
+  return {
+    timeoutMs: overrides.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    acceptExitCodes: overrides.acceptExitCodes ?? [0, 1],
+  };
+}
+
+function normalizedTransportEntriesHostileSync(cwd, scope, pattern, overrides, { boolOrStr = false } = {}) {
+  let result;
+  try {
+    result = gitSync(cwd, [
+      'config', ...scope, '-z', boolOrStr ? '--bool-or-str' : '--bool', '--get-regexp', pattern,
+    ], gitSyncOptions(overrides));
+  } catch {
+    return true;
+  }
+  return eachTransportRecord(result.stdout).some(({ value }) => {
+    const normalized = value.trim().toLowerCase();
+    if (boolOrStr) return normalized !== 'initial' && normalized !== 'false';
+    return normalized !== 'true';
+  });
+}
+
+function configScopesSync(cwd, overrides) {
+  const scopes = [['--local', '--includes']];
+  const enabled = gitSync(
+    cwd, ['config', '--local', '--includes', '--bool', '--get', 'extensions.worktreeConfig'], gitSyncOptions(overrides),
+  );
+  if (enabled.stdout.trim() === 'true') scopes.push(['--worktree', '--includes']);
+  return scopes;
+}
+
+function attributeFileCandidatesSync(cwd, overrides) {
+  const options = gitSyncOptions(overrides);
+  const listed = gitSync(
+    cwd,
+    ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.gitattributes'],
+    options,
+  );
+  const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    .map((value) => path.resolve(cwd, value));
+
+  const common = gitSync(cwd, ['rev-parse', '--git-common-dir'], options);
+  const worktreeDir = gitSync(cwd, ['rev-parse', '--git-dir'], options);
+  for (const directory of [common.stdout, worktreeDir.stdout]) {
+    if (directory) paths.push(path.resolve(cwd, directory, 'info', 'attributes'));
+  }
+
+  for (const scope of configScopesSync(cwd, overrides)) {
+    const custom = gitSync(cwd, ['config', ...scope, '--get', 'core.attributesFile'], options);
+    if (custom.stdout) paths.push(resolveConfigPath(cwd, custom.stdout));
+  }
+  return [...new Set(paths)];
+}
+
+function findFilterAttributeFileSync(cwd, overrides) {
+  for (const candidate of attributeFileCandidatesSync(cwd, overrides)) {
+    let content;
+    try {
+      content = readFileSync(candidate, 'utf8');
+    } catch (error) {
+      // Same fail-closed rule as the async path: a source git can read but
+      // this process cannot is indistinguishable from one that hides a driver.
+      if (error?.code !== 'ENOENT') return candidate;
+      continue;
+    }
+    if (hasFilterDriver(content)) return candidate;
+  }
+  return null;
+}
+
+export function findHostileRepositoryConfigurationSync(cwd, overrides = {}) {
+  const scopes = configScopesSync(cwd, overrides);
+  if (scopes.some((scope) => firstKey(gitSync(
+    cwd, ['config', ...scope, '--get-regexp', HOSTILE_LOCAL_CONFIG_PATTERN], gitSyncOptions(overrides),
+  ).stdout))) return { kind: 'filter' };
+  if (firstKey(gitSync(
+    cwd, ['config', '--includes', '--get-regexp', HOSTILE_ANY_SCOPE_CONFIG_PATTERN], gitSyncOptions(overrides),
+  ).stdout)) return { kind: 'remote' };
+  for (const scope of scopes) {
+    if (hasHostileTransportEntry(gitSync(
+      cwd, ['config', ...scope, '-z', '--get-regexp', HOSTILE_TRANSPORT_CONFIG_PATTERN], gitSyncOptions(overrides),
+    ).stdout)) return { kind: 'transport' };
+    if (normalizedTransportEntriesHostileSync(cwd, scope, HOSTILE_TRANSPORT_BOOLEAN_PATTERN, overrides)) return { kind: 'transport' };
+    if (normalizedTransportEntriesHostileSync(cwd, scope, HOSTILE_TRANSPORT_REDIRECT_PATTERN, overrides, { boolOrStr: true })) return { kind: 'transport' };
+  }
+  if (findFilterAttributeFileSync(cwd, overrides)) return { kind: 'attributes' };
+  return null;
+}
+
+export function assertRepositoryAllowedSync(cwd, overrides = {}) {
+  const { messages = REPOSITORY_CONFIG_ERROR_CODES } = overrides;
+  const hostile = findHostileRepositoryConfigurationSync(cwd, overrides);
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages });
+}
+
+export function assertRepositoryAllowedForProbeSync(cwd, overrides = {}) {
+  try {
+    assertRepositoryAllowedSync(cwd, overrides);
+  } catch (error) {
+    const stderr = `${error?.stderr ?? ''}${error?.message ?? ''}`;
+    const exitCode = typeof error?.status === 'number' ? error.status : error?.code;
+    if (exitCode === 128
+      && (/--local can only be used inside a git repository/i.test(stderr)
+        || /not a git repository/i.test(stderr))) return;
+    throw error;
+  }
 }
