@@ -27,7 +27,7 @@ MCP bridge 的 scoped credential 与 connection handle 由 bridge 和服务内�
 - 只有确认调用返回 `bindingEstablished: true`、`canContinue: true`、`status: "active"` 后，才可准备 relay。context 确认建立当前聊天绑定：支持宿主身份时由服务持久保存；未适配客户端也会以受认证 MCP 连接摘要持久记录，服务或 MCP 重启后必须由用户确认接手；context 本身不改变平台工作会话、租约、心跳或 revision。
 - 同时阅读响应中的 `bindingKind`、`bindingPersistence`、`bindingReason` 与 `capabilities`。它们表示当前绑定和当前能力；历史 receipt、旧 `relayGeneration` 或 `acceptedRevision` 不是重新授权。`connection_only` 表示可定位此前受认证连接，但重建后仍需按用户确认流程接手。
 
-Codex/ZCode 的平台与宿主会话 ID 由每次 MCP 请求元数据传入；不得从路径、最近活动或任务标题猜当前聊天，也不要在普通工具参数里填写/冒充宿主身份。返回的最新节点及 owner 可用于引导用户回到正确聊天。宿主 ID 不等于 Cockpit `sessionId`。
+Codex/ZCode 的平台与宿主会话 ID 由每次 MCP 请求元数据传入；不得从路径、最近活动或任务标题猜当前聊天，也不要在普通工具参数里填写/冒充宿主身份。返回的最新节点与 `owner` 的持有类型可用于说明「有人在持有这份工作」；具体是哪一个聊天由用户在工作台辨认——当前聊天拿不到其他聊天的定位符（`identityWithheld: true` 就是这一边界）。宿主 ID 不等于 Cockpit `sessionId`。
 
 新聊天已经收到 `continueCode` 时直接按模式二调用 `ugk_work_resume`，不要先用 context 的 `awaiting_resume`、`unbound`、`held_by_another_chat` 或 `stale` 结果阻挡恢复。历史 `relayGeneration` / `acceptedRevision` 是工作会话的历史，不是当前聊天已接手的证据。
 
