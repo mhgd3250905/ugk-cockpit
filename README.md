@@ -8,7 +8,7 @@ UGK Cockpit 是一个本机优先的个人 AI 开发控制台。它帮助用户�
 
 > 帮我按照 docs/AGENT_INSTALL.md 安装 UGK Cockpit，包括全部技能、MCP 连接和本机服务。验证完成后，带我开始使用。
 
-已有本仓库的用户，也可以在程序目录执行对应命令（Windows 在 PowerShell、macOS 与 Linux 在终端中运行）：
+已有本仓库的用户，也可以在程序目录执行对应命令（Windows 在 PowerShell、macOS 与 Linux 在终端中运行）。Linux 目前只覆盖服务与 MCP 安装路径：添加项目所需的原生文件夹选择器尚未实现（`FOLDER_PICKER_UNAVAILABLE`），需改用手动指定目录的入口，其余宿主能力与 macOS 一致：
 
 ```sh
 # Codex

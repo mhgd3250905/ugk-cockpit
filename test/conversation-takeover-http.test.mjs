@@ -141,16 +141,23 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
   assert.equal(held.latestNode.type, 'init');
   assert.equal(held.latestNode.summary, 'A 正在工作');
   assert.deepEqual(held.availableActions, ['return_to_owner', 'open_workbench_transfer']);
+  // chat-b must not learn chat-a's raw conversation id: that id is the whole
+  // proof of ownership, and a caller that can read it can write as chat-a.
   assert.deepEqual(held.owner, {
     bindingPersistence: 'durable',
     holderType: 'durable_chat',
-    host: 'zcode',
-    conversationLocator: 'chat-a',
+    host: null,
+    conversationLocator: null,
+    identityWithheld: true,
     task: '实现接力恢复',
     agent: 'ZCode',
     lastActivityAt: held.owner.lastActivityAt,
     boundAt: held.owner.boundAt,
   });
+
+  const ownerView = await original.ugk_work_context({});
+  assert.equal(ownerView.owner.conversationLocator, 'chat-a');
+  assert.equal(ownerView.owner.host, 'zcode');
 
   await assert.rejects(replacement.ugk_work_takeover({
     sessionId: held.sessionId,
@@ -228,7 +235,10 @@ test('context identifies the holder and an explicitly confirmed takeover fences 
   const staleReplacement = await replacement.ugk_work_context({});
   assert.equal(staleReplacement.bindingStatus, 'stale');
   assert.equal(staleReplacement.bindingReason, 'replaced');
-  assert.equal(staleReplacement.owner.conversationLocator, 'chat-c');
+  // chat-b no longer holds the session, so it must not be handed chat-c's
+  // locator - see the ownership-secret comment above.
+  assert.equal(staleReplacement.owner.conversationLocator, null);
+  assert.equal(staleReplacement.owner.identityWithheld, true);
   assert.deepEqual(staleReplacement.availableActions, [
     'return_to_owner', 'open_workbench_transfer',
   ]);

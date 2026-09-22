@@ -563,3 +563,48 @@ test('createAssignment binds to development space worktree and rejects cross-pro
 
   db.close();
 });
+
+test('a reassignment is keyed by its request, so A -> B -> A really moves it back', (t) => {
+  const db = fixture(t);
+  const created = createAssignment(db, {
+    commandId: 'assignment-create-reassign',
+    assignmentId: 'assignment-reassign',
+    projectId: 'project-assignment',
+    agentId: 'agent-one',
+    taskId: 'task-reassign',
+    scope: { root: 'src', mode: 'write' },
+    dispatchCode: 'code-one',
+    ttlMs: 60_000,
+  }, { clock });
+  assert.equal(created.ok, true, JSON.stringify(created));
+
+  const storedAgent = () => db.prepare('SELECT agent_id FROM assignments WHERE id = ?')
+    .get('assignment-reassign').agent_id;
+  const move = (clientRequestId, agentId) => reassignPendingAssignment(db, {
+    assignmentId: 'assignment-reassign', agentId, clientRequestId,
+  }, { clock });
+
+  assert.equal(move('reassign-req-1', 'agent-two').agentId, 'agent-two');
+  assert.equal(storedAgent(), 'agent-two');
+  assert.equal(move('reassign-req-2', 'agent-three').agentId, 'agent-three');
+  assert.equal(storedAgent(), 'agent-three');
+  const back = move('reassign-req-3', 'agent-two');
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(back.agentId, 'agent-two');
+  assert.equal(storedAgent(), 'agent-two',
+    'a reassignment back to a previously used agent must not replay the older journal result');
+
+  // Retrying the same request stays idempotent rather than re-applying.
+  assert.deepEqual(move('reassign-req-3', 'agent-two'), back);
+  // Re-using a request id for different intent is refused, not silently answered.
+  assert.throws(() => move('reassign-req-3', 'agent-three'), /COMMAND_CONFLICT|already used with a different request/);
+  assert.equal(storedAgent(), 'agent-two');
+  // And a request that cannot be keyed is rejected instead of falling back to
+  // an argument-derived key.
+  const unkeyed = reassignPendingAssignment(db, { assignmentId: 'assignment-reassign', agentId: 'agent-four' }, { clock });
+  assert.equal(unkeyed.ok, false);
+  assert.equal(unkeyed.code, 'INVALID_REQUEST');
+  assert.equal(storedAgent(), 'agent-two');
+  // Windows refuses to remove the fixture directory while the handle is open.
+  db.close();
+});

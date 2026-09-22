@@ -659,8 +659,17 @@ export function reassignPendingAssignment(db, request = {}, options = {}) {
   if (!isNonEmptyString(assignmentId) || !isNonEmptyString(agentId)) {
     return invalid('assignmentId and agentId are required.');
   }
-  const commandId = request.commandId ?? commandIdFor('assignment.reassign', assignmentId, agentId);
-  const intent = { assignmentId, agentId };
+  // The journal key identifies this request, not the requested agent. An
+  // assignment may legitimately move A -> B -> A, and a key derived from the
+  // target agent makes the third reassignment replay the first committed
+  // response: the caller is told the assignment now names A while the row still
+  // holds B, and the dispatch message handed back carries the oldest code.
+  if (!isNonEmptyString(request.clientRequestId)) {
+    return invalid('clientRequestId is required to key a reassignment.');
+  }
+  const commandId = request.commandId
+    ?? commandIdFor('assignment.reassign', assignmentId, request.clientRequestId);
+  const intent = { assignmentId, agentId, clientRequestId: request.clientRequestId };
   const begun = beginCoreCommand(db, {
     commandId,
     kind: 'assignment.reassign',

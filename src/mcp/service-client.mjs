@@ -106,6 +106,10 @@ function copySafeConversationContext(source, payload, { includeRevision = true }
       holderType: ['durable_chat', 'previous_mcp_connection'].includes(owner.holderType) ? owner.holderType : null,
       bindingPersistence: SAFE_BINDING_PERSISTENCE.has(owner.bindingPersistence) ? owner.bindingPersistence : null,
       boundAt: publicText(owner.boundAt, 64), lastActivityAt: publicText(owner.lastActivityAt, 64),
+      // Keep the "identity deliberately withheld" marker distinguishable from a
+      // holder that has no host identity at all, so the caller is not pushed
+      // back into guessing why the fields are null.
+      identityWithheld: owner.identityWithheld === true,
     };
   }
   if (source?.latestNode && typeof source.latestNode === 'object' && !Array.isArray(source.latestNode)) {
@@ -116,6 +120,7 @@ function copySafeConversationContext(source, payload, { includeRevision = true }
       actorHost: publicText(node.actorHost, 64), actorConversationId: publicText(node.actorConversationId, 256),
       summary: typeof node.summary === 'string' ? node.summary.slice(0, 500) : null,
       createdAt: publicText(node.createdAt, 64),
+      actorIdentityWithheld: node.actorIdentityWithheld === true,
     };
   }
   return payload;

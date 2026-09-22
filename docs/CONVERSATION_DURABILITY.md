@@ -39,7 +39,7 @@ alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`�
 
 结果未知时保留命令和占用，不因超时开放新会话。原执行已返回或执行进程已退出后，只能沿原请求恢复；同一请求的并发执行不能重复修改 Git。恢复确认 Git 已完成时只提交缺失的数据库结果，保留此前分支、工作线历史和幂等回执。schema 26 遗留的未完成删除/复用命令也必须阻止新会话接入，不能把新占用表为空视为无待恢复工作。
 
-schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_at`，新操作记录执行进程的启动代际。在正式服务单实例约束下，恢复逻辑区分当前执行者与旧进程记录；迁移前的 NULL 记录继续采用保守判据。该字段不替代服务实例锁，不改变聊天身份或平台转交协议，也不代表已解决所有平台的 PID 复用问题。独立夹具验证了 schema 27 历史预留行保留、重复打开及真实进程终止后的恢复；正式数据库尚未执行本轮迁移。
+schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_at`，新操作记录执行进程的启动代际。在正式服务单实例约束下，恢复逻辑区分当前执行者与旧进程记录；迁移前的 NULL 记录继续采用保守判据。该字段不替代服务实例锁，不改变聊天身份或平台转交协议，也不代表已解决所有平台的 PID 复用问题。独立夹具验证了 schema 27 历史预留行保留、重复打开及真实进程终止后的恢复；正式数据库尚未执行本轮迁移。（此句为其实现时点记录：本机服务已于 2026-09-12 加载 schema 29，见上文与[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)；本段所述 28/29 迁移是否已在正式库执行以该文档的最新条目为准。）
 
 原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
 
@@ -47,7 +47,7 @@ schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_
 
 回归使用独立临时 Git 仓库和数据库，覆盖检查后的并发接入、状态版本变化、同请求并发重试、真实子进程终止、HTTP 服务重建及前端持久化请求重放。返工与复审期间使用隔离构建，未切换服务。2026-09-08 复审通过后，用户另行授权合并及重启：主项目已运行 `b523b386`，数据库由 schema 26 升至 27，原有数据与聊天绑定验收通过，详见 [本机服务恢复](LOCAL_SERVICE_RECOVERY.md)。
 
-## 当前身份与授权契约（schema 25 引入，schema 29 继续适用）
+## 当前身份与授权契约（schema 25 引入，schema 30 继续适用）
 
 本节描述 alpha.39 的节点追溯与平台授权转交方案。2026-09-07 已经用户授权部署服务并切换两处已安装技能，当前 Codex 原聊天只读恢复通过；随后用户反馈原 ZCode 聊天已完成平台授权接手、revision 43、canContinue=true，见 [部署记录](LOCAL_SERVICE_RECOVERY.md)。其他旧宿主仍需重连加载新版工具定义。下文 schema 24 的两步聊天内确认、过期 Relay 确认及 connection-only 写入为历史行为，不能作为当前接手指令。
 
@@ -74,6 +74,8 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 `awaiting_resume` 的待接力工作会话可由平台授权覆盖：原 active Relay 标为 expired，并推进 revision；随后即使取消转交也不能复活旧接力码。standby 和已结束工作会话仍可查看，不能通过该入口绕过原状态规则取得写入权。
 
 `ugk_work_takeover` 仅消费 `{ sessionId, clientRequestId, transferCode }`；模型不能以“用户已确认”、旧 confirmationRequestId 或旧两步参数签发异常接手权限。过期 resume 的新请求必须到工作台授权；以前已经成功的幂等回执保留原事实，当前能力另按数据库计算，不恢复旧权限。有效普通 Relay 接收保持正常流程。
+
+`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。携带这两个参数的请求在本地即被拒绝，并提示改走工作台转交。
 
 签发回执重放时，只在当前授权仍有效时重新提供同一码；已消费、取消、过期或替代只返回当前处理状态，不展示可继续使用的空码或旧码。结果未知时保留原参数与原幂等键重试，不自动创建新授权。消费授权、冻结检查、CAS、新 owner、撤销旧 owner、C 接手节点与回执原子提交。
 

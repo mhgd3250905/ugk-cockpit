@@ -550,11 +550,23 @@ test('old-holder MCP errors retain safe context and project diagnostics stay iso
     assert.equal(errorPayload.reason, 'replaced');
     assert.equal(errorPayload.projectId, fixture.project.projectId);
     assert.equal(errorPayload.worktreeId, accepted.worktreeId);
-    assert.equal(errorPayload.owner.host, 'codex');
-    assert.equal(errorPayload.owner.conversationLocator, 'chat-b');
+    // A rejected writer is told *that* the session has a holder, never *who*:
+    // the raw host conversation id is what the platform checks to grant write
+    // authority, so echoing it back here would hand this caller the exact value
+    // it needs to impersonate the holder on the next request.
+    assert.equal(errorPayload.owner.host, null);
+    assert.equal(errorPayload.owner.conversationLocator, null);
+    assert.equal(errorPayload.owner.identityWithheld, true);
     assert.equal(errorPayload.latestNode.type, 'takeover');
-    assert.equal(errorPayload.latestNode.actorHost, 'codex');
-    assert.equal(errorPayload.latestNode.actorConversationId, 'chat-b');
+    assert.equal(errorPayload.latestNode.actorHost, null);
+    assert.equal(errorPayload.latestNode.actorConversationId, null);
+    assert.equal(errorPayload.latestNode.actorIdentityWithheld, true);
+    // The holder itself still reads its own identity, so nothing is lost that a
+    // legitimate chat needs to recognise its own session.
+    const holderView = await replacement.ugk_work_context({});
+    assert.equal(holderView.owner.host, 'codex');
+    assert.equal(holderView.owner.conversationLocator, 'chat-b');
+    assert.equal(holderView.latestNode.actorConversationId, 'chat-b');
     assert.match(errorPayload.latestNode.summary, /接手/);
     assert.equal(errorPayload.status, 'active');
     assert.equal(errorPayload.canContinue, false);

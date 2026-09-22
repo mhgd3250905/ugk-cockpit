@@ -1,9 +1,26 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
 
 const protocol = 'ugk-cockpit-delivery-index-lock-v1';
 const locked = () => Object.assign(new Error('The Git index is locked by another or unverified owner.'), { code: 'DELIVERY_INDEX_LOCKED' });
 const identity = (stat) => `${stat.dev}:${stat.ino}`;
+// Link errors that mean "this filesystem cannot hard link", as opposed to the
+// EEXIST that means somebody else already published the lock.
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EACCES', 'EXDEV', 'EINVAL', 'EOPNOTSUPP']);
+const TEMP_SWEEP_AFTER_MS = 10 * 60 * 1000;
 
 function sameFile(lockPath, fileIdentity, bytes) {
   try {
@@ -39,8 +56,38 @@ function reclaimExitedOwner(lockPath) {
   finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export function acquireDeliveryIndexLock(indexPath, commandId) {
-  const lockPath = `${indexPath}.lock`;
+function ownerPayload(lockPath, fileIdentity, commandId) {
+  return JSON.stringify({ protocol, owner: randomUUID(), pid: process.pid, commandId, lockPath, fileIdentity });
+}
+
+// A private name is written and fsynced first, then hard-linked into place, so
+// the lock at `lockPath` is either absent or complete. Creating `lockPath`
+// directly leaves a window where the file exists with no owner record, and a
+// process killed inside it strands the repository: an unattributable lock in
+// Git's own index.lock namespace can never be deleted automatically (a live
+// `git` write uses the same shape), so every later delivery would report
+// DELIVERY_INDEX_LOCKED forever with nothing to wait out.
+function publishAtomically(lockPath, commandId) {
+  const tempPath = `${lockPath}.tmp-${randomUUID()}`;
+  let fd;
+  try {
+    fd = openSync(tempPath, 'wx');
+    const fileIdentity = identity(fstatSync(fd, { bigint: true }));
+    const bytes = ownerPayload(lockPath, fileIdentity, commandId);
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    linkSync(tempPath, lockPath);
+    return { lockPath, fileIdentity, bytes };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+    try { unlinkSync(tempPath); } catch {}
+  }
+}
+
+// Filesystems without hard links (FAT/exFAT) keep the previous in-place create.
+function acquireInPlace(lockPath, commandId) {
   let fd;
   try { fd = openSync(lockPath, 'wx'); }
   catch (error) {
@@ -50,7 +97,7 @@ export function acquireDeliveryIndexLock(indexPath, commandId) {
     catch (retryError) { if (retryError.code === 'EEXIST') throw locked(); throw retryError; }
   }
   const fileIdentity = identity(fstatSync(fd, { bigint: true }));
-  const bytes = JSON.stringify({ protocol, owner: randomUUID(), pid: process.pid, commandId, lockPath, fileIdentity });
+  const bytes = ownerPayload(lockPath, fileIdentity, commandId);
   try {
     writeFileSync(fd, bytes);
     fsyncSync(fd);
@@ -69,6 +116,45 @@ export function acquireDeliveryIndexLock(indexPath, commandId) {
   }
   return { fd, lockPath, fileIdentity, bytes };
 }
+
+function sweepStaleLockTemps(lockPath) {
+  const directory = path.dirname(lockPath);
+  const prefix = `${path.basename(lockPath)}.tmp-`;
+  let names;
+  try { names = readdirSync(directory); } catch { return; }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const candidate = path.join(directory, name);
+    try {
+      if (Date.now() - statSync(candidate).mtimeMs < TEMP_SWEEP_AFTER_MS) continue;
+      unlinkSync(candidate);
+    } catch {}
+  }
+}
+
+export function acquireDeliveryIndexLock(indexPath, commandId) {
+  const lockPath = `${indexPath}.lock`;
+  sweepStaleLockTemps(lockPath);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let published;
+    try {
+      published = publishAtomically(lockPath, commandId);
+    } catch (error) {
+      if (error.code === 'EEXIST') {
+        if (!reclaimExitedOwner(lockPath)) throw locked();
+        continue;
+      }
+      if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId);
+      throw error;
+    }
+    // Keep a descriptor on the lock for the operation, as the in-place path does.
+    let fd;
+    try { fd = openSync(lockPath, 'r'); } catch { fd = undefined; }
+    return { fd, ...published };
+  }
+  throw locked();
+}
+
 
 export function releaseDeliveryIndexLock(lock) {
   // Best effort: the caller's finally already holds the real outcome, and a

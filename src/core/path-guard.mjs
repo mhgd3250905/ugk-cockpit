@@ -10,14 +10,23 @@ export class PathScopeError extends Error {
   }
 }
 
+// `path.relative` renders a child whose own name merely starts with two dots
+// (`..ugk`, legal on every supported platform) exactly as `..ugk`, so a prefix
+// test on `..` both rejects legitimate paths and, in the link scan below, skips
+// the segments it was supposed to inspect. Only `..` itself or a `..\` prefix
+// actually leaves the root.
+function escapesRoot(relative) {
+  return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
 function isWithin(root, candidate) {
   const relative = path.relative(root, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || !escapesRoot(relative);
 }
 
 function containsSymbolicSegment(rootReal, candidateInput) {
   const relativeInput = path.relative(rootReal, path.resolve(candidateInput));
-  if (relativeInput.startsWith('..') || path.isAbsolute(relativeInput)) return false;
+  if (escapesRoot(relativeInput)) return false;
   let cursor = rootReal;
   for (const segment of relativeInput.split(path.sep).filter(Boolean)) {
     cursor = path.join(cursor, segment);
