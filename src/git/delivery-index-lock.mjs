@@ -84,7 +84,9 @@ function publishAtomically(lockPath, commandId, faultInjector) {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    faultInjector?.('delivery_index_lock.before_link');
+    // The artifact name is passed so a test can remove it, which is what the
+    // stale-temp sweep does to a publisher that stalls for too long.
+    faultInjector?.('delivery_index_lock.before_link', tempPath);
     linkSync(tempPath, lockPath);
     return { lockPath, fileIdentity, bytes };
   } finally {

@@ -169,3 +169,40 @@ test('an unattributable lock in the Git namespace is still never removed', (t) =
       'a lock this platform cannot attribute must stay exactly as found');
   }
 });
+
+test('a publish artifact lost mid-flight reports contention, not a raw link error', (t) => {
+  const { indexPath, lockPath } = fixture(t);
+  // Someone else owns the name, and our private artifact disappears under us
+  // (exactly what the stale-artifact sweep does to a stalled publisher). The
+  // caller must still get the product's own answer, not an untyped ENOENT from
+  // deep inside the publish step.
+  const other = acquireDeliveryIndexLock(indexPath, 'live-holder');
+  try {
+    let swept = false;
+    assert.throws(() => acquireDeliveryIndexLock(indexPath, 'interrupted-publisher', {
+      faultInjector: (point, artifact) => {
+        // Once, like the stale-artifact sweep would: the retry must then report
+        // the contention it finds, not a second-hand ENOENT.
+        if (point === 'delivery_index_lock.before_link' && !swept) {
+          swept = true;
+          rmSync(artifact, { force: true });
+        }
+      },
+    }), (error) => {
+      assert.equal(error.code, 'DELIVERY_INDEX_LOCKED', `got ${error.code}: ${error.message}`);
+      return true;
+    });
+  } finally {
+    assert.equal(releaseDeliveryIndexLock(other), true);
+  }
+});
+
+test('a missing repository directory stays the real error it is', (t) => {
+  const { root, indexPath } = fixture(t);
+  rmSync(root, { recursive: true, force: true });
+  assert.throws(() => acquireDeliveryIndexLock(indexPath, 'gone-directory'), (error) => {
+    assert.notEqual(error.code, 'DELIVERY_INDEX_LOCKED', 'a vanished directory is not contention');
+    assert.notEqual(error.code, undefined);
+    return true;
+  });
+});
