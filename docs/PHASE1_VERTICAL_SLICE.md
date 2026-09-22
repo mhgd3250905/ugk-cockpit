@@ -6,7 +6,15 @@
 
 ## 实施状态
 
-### alpha.48：Antigravity 聊天身份与宿主支持边界（2026-09-20）
+### alpha.49：macOS 卷号漂移修复与用户确认重绑（2026-09-22）
+
+- `0.1.0-alpha.49`：目录身份指纹不再哈希 stat device 编号（macOS APFS 卷号随重启/系统更新漂移，inode+birthtime 已唯一定位卷内目录条目；目录被真正替换时 inode 变化，仍 100% 拒绝）。schema 30 迁移按 canonical_path 以当前 stat 重算旧格式指纹，仅与库存精确相等者原地改写（覆盖 worktrees/projects/snapshots/repository_locks/workspace_lifecycle_reservations），真漂移、不可达或 hostile 配置仓库保持原样；repository 重算前经同步 repository-policy 门，升级前已开始的 run 迁移后仍可正常结束。新增浏览器专属 `POST /api/v1/projects/:id/confirm-location`：同路径不变式下重绑同一 repository_identity 的全部工作副本（含开发空间与送审来源）、退休旧键控锁与预留、历史快照随迁；存在活跃 run/租约/pending·accepted·active 邀请/未过期锁或预留时拒绝并保持零改动。命令日志重放前移到 grant 领取之前，选择授权 TTL 过期后同 commandId 仍返回原回执。无新增生产依赖。
+
+复审（2026-09-22，Windows / Node.js 24.15.0，基于 `30c3277c178fc3572df407bbe9e5d46b7fd5a49a` 的隔离工作树）：全量 `npm test` **633 项 / 626 通过 / 0 失败 / 7 平台跳过**；`npm run test:phase0` **97/97**；`npm run build:web` 通过。新增 confirm-location 测试 14 项覆盖指纹契约、v30 迁移（真实旧数据、hostile 仓库不探测、独立进程重开真库文件、升级前 run 迁移后可结束）、全域重绑与送审链恢复、活跃守卫拒绝与释放后成功、folder 项目端到端、TTL 过期幂等回放。
+
+边界与已知限制：本轮未重启本机服务，正式数据库仍为 schema 29，运行版本以现场核验为准；macOS 侧回归未在真机执行（返修与复审均在 Windows 完成），用户在知悉该边界后批准合并；漂移前已存在的 pending 接入任务没有取消路径，会令对应项目的位置确认持续返回 BUSY，此类项目需先完成或接手该邀请，待后续版本放开 pending 守卫。
+
+### 历史：alpha.48：Antigravity 聊天身份与宿主支持边界（2026-09-20）
 
 - `0.1.0-alpha.48`：识别每个 MCP tools/call 的 `_meta['antigravity.google/conversation_id']`，映射为 `host=antigravity`，不改变 ID。身份与通用字段或其他宿主冲突时拒绝，缺失时不从进程环境、路径或连接编号猜测。沿用 schema 29 与现有持久绑定、租约、revision CAS、接力失效机制，无新增生产依赖。
 

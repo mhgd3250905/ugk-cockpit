@@ -8,6 +8,8 @@ schema 30 迁移对每个 worktree 记录按 `canonical_path` 以当前 stat 重
 
 `POST /api/v1/projects/:id/confirm-location`（仅浏览器会话）在同路径不变式下由用户确认重绑：拒绝存在活跃 run/租约、pending/accepted/active 邀请或同仓库未过期锁/预留的工作链（409 `PROJECT_LOCATION_CONFIRMATION_BUSY`，先在工作台完成接管或结束）；确认范围内同 `repository_identity` 的全部 worktree 行（含开发空间与送审来源）一并重绑并退休旧键控锁与预留，不留永久孤儿行。普通文件夹项目（`folder:` 身份）走 `observeProjectFolder` 同一口径，状态豁免为 `folder_ready`。命令日志幂等重放在选择授权 5 分钟 TTL 过后仍返回原回执；`FolderGrantStore` 与空目录授权同语义（TTL 只把守首次使用，同命令崩溃可恢复，支持 unclaim 释放）。
 
+已知限制（2026-09-22 复审确认，用户知悉后合并）：漂移前已存在的 pending 接入任务没有取消或过期路径，且漂移期间其 accept/reissue 会先被身份校验拒绝，对应项目的位置确认将持续返回 BUSY；此类项目需先由用户完成或接手该邀请，后续版本应把 pending 从确认守卫中放开（pending 无会话、run 或租约，accept 时会重新探测验证身份）。
+
 ## 项目展示与工作线操作（alpha.43 引入 / schema 29）
 
 2026-09-12 本机服务已加载 schema 29，运行与用户验收记录见本机服务恢复文档。alpha.44 增加显式关闭本地服务，等待在途请求后关闭数据库，不结束持久工作会话或变更其归属。下方 alpha.42 的未部署表述保留其实现时点边界。

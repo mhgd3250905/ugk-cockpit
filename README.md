@@ -26,6 +26,12 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.49` — 修复 macOS 卷号漂移导致的身份误报并补上用户确认的代码位置重绑：目录身份指纹不再包含 device 编号，目录被真正替换（inode 变化）仍被拒绝；schema 30 迁移把健康机器上可精确重算的存量指纹原地改写为新格式，真漂移记录走浏览器确认的同路径重绑，同一仓库的全部工作副本一并重绑，活跃工作链一律拒绝确认。协议细节见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)。
+
+2026-09-22 源码已合并至 main 并完成复审；本机服务仍运行 alpha.48 / schema 29，未迁移正式数据库。部署 alpha.49 需按规程备份并重启（重启即对正式库执行 schema 30 迁移），待用户授权后执行；已知限制与部署边界见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
+
+以下为 alpha.48 的宿主身份记录：
+
 `0.1.0-alpha.48` — 补齐 Antigravity 原生 MCP 聊天身份识别，沿用既有持久绑定与接力协议。Codex、ZCode、Antigravity 的支持入口，以及 Claude Code、Cursor、Gemini CLI 的已核实限制，见[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。自动安装与聊天身份支持分别验收，不把工具连接成功当成接力成功。
 
 2026-09-20 已在本机部署 alpha.48，重启前后 10 个已有项目及全部详情核对正常；用户重载 Antigravity MCP 后确认测试通过。部署和备份记录见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。

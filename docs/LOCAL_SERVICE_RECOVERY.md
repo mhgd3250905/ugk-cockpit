@@ -1,5 +1,11 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.49 源码合并与部署边界（2026-09-22）
+
+PR #17 的最终返修提交 `30c3277c178fc3572df407bbe9e5d46b7fd5a49a` 已快进接入 main，开发版本为 `0.1.0-alpha.49`，源码引入 schema 30（目录指纹去 device + 存量原地迁移）与用户确认的代码位置重绑。本轮完成源码合并、独立复审与文档收束，未重启本机服务、未迁移正式数据库、未更新宿主插件；最近一次已记录的本机部署验收仍为下方 alpha.48，运行版本以现场核验为准。
+
+部署 alpha.49 时注意：重启即对 `E:/AII/ugk-cockpit/.data/service` 正式库执行 schema 30 迁移，须先按既有规程以 SQLite backup API 备份并核对完整性；迁移只改写可按当前 stat 精确重算的旧格式指纹，真漂移行保持原样，由用户在工作台对受影响项目逐个确认代码位置。已知限制：漂移前已存在的 pending 接入任务会阻塞对应项目的位置确认（详见[会话身份与中断恢复](CONVERSATION_DURABILITY.md)）；macOS 侧回归尚未在真机执行，部署前建议在 macOS 补跑 `npm test`、`npm run test:phase0`、`npm run build:web`。
+
 ## alpha.48 部署与 Antigravity 用户验收（2026-09-20）
 
 在源码 `aec2fedd7872eb33e302940d78fbc8bb48a5f983` 上，用户明确授权重启。重启前运行版本 alpha.47，10 个已有项目及全部详情与磁盘记录一致。通过 SQLite backup API 创建 `.data/service/backups/before-alpha48-1789913134480.db`，完整性 `ok`、外键错误 0。
