@@ -53,51 +53,65 @@ function spawnPublishRookie(indexPath, markers) {
   });
 }
 
-// A real process kill is the only honest way to test a write crash, but the
-// publish window here is sub-millisecond, so kills cannot be aimed at it on
-// demand: some rounds land before the file appears and some after the creator
-// already released it. These rounds therefore assert the *durable* rule - any
-// lock a kill leaves behind must be attributable, and the next acquirer must
-// always get in - while the deterministic tests below prove atomic publication
-// by construction. The stranded-state repro itself lives in the paired
-// regression: an empty lock is unattributable and must never be produced.
-test('kills around the publish window never strand a lock the next acquirer cannot use', async (t) => {
+// The publish window is sub-millisecond, so a random kill cannot be aimed at it.
+// The module exposes a `faultInjector` seam (same convention the core commands
+// use) so a real process can be terminated at the exact instant the publish
+// artifact is complete but not yet visible, which is the state that used to
+// strand a repository.
+test('a process killed inside the publish window leaves no partial lock', async (t) => {
   const { indexPath, lockPath } = fixture(t);
-  let roundsWithAPublishedLock = 0;
-  for (let round = 1; round <= 20; round += 1) {
-    const markers = {
-      started: `${lockPath}.started-${round}`,
-      done: `${lockPath}.done-${round}`,
-    };
-    const child = spawnPublishRookie(indexPath, markers);
-    const exited = once(child, 'exit');
-    child.stderr.on('data', () => {});
-    try {
-      await Promise.race([
-        once(child, 'message'),
-        exited.then(() => { throw new Error(`child exited before announcing acquire (round ${round})`); }),
-      ]);
-      await new Promise((resolve) => setTimeout(resolve, round % 9));
-      child.kill('SIGKILL');
-      await exited;
+  const script = `
+    const { acquireDeliveryIndexLock, releaseDeliveryIndexLock } = await import(process.argv[1]);
+    process.send({ entering: true });
+    const lock = acquireDeliveryIndexLock(process.argv[2], 'publish-window-victim', {
+      faultInjector: (point) => {
+        if (point !== 'delivery_index_lock.before_link') return;
+        process.send({ insidePublishWindow: true });
+        const until = Date.now() + 500;
+        while (Date.now() < until) { /* hold the window open for the kill */ }
+      },
+    });
+    process.send({ survived: true });
+    releaseDeliveryIndexLock(lock);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script, LOCK_MODULE, indexPath], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true,
+  });
+  const exited = once(child, 'exit');
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited.catch(() => {});
+  });
+  const messages = [];
+  child.on('message', (message) => messages.push(message));
+  // The seam announcing itself is the coverage proof: a module that publishes by
+  // create-then-fill never reaches this point, so the wait below would fail.
+  const inside = await Promise.race([
+    new Promise((resolve) => {
+      const check = () => {
+        if (messages.some((message) => message.insidePublishWindow)) resolve(true);
+        else setTimeout(check, 5);
+      };
+      check();
+    }),
+    Promise.all([new Promise((r) => setTimeout(r, 4000)), once(child, 'exit')]).then(() => false),
+  ]);
+  assert.ok(inside, `the publish seam never ran (survived=${messages.some((m) => m.survived)}) ${stderr.slice(0, 200)}`);
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(child.signalCode, 'SIGKILL');
 
-      const size = sizeOrNull(lockPath);
-      if (size !== null) {
-        roundsWithAPublishedLock += 1;
-        const bytes = readFileSync(lockPath, 'utf8');
-        assert.ok(bytes.length > 0,
-          `round ${round}: a killed acquirer left a 0-byte lock, which no later caller can attribute`);
-        const owner = JSON.parse(bytes);
-        assert.equal(owner.protocol, PROTOCOL, `round ${round}: visible lock is not an owner record`);
-        assert.equal(owner.pid, child.pid, `round ${round}: lock names a creator that is not the killed child`);
-      }
-      releaseDeliveryIndexLock(acquireDeliveryIndexLock(indexPath, `after-kill-${round}`));
-    } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      rmSync(markers.started, { force: true });
-      rmSync(markers.done, { force: true });
-    }
-  }
+  // Killed with the artifact written but unlinked: nothing may be visible under
+  // the lock name, because a 0-byte or half-written lock in git's namespace can
+  // never be attributed and therefore can never be reclaimed.
+  assert.equal(sizeOrNull(lockPath), null,
+    'a killed publisher exposed a lock it had not finished writing');
+  const leftovers = readdirSync(path.dirname(lockPath)).filter((name) => name.includes('.tmp-'));
+  assert.equal(leftovers.length, 1, 'the unlinked publish artifact should still be awaiting its sweep');
+  // ...and the repository is still usable: the next acquirer gets in immediately.
+  releaseDeliveryIndexLock(acquireDeliveryIndexLock(indexPath, 'after-publish-kill'));
 });
 
 test('a killed holder leaves a lock the next acquirer reclaims by owner pid', async (t) => {

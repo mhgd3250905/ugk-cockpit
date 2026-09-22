@@ -331,7 +331,10 @@ test('skills never tell an agent to report a holder identity the service withhol
     for (const line of text.split('\n')) {
       if (!/(持有人|`owner`)/.test(line)) continue;
       ownerGuidance += 1;
-      if (!/(定位符|会话 ID|平台\/会话)/.test(line)) continue;
+      // Field names count as much as the prose: a line that tells the agent to
+      // report `owner.host` or `owner.conversationLocator` verbatim is asking for
+      // exactly what the service withholds, even without the words "定位符".
+      if (!/(定位符|会话 ID|平台\/会话|conversationLocator|owner\.host|actorConversationId)/.test(line)) continue;
       assert.match(line, /identityWithheld/,
         `${name} asks the agent to report a holder locator the platform does not send`);
     }

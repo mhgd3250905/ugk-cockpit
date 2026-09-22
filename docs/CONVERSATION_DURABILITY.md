@@ -71,7 +71,7 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 
 `ugk_work_takeover` 仅消费 `{ sessionId, clientRequestId, transferCode }`；模型不能以“用户已确认”、旧 confirmationRequestId 或旧两步参数签发异常接手权限。过期 resume 的新请求必须到工作台授权；以前已经成功的幂等回执保留原事实，当前能力另按数据库计算，不恢复旧权限。有效普通 Relay 接收保持正常流程。
 
-`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端则收到通用 `INVALID_REQUEST`，其恢复入口同样是工作台转交面板。
+`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端只收到通用 `INVALID_REQUEST`（该回执不带指引），恢复入口即本条所述的工作台转交面板。
 
 签发回执重放时，只在当前授权仍有效时重新提供同一码；已消费、取消、过期或替代只返回当前处理状态，不展示可继续使用的空码或旧码。结果未知时保留原参数与原幂等键重试，不自动创建新授权。消费授权、冻结检查、CAS、新 owner、撤销旧 owner、C 接手节点与回执原子提交。
 
@@ -79,7 +79,7 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 
 身份、节点、转交期限、冻结/消费/取消状态、撤销及幂等回执全部以 SQLite 为事实源，进程缓存可丢弃。过期在操作时按持久期限判断，不依赖定时器。迁移可重复并保留既有业务及撤销历史，不要求重做 init。长耗时 Git 操作在实际副作用前重新核验归属、授权冻结、业务状态及原有审核/CAS 条件；数据库回滚不能伪称撤销已经发生的外部 Git 写入。
 
-拒绝应指向当前工作链、持有人平台/会话 ID 与最后节点，并保留可关联的脱敏诊断；诊断日志不是节点审计的事实源。身份未知不得描述成已识别另一具体聊天。
+拒绝应指向当前工作链、持有人类型与最后节点，并保留可关联的脱敏诊断；诊断日志不是节点审计的事实源。身份未知不得描述成已识别另一具体聊天。其他聊天的平台/会话 ID 是归属权凭据本身，只对该持有聊天本身与工作台披露（非持有方收到 `identityWithheld: true`），因此拒绝响应不得、也不会替 Agent 指名是哪一个聊天。
 
 2026-09-07 本地验收：全仓 `npm test -- --test-concurrency=4` **389/389**、Phase 0 **93/93**、网页构建通过；独立项目浏览器实际完成授权冻结、取消恢复、重启核对和定向转交，新聊天接手当次成为最新节点。测试覆盖历史迁移、真实进程重建/终止、旧聊天拒绝、过期/取消/并发/幂等重放、管理入口隔离与待接 Relay 覆盖。详见 [实施验收记录](CONVERSATION_NODE_TRANSFER_REQUIREMENTS.md)。这不是原 ZCode 宿主现场验收或发布声明。服务升级仍须遵循 [本机服务恢复](LOCAL_SERVICE_RECOVERY.md)，备份并核对项目及详情；schema 25 的回退程序必须支持该 schema，不得运行中覆盖数据库。
 

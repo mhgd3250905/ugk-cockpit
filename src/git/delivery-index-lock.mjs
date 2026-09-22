@@ -68,7 +68,12 @@ function ownerPayload(lockPath, fileIdentity, commandId) {
 // Git's own index.lock namespace can never be deleted automatically (a live
 // `git` write uses the same shape), so every later delivery would report
 // DELIVERY_INDEX_LOCKED forever with nothing to wait out.
-function publishAtomically(lockPath, commandId) {
+// `faultInjector` is a test seam, matching the core's convention: it is called
+// at named points so a test can terminate the process exactly inside the
+// publish window instead of hoping a random kill lands there.
+// 'delivery_index_lock.before_link' - publish artifact complete, not yet visible
+// 'delivery_index_lock.after_create' - lock name exists, owner record not yet written
+function publishAtomically(lockPath, commandId, faultInjector) {
   const tempPath = `${lockPath}.tmp-${randomUUID()}`;
   let fd;
   try {
@@ -79,6 +84,7 @@ function publishAtomically(lockPath, commandId) {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
+    faultInjector?.('delivery_index_lock.before_link');
     linkSync(tempPath, lockPath);
     return { lockPath, fileIdentity, bytes };
   } finally {
@@ -88,7 +94,7 @@ function publishAtomically(lockPath, commandId) {
 }
 
 // Filesystems without hard links (FAT/exFAT) keep the previous in-place create.
-function acquireInPlace(lockPath, commandId) {
+function acquireInPlace(lockPath, commandId, faultInjector) {
   let fd;
   try { fd = openSync(lockPath, 'wx'); }
   catch (error) {
@@ -99,6 +105,7 @@ function acquireInPlace(lockPath, commandId) {
   }
   const fileIdentity = identity(fstatSync(fd, { bigint: true }));
   const bytes = ownerPayload(lockPath, fileIdentity, commandId);
+  faultInjector?.('delivery_index_lock.after_create');
   try {
     writeFileSync(fd, bytes);
     fsyncSync(fd);
@@ -133,32 +140,37 @@ function sweepStaleLockTemps(lockPath) {
   }
 }
 
-export function acquireDeliveryIndexLock(indexPath, commandId) {
+export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector } = {}) {
   const lockPath = `${indexPath}.lock`;
   sweepStaleLockTemps(lockPath);
-  // One reclaim is allowed, so a successful reclaim is never followed by a
-  // spurious "locked" answer; a second contention means someone else won.
+  // A reclaim is allowed once, so a successful reclaim is never answered as a
+  // spurious "locked"; a second contention means someone else genuinely won.
   let reclaimed = false;
+  // The private publish artifact may be swept while this process stalls between
+  // writing it and linking it. That retry is separate from a reclaim, so a real
+  // reclaim stays available afterwards.
+  let retriedPublish = false;
   for (;;) {
     let published;
     try {
-      published = publishAtomically(lockPath, commandId);
+      published = publishAtomically(lockPath, commandId, faultInjector);
     } catch (error) {
       if (error.code === 'EEXIST') {
         if (reclaimed || !reclaimExitedOwner(lockPath)) throw locked();
         reclaimed = true;
         continue;
       }
-      if (error.code === 'ENOENT' && !reclaimed && !existsSync(lockPath)) {
-        // The private publish artifact vanished before the link - the sweep can
-        // do that to a creator stalled over ten minutes. Retry once, but only
-        // while no lock has appeared and the directory is still there; a
-        // missing directory stays a real error.
+      if (error.code === 'ENOENT' && !retriedPublish) {
+        // The publish artifact vanished before the link: the sweep can do that
+        // to a creator stalled over ten minutes, and the link also fails while
+        // somebody else already holds the name. Retry once so the second
+        // attempt reports the contention as DELIVERY_INDEX_LOCKED; a missing
+        // directory stays the real error it is.
         if (!existsSync(path.dirname(lockPath))) throw error;
-        reclaimed = true;
+        retriedPublish = true;
         continue;
       }
-      if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId);
+      if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId, faultInjector);
       throw error;
     }
     // Keep a descriptor on the lock for the operation, as the in-place path does.
