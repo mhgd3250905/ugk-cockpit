@@ -319,3 +319,22 @@ test('default Codex target honors CODEX_HOME', () => {
     path.resolve('E:\\isolated-codex', 'skills'),
   );
 });
+
+test('skills never tell an agent to report a holder identity the service withholds', () => {
+  // A foreign holder's host + conversation locator is the only proof of chat
+  // ownership, so it is withheld from everyone but the holder. Instructions that
+  // still ask the agent to report it would push the agent to invent an id, which
+  // AGENTS.md forbids; naming the withheld marker keeps the two in step.
+  let ownerGuidance = 0;
+  for (const name of COCKPIT_SKILL_NAMES) {
+    const text = readFileSync(path.join(repositoryRoot, 'skills', name, 'SKILL.md'), 'utf8');
+    for (const line of text.split('\n')) {
+      if (!/(持有人|`owner`)/.test(line)) continue;
+      ownerGuidance += 1;
+      if (!/(定位符|会话 ID|平台\/会话)/.test(line)) continue;
+      assert.match(line, /identityWithheld/,
+        `${name} asks the agent to report a holder locator the platform does not send`);
+    }
+  }
+  assert.ok(ownerGuidance > 0, 'owner-reporting guidance must stay covered by this assertion');
+});

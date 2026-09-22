@@ -2135,14 +2135,16 @@ function ownerIdentityIsCaller(owner, key) {
   return Boolean(owner && key && owner.conversationKey === key);
 }
 
-function publicConversationOwner(owner, state, discloseIdentity = true) {
+function publicConversationOwner(owner, state, { discloseIdentity = false } = {}) {
   if (!owner || !state) return null;
   return {
     bindingPersistence: owner.bindingKind === 'host' ? 'durable' : 'connection_only',
     holderType: owner.bindingKind === 'host' ? 'durable_chat' : 'previous_mcp_connection',
     host: discloseIdentity ? (owner.ownerHost ?? null) : null,
     conversationLocator: discloseIdentity ? (owner.ownerLocator ?? null) : null,
-    identityWithheld: !discloseIdentity,
+    // Only claim a deliberate withholding when there was an identity to hide:
+    // a connection-only holder has no host id at all, and `holderType` says so.
+    identityWithheld: !discloseIdentity && Boolean(owner.ownerLocator),
     task: state.task,
     agent: state.agent,
     lastActivityAt: state.lastActivityAt,
@@ -2150,13 +2152,13 @@ function publicConversationOwner(owner, state, discloseIdentity = true) {
   };
 }
 
-function publicConversationNode(node, discloseIdentity = true) {
+function publicConversationNode(node, { discloseIdentity = false } = {}) {
   if (!node) return null;
   return discloseIdentity ? node : {
     ...node,
     actorHost: null,
     actorConversationId: null,
-    actorIdentityWithheld: node.actorKind === 'ai',
+    actorIdentityWithheld: node.actorKind === 'ai' && Boolean(node.actorConversationId),
   };
 }
 
@@ -2997,9 +2999,9 @@ export async function createCockpitHttpServer({
     const holdsIdentity = ownerIdentityIsCaller(owner, key);
     const base = {
       ...publicSessionState(current),
-      latestNode: publicConversationNode(
-        readLatestConversationNode(db, current.sessionId), holdsIdentity),
-      owner: publicConversationOwner(owner, current, holdsIdentity),
+      latestNode: publicConversationNode(readLatestConversationNode(db, current.sessionId),
+        { discloseIdentity: holdsIdentity }),
+      owner: publicConversationOwner(owner, current, { discloseIdentity: holdsIdentity }),
       candidates: [publicSessionState(current)],
       requiresUserConfirmation: false,
       canContinue: false,
@@ -3047,7 +3049,7 @@ export async function createCockpitHttpServer({
         recoveryAction: 'open_workbench_transfer',
         generationScope: 'session_history_not_current_chat',
         requiresUserConfirmation: false,
-        owner: publicConversationOwner(owner, current, holdsIdentity),
+        owner: publicConversationOwner(owner, current, { discloseIdentity: holdsIdentity }),
         availableActions: ['return_to_owner', 'open_workbench_transfer'],
         message: hasBinding
           ? '当前聊天已被替代，当前持有人及最新节点已显示。代码未被修改；请回到持有聊天，或由用户在工作台授权转交。'
@@ -3122,10 +3124,10 @@ export async function createCockpitHttpServer({
           sessionId: current?.sessionId ?? null,
           projectId: context.projectId,
           worktreeId: current?.worktreeId ?? context.worktreeId,
-          owner: publicConversationOwner(owner, current, ownerIdentityIsCaller(owner, key)),
+          owner: publicConversationOwner(owner, current, { discloseIdentity: ownerIdentityIsCaller(owner, key) }),
           latestNode: current
             ? publicConversationNode(readLatestConversationNode(db, current.sessionId),
-              ownerIdentityIsCaller(owner, key))
+              { discloseIdentity: ownerIdentityIsCaller(owner, key) })
             : null,
           recoveryAction: 'open_workbench_transfer',
           revision: current?.revision ?? context.revision ?? null,
@@ -3430,8 +3432,12 @@ export async function createCockpitHttpServer({
               const pending = readTransferState(db, sessionId);
               return { sessionId, worktreeId: current.worktreeId, task: current.task,
                 status: current.status, revision: current.revision,
-                owner: publicConversationOwner(readConversationOwner(db, sessionId), current),
-                latestNode: readLatestConversationNode(db, sessionId),
+                // The workbench console is where the owner decides which chat to go
+                // back to, so this is the one surface that opts into readable identities.
+                owner: publicConversationOwner(readConversationOwner(db, sessionId), current,
+                  { discloseIdentity: true }),
+                latestNode: publicConversationNode(readLatestConversationNode(db, sessionId),
+                  { discloseIdentity: true }),
                 transfer: pending ? { ...pending, status: pending.expired ? 'expired' : 'pending',
                   expiresAt: new Date(pending.expiresAt).toISOString() } : null };
             }).filter(Boolean);
