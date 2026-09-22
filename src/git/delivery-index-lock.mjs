@@ -4,6 +4,7 @@ import {
   fstatSync,
   fsyncSync,
   linkSync,
+  existsSync,
   lstatSync,
   openSync,
   readdirSync,
@@ -135,13 +136,26 @@ function sweepStaleLockTemps(lockPath) {
 export function acquireDeliveryIndexLock(indexPath, commandId) {
   const lockPath = `${indexPath}.lock`;
   sweepStaleLockTemps(lockPath);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // One reclaim is allowed, so a successful reclaim is never followed by a
+  // spurious "locked" answer; a second contention means someone else won.
+  let reclaimed = false;
+  for (;;) {
     let published;
     try {
       published = publishAtomically(lockPath, commandId);
     } catch (error) {
       if (error.code === 'EEXIST') {
-        if (!reclaimExitedOwner(lockPath)) throw locked();
+        if (reclaimed || !reclaimExitedOwner(lockPath)) throw locked();
+        reclaimed = true;
+        continue;
+      }
+      if (error.code === 'ENOENT' && !reclaimed && !existsSync(lockPath)) {
+        // The private publish artifact vanished before the link - the sweep can
+        // do that to a creator stalled over ten minutes. Retry once, but only
+        // while no lock has appeared and the directory is still there; a
+        // missing directory stays a real error.
+        if (!existsSync(path.dirname(lockPath))) throw error;
+        reclaimed = true;
         continue;
       }
       if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId);

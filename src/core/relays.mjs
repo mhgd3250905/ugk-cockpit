@@ -752,6 +752,11 @@ export function resumeRelay(db, request = {}, options = {}) {
     if (row.state === 'expired' || row.expires_at <= nowMillis(options)) {
       // Historical core callers may replay the legacy confirmation protocol.
       // Public MCP requests require a new workbench authorization after expiry.
+      // No shipped boundary passes `allowExpiredConfirmation` any more other
+      // than as `false` (http-server /work/resume), so the confirmation branch
+      // below is reachable only from core callers and its regression tests; it
+      // exists so pre-existing committed confirmation receipts keep their
+      // meaning, and any new public route must pass false explicitly.
       if (options.allowExpiredConfirmation === false) {
         return failCommand(db, commandId, {
           ok: false, code: 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED',

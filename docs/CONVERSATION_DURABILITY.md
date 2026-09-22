@@ -71,7 +71,7 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 
 `ugk_work_takeover` 仅消费 `{ sessionId, clientRequestId, transferCode }`；模型不能以“用户已确认”、旧 confirmationRequestId 或旧两步参数签发异常接手权限。过期 resume 的新请求必须到工作台授权；以前已经成功的幂等回执保留原事实，当前能力另按数据库计算，不恢复旧权限。有效普通 Relay 接收保持正常流程。
 
-`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。携带这两个参数的请求在本地即被拒绝，并提示改走工作台转交。
+`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端则收到通用 `INVALID_REQUEST`，其恢复入口同样是工作台转交面板。
 
 签发回执重放时，只在当前授权仍有效时重新提供同一码；已消费、取消、过期或替代只返回当前处理状态，不展示可继续使用的空码或旧码。结果未知时保留原参数与原幂等键重试，不自动创建新授权。消费授权、冻结检查、CAS、新 owner、撤销旧 owner、C 接手节点与回执原子提交。
 

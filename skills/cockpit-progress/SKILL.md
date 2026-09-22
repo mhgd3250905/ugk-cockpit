@@ -22,7 +22,7 @@ description: 在已有 active UGK Cockpit 会话中记录有意义的工作检�
 
 scoped MCP credential、connection handle、宿主 `_meta` 和 diagnosticId 由 bridge/服务内部处理，不放入 progress 参数，也不要从日志或错误中复制这些值。响应中的 `bindingKind`、`bindingPersistence`、`bindingReason` 与 `capabilities` 是当前事实；不可变接力回执或旧 revision 不能代替当前绑定。
 
-平台与宿主会话 ID 由宿主每次请求自动提供，不用模型填写。若持有人不是当前聊天，报告最新节点及持有人的平台/会话 ID；异常接手只可由用户在工作台授权。`transfer_pending` 表示旧聊天已暂停推进；不要在聊天中再做两步 takeover，也不要用新的 init、接力或修改 revision 绕过。
+平台与宿主会话 ID 由宿主每次请求自动提供，不用模型填写。若持有人不是当前聊天，报告最新节点与持有类型即可：其他聊天的平台/会话 ID 不会下发给当前聊天（`identityWithheld: true`），需要指明是哪一个聊天时请用户查看工作台，不要猜测；异常接手只可由用户在工作台授权。`transfer_pending` 表示旧聊天已暂停推进；不要在聊天中再做两步 takeover，也不要用新的 init、接力或修改 revision 绕过。
 
 ## 调用
 

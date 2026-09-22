@@ -20,7 +20,7 @@ MCP bridge 的 scoped credential 与 connection handle 由 bridge 和服务内�
 
 - 只有工具返回 `canContinue: true`、`status: "active"`、有效 `sessionId` 和 `revision` 时，才可继续准备 relay。
 - 返回 `awaiting_resume`、已结束、`ambiguous` 或其他不可继续状态时，停止写入并如实说明；不要用同目录候选自动接续。
-- 返回 `bindingReason: "held_by_another_chat"`，或返回 `bindingReason: "replaced"` 且带有 `owner` 时，这是安全拒绝，不是服务故障：先向用户报告 `owner` 中可用的持有类型、宿主/聊天定位符、任务、Agent 和最后活动时间。`holderType: "durable_chat"` 可定位回原聊天；`"previous_mcp_connection"` 表示宿主没有提供稳定聊天 ID，只能确认是此前受认证连接持有。两种情况都不得自动写入、重新 init 或绕过绑定。
+- 返回 `bindingReason: "held_by_another_chat"`，或返回 `bindingReason: "replaced"` 且带有 `owner` 时，这是安全拒绝，不是服务故障：先向用户报告 `owner` 中可用的持有类型、任务、Agent 和最后活动时间。平台不会把其他聊天的定位符下发给非持有聊天（`identityWithheld: true` 就是这个边界），因此不得描述、猜测或从别处补全具体宿主与会话 ID；要确认是哪一个聊天，请用户在工作台的会话接续面板查看。`holderType: "durable_chat"` 表示工作由某个已识别聊天持有；`"previous_mcp_connection"` 表示宿主没有提供稳定聊天 ID，只能确认是此前受认证连接持有。两种情况都不得自动写入、重新 init 或绕过绑定。
 - 这时只提供用户选择：回到持有人继续；或由用户在工作台的“会话接续与转交”面板授权其他聊天接手。聊天中的口头确认不能签发转交权限，不再使用旧的两步 takeover。只有用户提供工作台生成的接手指令后，调用 `ugk_work_takeover`，参数为其中的 `sessionId`、`transferCode` 和新的 `clientRequestId`。成功后先空参 context 确认可继续，再执行用户安排；接手本身就是新聊天的节点。授权过期、目标不符或已撤销时回工作台处理，不循环 takeover。用户取消转交也必须在工作台操作。
 - 返回 `transfer_pending` 时，旧聊天已被冻结；只允许使用用户提供的工作台接手指令或由用户在平台取消。返回 `inspect_binding` 时保留诊断并停止写入，不把它解释为另一聊天已接手，不自动生成 Relay。其他 stale 情况按服务明确的恢复动作处理，不能凭旧绑定自动取回。
 - 返回 `requiresUserConfirmation: true` 且 `bindingStatus: "unbound"` 时，只向用户确认是否“继续此工作会话”。用户确认后，使用上一次 context 返回的 `sessionId` 与 `revision` 成对调用 `ugk_work_context` 的 `confirmSessionId` 和 `expectedRevision`；确认期间 revision 变化则重新查询并再次确认。
