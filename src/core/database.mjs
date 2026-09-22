@@ -1110,6 +1110,10 @@ END;
     version: 29,
     name: 'project-dashboard-removal',
     apply(db) {
+      // A partial fixture has no projects table, and PRAGMA reports that as
+      // "no columns", which the check below would read as a missing column and
+      // try to alter into a table that is not there.
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projects'").get()) return;
       const columns = db.prepare('PRAGMA table_info(projects)').all();
       if (!columns.some((column) => column.name === 'removed_at')) {
         db.exec('ALTER TABLE projects ADD COLUMN removed_at TEXT;');

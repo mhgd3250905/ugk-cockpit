@@ -642,14 +642,6 @@ export const TOOLS = [
         clientRequestId: {
           type: 'string',
           description: 'Idempotency key / client request identifier'
-        },
-        confirmationRequestId: {
-          type: 'string',
-          description: 'Only after user confirmation: the confirmationRequestId returned by the preceding resume offer'
-        },
-        expectedRevision: {
-          type: 'integer', minimum: 1,
-          description: 'Copy the revision from the same confirmation offer; never obtain it from another session'
         }
       },
       required: ['continueCode', 'clientRequestId'],
@@ -1047,7 +1039,16 @@ function validateResumeArgs(args) {
   }
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
-    if (!['continueCode', 'clientRequestId', 'confirmationRequestId', 'expectedRevision'].includes(key)) {
+    if (key === 'confirmationRequestId' || key === 'expectedRevision') {
+      // The in-chat two-step confirmation for an expired relay was retired: a
+      // resume of an expired code is answered with a workbench authorization
+      // requirement before any offer is produced, so this client could never
+      // reach the step these parameters belong to. Reject them here with the
+      // reason instead of forwarding a request that can only fail remotely.
+      return `Unsupported property: ${key} - an expired relay code cannot be confirmed in chat; `
+        + 'ask the user to authorize the handover in the UGK Cockpit workbench, then use ugk_work_takeover with the transferCode';
+    }
+    if (!['continueCode', 'clientRequestId'].includes(key)) {
       return `Unexpected property: ${key}`;
     }
   }
@@ -1056,12 +1057,6 @@ function validateResumeArgs(args) {
   }
   if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
     return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
-  }
-  if ((args.confirmationRequestId !== undefined) !== (args.expectedRevision !== undefined)
-    || (args.confirmationRequestId !== undefined && (typeof args.confirmationRequestId !== 'string'
-      || !args.confirmationRequestId.trim() || args.confirmationRequestId === args.clientRequestId
-      || !Number.isInteger(args.expectedRevision) || args.expectedRevision < 1))) {
-    return 'Confirmation requires a prior confirmationRequestId, expectedRevision and a new clientRequestId';
   }
   return null;
 }
