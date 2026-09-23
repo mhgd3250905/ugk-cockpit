@@ -1,5 +1,9 @@
 # 会话身份与中断恢复
 
+## 接入指令即归属：declaredWorkspace 声明回退（alpha.51 引入）
+
+入口工具（`ugk_work_context` / `ugk_work_init` / `ugk_work_resume` / `ugk_work_takeover`）的项目归属以用户签发的一次性指令（dispatch / relay / transfer）为准；桥进程的工作目录只是验证输入，不是归属来源。工作目录解析得到项目时维持既有精确比对（Codex/ZCode 行为不变）；解析不到项目（如 Antigravity 的全局常驻桥进程，其工作目录为宿主安装目录）时，接受代理在调用参数中声明的 `declaredWorkspace`（该宿主聊天所工作的项目绝对路径）回退解析。声明受三重约束：仍须落在已登记项目的授权根内并复用既有探测；随后与指令所属项目严格比对，错配即拒绝（`DISPATCH_GRANT_BINDING_MISMATCH` / `RELAY_BINDING_MISMATCH`）；不得覆盖任何可解析的工作目录事实。操作台生成的接入/重发/接力/转交消息均自带「项目目录」提示行；缺声明时的错误响应携带带路径的行动指引。stdio 门仅在这四个入口工具放行该字段（≤1024 字符），`path`/`projectId`/`worktreeId`/`token` 仍全局禁止。端到端验证见 `test/declared-workspace.test.mjs`。
+
 ## 文件身份指纹与 schema 30 原地迁移（PR #17 引入）
 
 目录文件身份指纹不再包含 stat device 编号（macOS APFS 卷号会随重启/系统更新漂移，inode+birthtime 已唯一定位目录条目）；device 仅保留在诊断证据中。漂移不等于目录被替换：目录真的被 `cp -R`/替换时 inode 变化，仍会被 100% 拒绝。

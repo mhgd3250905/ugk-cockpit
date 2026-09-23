@@ -1,6 +1,6 @@
 # MCP 宿主支持清单
 
-核对日期：2026-09-23；源码版本：0.1.0-alpha.49。
+核对日期：2026-09-23；源码版本：0.1.0-alpha.51。
 
 连接 MCP、安装 Skill、识别当前聊天、成功恢复工作会话是不同的验收项。Skill 不能替宿主注入聊天身份，工作台转交也不能补齐缺失的宿主身份。
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Codex | 每次请求的 `_meta.threadId` | 已适配，保留既有验收记录 |
 | ZCode | `_meta['com.zcode/request-context'].session_id`，以及命名空间存在时的镜像 `session_id` | 已适配，保留既有验收记录 |
-| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增身份适配；项目解析须按项目安装工作区插件（见下节，2026-09-23 本机实测通过并完成接力交接） |
+| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增身份适配；alpha.51 起全局登记 + declaredWorkspace 声明回退即可用（见下节），按项目插件为可选严格模式 |
 | Claude Code | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持；进程环境变量会过时 |
 | Cursor | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持 |
 | Gemini CLI | 核对源码的 `_meta` 只有每次生成的 `progressToken` | 不接受进度编号作为聊天身份 |
@@ -20,29 +20,15 @@
 
 Antigravity 的 MCP 登记全局只有一份，桥接进程是 Language Server 管理的常驻 daemon：**所有聊天共用一个进程**，其工作目录是宿主安装目录而非用户项目（经读取运行中桥进程的 PEB 核实）。`tools/call` 的 `_meta` 仅含 `antigravity.google/conversation_id`、`parent_conversation_id`、`agent_name`、`artifacts_dir` 四个字段（经官方二进制符号核实），没有任何工作区路径。因此「全局登记 + cwd 指向某个项目」无法区分聊天，按目录解析项目在此宿主上结构不可行；`artifacts_dir` 指向宿主内部缓存，不得用于推断项目。
 
-### 正确接入方式：按项目安装工作区插件（2026-09-23 本机实测通过）
+### 正确接入方式：全局登记 + 声明回退（alpha.51 起，2026-09-23）
 
-使用 Antigravity 官方插件机制（`.agents/plugins/`，见其内置文档 plugins.md 与 mcp_servers.md）按项目接入。推荐用安装命令（幂等；保留插件配置内的其他 MCP 服务器；拒绝覆盖外来插件）：
+Antigravity 只需**全局一份** MCP 登记（与 Codex/ZCode 同等的安装体验）：在全局 `mcp_config.json` 注册 stdio 服务器，command 为 Node.js，args 指向 Cockpit 的 `src/mcp/main.mjs`，无需设置 cwd，也不需要任何逐项目配置。项目归属由一次性接入指令确定：操作台生成的接入/接力/转交消息自带「项目目录」行；宿主桥进程的工作目录解析不到项目时，入口工具（context/init/resume/takeover）接受把该目录作为 `declaredWorkspace` 传入——声明必须落在已登记项目内并与指令所属项目比对，错配拒绝；可解析的工作目录事实优先，声明不得覆盖。Codex/ZCode 不受影响（其工作目录天然正确，无需声明）。
 
-```
-npm run setup:antigravity -- <项目绝对路径>
-```
+可选的更严格模式：`npm run setup:antigravity -- <项目绝对路径>` 为项目写入官方工作区插件（`.agents/plugins/ugk-cockpit/`，幂等；保留插件配置内的其他 MCP 服务器；拒绝覆盖外来插件；不可读配置须 `--force`）。插件让该项目内聊天经自己的桥进程以正确工作目录启动，从而完全不走声明路径；alpha.51 之前这是唯一可行方式（2026-09-23 按插件方案实测通过并完成接力交接）。
 
-该命令等价于在项目根目录写入两个文件，也可手写：
+不要共享 token，也不要让模型填造聊天 ID。**不要在全局登记里为 Cockpit 设置指向某个项目的 cwd**：全局登记是所有聊天共用的，那样会让每个聊天都解析到同一项目。更新 Cockpit 源码后须重启宿主让桥进程重载；无需重新 init。
 
-```
-.agents/plugins/ugk-cockpit/plugin.json
-  {"name": "ugk-cockpit"}
-
-.agents/plugins/ugk-cockpit/mcp_config.json
-  {"mcpServers":{"ugk-cockpit":{"command":"node",
-   "args":["<Cockpit 仓库>/src/mcp/main.mjs"],
-   "cwd":"<该项目绝对路径>"}}}
-```
-
-重启宿主后，该项目内的聊天由插件启动自己的桥进程，`process.cwd()` 即项目目录，项目解析、会话识别、接力全部沿用既有机制。每个要接入 Antigravity 的项目重复这一份两文件安装。**不要在全局 `~/.gemini/*/mcp_config.json` 登记 Cockpit**：全局登记只会让所有聊天解析到错误位置（本机已于 2026-09-23 移除）。更新 Cockpit 源码后须重启宿主让桥进程重载；无需重新 init。
-
-验收分两步：先在目标聊天调用 `ugk_work_context({})`，核对返回的项目与绑定状态；有用户明确提供的接力指令时再执行该指令，只有返回的 sessionId、revision 和可继续状态才是恢复成功证据。身份被识别不自动取得已有工作会话的写权限。2026-09-23 本机按上述流程实测：播客项目装插件后项目解析正确，旧聊天完成接力、新聊天接手并正常写入进展。
+验收分两步：先在目标聊天调用 `ugk_work_context({})`（全局登记的宿主如报「没有可识别的工作目录」，按消息中的「项目目录」行带上 `declaredWorkspace` 重查），核对返回的项目与绑定状态；有用户明确提供的接力指令时再执行该指令，只有返回的 sessionId、revision 和可继续状态才是恢复成功证据。身份被识别不自动取得已有工作会话的写权限。2026-09-23 本机以插件方式实测：播客项目解析正确，旧聊天完成接力、新聊天接手并正常写入进展；alpha.51 的声明回退路径由 `test/declared-workspace.test.mjs` 端到端验证，全局登记的现场验收待 alpha.51 部署后补记。
 
 ### 事件记录
 

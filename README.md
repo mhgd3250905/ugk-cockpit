@@ -26,7 +26,11 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.50` — 新增 `npm run setup:antigravity -- <项目绝对路径>`：一条命令把 Antigravity 工作区插件写入指定项目，该项目内的聊天即可正确解析项目并使用 Cockpit，无需了解宿主内部细节。宿主形态与接入验收见[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。
+`0.1.0-alpha.51` — 接入指令即归属：接入/接力/接手入口工具在宿主桥进程无法解析工作目录时，以代理声明的工作区回退解析（`declaredWorkspace`），声明必须落在已登记项目内、不得覆盖可解析的工作目录事实，并与一次性指令的项目比对；操作台复制的接入指令自带「项目目录」提示行。全局一份 MCP 登记 + Skill 即可服务所有 Agent 的所有项目，无需逐项目配置（Codex/ZCode 行为不变）。协议细节见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)与[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。
+
+以下为 alpha.50 的记录：
+
+`0.1.0-alpha.50` — 新增 `npm run setup:antigravity -- <项目绝对路径>`：一条命令把 Antigravity 工作区插件写入指定项目，该项目内的聊天即可正确解析项目并使用 Cockpit。alpha.51 起全局登记配合声明回退即可覆盖此需求，插件安装保留为可选的更严格模式。
 
 以下为 alpha.49 的记录：
 

@@ -43,6 +43,10 @@ export const TOOLS = [
           minimum: 1,
           description: 'The exact revision returned with confirmSessionId by the previous context query',
         },
+        declaredWorkspace: {
+          type: 'string',
+          description: 'Only for hosts whose bridge cannot resolve a working directory (the tool reports an unrecognizable working directory): the absolute path of your current project directory, as stated in the access instruction. It is validated against the registered project and never overrides a resolvable working directory',
+        },
       },
       additionalProperties: false,
     },
@@ -521,6 +525,10 @@ export const TOOLS = [
         currentState: {
           type: 'string',
           description: 'Concise starting state, progress, and relevant context'
+        },
+        declaredWorkspace: {
+          type: 'string',
+          description: 'Only for hosts whose bridge cannot resolve a working directory: the absolute path of your current project directory, as stated in the access instruction (项目目录)'
         }
       },
       required: ['initCode', 'clientRequestId', 'currentTask', 'currentState'],
@@ -623,6 +631,10 @@ export const TOOLS = [
         transferCode: {
           type: 'string',
           description: 'The one-time authorization from the workbench; never invent or reuse another chat’s authorization'
+        },
+        declaredWorkspace: {
+          type: 'string',
+          description: 'Only for hosts whose bridge cannot resolve a working directory: the absolute path of your current project directory, as stated in the transfer instruction'
         }
       },
       required: ['sessionId', 'clientRequestId', 'transferCode'],
@@ -650,6 +662,10 @@ export const TOOLS = [
         expectedRevision: {
           type: 'integer', minimum: 1,
           description: 'Copy the revision from the same confirmation offer; never obtain it from another session'
+        },
+        declaredWorkspace: {
+          type: 'string',
+          description: 'Only for hosts whose bridge cannot resolve a working directory: the absolute path of your current project directory, as stated in the relay instruction (项目目录)'
         }
       },
       required: ['continueCode', 'clientRequestId'],
@@ -705,6 +721,17 @@ function validateAcceptArgs(args) {
   return null;
 }
 
+// Fallback workspace for hosts whose bridge cwd resolves to no project (a
+// single global daemon spawned from the host install directory). The value
+// is validated against registered authorized roots server-side and cross
+// checked against the one-time code's project; it never overrides a
+// resolvable cwd.
+function validDeclaredWorkspaceArg(value) {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= 1024 && !value.includes('\0');
+}
+
+const DECLARED_WORKSPACE_ERROR = 'Invalid declaredWorkspace (must be the absolute path of your current project directory, max 1024 chars)';
+
 function validateContextArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
@@ -713,9 +740,12 @@ function validateContextArgs(args) {
     if (FORBIDDEN_KEYS.has(key)) {
       return `Forbidden property: ${key}`;
     }
-    if (!['confirmSessionId', 'expectedRevision'].includes(key)) {
+    if (!['confirmSessionId', 'expectedRevision', 'declaredWorkspace'].includes(key)) {
       return `Unexpected property: ${key}`;
     }
+  }
+  if (args.declaredWorkspace !== undefined && !validDeclaredWorkspaceArg(args.declaredWorkspace)) {
+    return DECLARED_WORKSPACE_ERROR;
   }
   const hasSession = args.confirmSessionId !== undefined;
   const hasRevision = args.expectedRevision !== undefined;
@@ -961,15 +991,18 @@ function validateInitArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
   }
-  const allowedKeys = ['initCode', 'clientRequestId', 'currentTask', 'currentState'];
+  const allowedKeys = ['initCode', 'clientRequestId', 'currentTask', 'currentState', 'declaredWorkspace'];
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
     if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
   }
-  for (const field of allowedKeys) {
+  for (const field of ['initCode', 'clientRequestId', 'currentTask', 'currentState']) {
     if (typeof args[field] !== 'string' || args[field].trim() === '') {
       return `Missing or invalid required field: ${field} (must be non-empty string)`;
     }
+  }
+  if (args.declaredWorkspace !== undefined && !validDeclaredWorkspaceArg(args.declaredWorkspace)) {
+    return DECLARED_WORKSPACE_ERROR;
   }
   return null;
 }
@@ -1024,7 +1057,7 @@ function validateTakeoverArgs(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return 'Arguments must be an object';
   }
-  const allowedKeys = ['sessionId', 'clientRequestId', 'transferCode'];
+  const allowedKeys = ['sessionId', 'clientRequestId', 'transferCode', 'declaredWorkspace'];
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
     if (!allowedKeys.includes(key)) return `Unexpected property: ${key}`;
@@ -1038,6 +1071,9 @@ function validateTakeoverArgs(args) {
   if (typeof args.transferCode !== 'string' || !args.transferCode.trim()) {
     return 'Platform authorization required: obtain transferCode from the Cockpit workbench; chat confirmation cannot authorize takeover';
   }
+  if (args.declaredWorkspace !== undefined && !validDeclaredWorkspaceArg(args.declaredWorkspace)) {
+    return DECLARED_WORKSPACE_ERROR;
+  }
   return null;
 }
 
@@ -1047,7 +1083,7 @@ function validateResumeArgs(args) {
   }
   for (const key of Object.keys(args)) {
     if (FORBIDDEN_KEYS.has(key)) return `Forbidden property: ${key}`;
-    if (!['continueCode', 'clientRequestId', 'confirmationRequestId', 'expectedRevision'].includes(key)) {
+    if (!['continueCode', 'clientRequestId', 'confirmationRequestId', 'expectedRevision', 'declaredWorkspace'].includes(key)) {
       return `Unexpected property: ${key}`;
     }
   }
@@ -1056,6 +1092,9 @@ function validateResumeArgs(args) {
   }
   if (typeof args.clientRequestId !== 'string' || args.clientRequestId.trim() === '') {
     return 'Missing or invalid required field: clientRequestId (must be non-empty string)';
+  }
+  if (args.declaredWorkspace !== undefined && !validDeclaredWorkspaceArg(args.declaredWorkspace)) {
+    return DECLARED_WORKSPACE_ERROR;
   }
   if ((args.confirmationRequestId !== undefined) !== (args.expectedRevision !== undefined)
     || (args.confirmationRequestId !== undefined && (typeof args.confirmationRequestId !== 'string'

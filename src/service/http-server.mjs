@@ -1235,13 +1235,23 @@ function relayContinueCode(apiToken, sessionId, clientRequestId) {
     .digest('base64url');
 }
 
-function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
+function workspaceHintLines(canonicalPath) {
+  if (typeof canonicalPath !== 'string' || !canonicalPath.trim()) return [];
+  return [
+    `项目目录：${canonicalPath}`,
+    '如果你的宿主不提供工作目录（工具报“没有可识别的工作目录”），请在调用时把上面的项目目录作为 declaredWorkspace 参数传入，并核对你当前工作区确实是该目录。',
+  ];
+}
+
+function assignmentDispatchMessage({ mode, dispatchCode, agent, task, canonicalPath }) {
+  const hints = workspaceHintLines(canonicalPath);
   if (mode === 'init') {
     const target = typeof task === 'string' && task.trim() ? task.trim() : null;
     return [
       '请使用 `$cockpit-init` 把当前项目接入 UGK Cockpit，并在成功后直接开始工作。',
       `一次性 initCode: "${dispatchCode}"。`,
       target ? `当前目标：${target}` : '当前没有额外目标，请按当前对话继续工作。',
+      ...hints,
       '成功后直接进入 working；不要清理、覆盖或重置已有改动。',
       '后续可用 `$cockpit-progress` 自动记录有效检查点；只有用户明确要求换 AI 会话时才调用 `$cockpit-relay`。',
       '只有用户明确要求结束当前阶段时，才用 `$cockpit-handoff` 生成标准交接手册；普通功能完成不会触发阶段结束交接。',
@@ -1253,6 +1263,7 @@ function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
     return [
       '请使用 UGK Cockpit MCP 接上这个项目的上下文。',
       `调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)。`,
+      ...hints,
       '读取工具返回的 latestHandoff，简要告诉用户你理解的现状，然后等待后续安排。',
       '此时不要修改代码；收到明确任务后先调用 ugk_work_begin，再开始工作。',
       '如果 MCP 工具不可用或接手失败，不要声称已经读取交接或开始工作。',
@@ -1261,6 +1272,7 @@ function assignmentDispatchMessage({ mode, dispatchCode, agent, task }) {
   return [
     `请使用 UGK Cockpit MCP 接手这项任务：${task}`,
     `先调用 ugk_work_accept(dispatchCode: "${dispatchCode}", clientRequestId: 你生成的唯一请求号)，成功后再修改代码。`,
+    ...hints,
     '工作中可调用 `$cockpit-progress`（ugk_work_progress）记录检查点；只有用户明确要求换 AI 会话时才调用 `$cockpit-relay`（ugk_work_relay）。',
     '只有用户明确要求结束当前阶段时，才调用 `$cockpit-handoff`（ugk_work_handoff）；普通功能完成不会触发阶段结束交接。',
     '如果 MCP 工具不可用或接手失败，不要声称已经接手或完成。',
@@ -1731,6 +1743,19 @@ function validateMcpHandoffBody(body) {
   }
 }
 
+function validDeclaredWorkspace(value) {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= 1024
+    && !value.includes('\0');
+}
+
+function requireValidDeclaredWorkspace(body) {
+  if (body.declaredWorkspace !== undefined && !validDeclaredWorkspace(body.declaredWorkspace)) {
+    const error = new Error('Invalid declaredWorkspace.');
+    error.code = 'INVALID_REQUEST';
+    throw error;
+  }
+}
+
 function validateMcpInitBody(body) {
   requireString(body, 'initCode');
   requireString(body, 'clientRequestId');
@@ -1741,6 +1766,7 @@ function validateMcpInitBody(body) {
     error.code = 'INVALID_REQUEST';
     throw error;
   }
+  requireValidDeclaredWorkspace(body);
 }
 
 function validRelayItems(value, { stringsOnly = false } = {}) {
@@ -1774,6 +1800,10 @@ const MCP_RESUME_KEYS = new Set([
   'expectedRevision',
   // The stdio adapter adds this binding-only field before calling HTTP.
   'mcpWorkingDirectory',
+  // Fallback workspace for hosts whose bridge cwd cannot resolve to a
+  // project; validated against registered roots, never overriding a
+  // resolvable cwd.
+  'declaredWorkspace',
 ]);
 
 const MCP_TAKEOVER_KEYS = new Set([
@@ -1782,12 +1812,14 @@ const MCP_TAKEOVER_KEYS = new Set([
   'transferCode',
   // The stdio adapter adds this binding-only field before calling HTTP.
   'mcpWorkingDirectory',
+  'declaredWorkspace',
 ]);
 
 const MCP_CONTEXT_KEYS = new Set([
   'mcpWorkingDirectory',
   'confirmSessionId',
   'expectedRevision',
+  'declaredWorkspace',
   // This field is injected by the stdio bridge and is not exposed in the
   // model-facing tool schema.  It carries only the bridge's process-local
   // binding generation; it is never persisted.
@@ -1852,6 +1884,7 @@ function validateMcpResumeBody(body) {
   requireString(body, 'continueCode');
   requireString(body, 'clientRequestId');
   requireString(body, 'mcpWorkingDirectory');
+  requireValidDeclaredWorkspace(body);
   if ((body.confirmationRequestId !== undefined) !== (body.expectedRevision !== undefined)
     || (body.confirmationRequestId !== undefined && (typeof body.confirmationRequestId !== 'string'
       || !body.confirmationRequestId.trim() || body.confirmationRequestId === body.clientRequestId
@@ -1868,12 +1901,14 @@ function validateMcpTakeoverBody(body) {
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
   requireString(body, 'mcpWorkingDirectory');
+  requireValidDeclaredWorkspace(body);
   requireString(body, 'transferCode');
 }
 
 function validateMcpContextBody(body) {
   rejectUnexpectedMcpFields(body, MCP_CONTEXT_KEYS, 'context');
   requireString(body, 'mcpWorkingDirectory');
+  requireValidDeclaredWorkspace(body);
   const hasConfirmSession = body.confirmSessionId !== undefined;
   const hasExpectedRevision = body.expectedRevision !== undefined;
   if (hasConfirmSession !== hasExpectedRevision) {
@@ -2754,6 +2789,36 @@ export async function createCockpitHttpServer({
     throw error;
   }
 
+  // Entry tools (init/resume/takeover) authorize through the user-issued
+  // one-time code, so the bridge's spawn directory is a verification input,
+  // not the source of project ownership. Hosts that spawn the bridge with a
+  // resolvable directory keep today's exact match. Hosts that cannot (one
+  // global daemon, install-dir cwd) fall back to the agent's declared
+  // workspace — which resolveMcpWorkingProject still validates against
+  // registered authorized roots and the caller still checks against the
+  // one-time code's project. A declaration never overrides a resolvable cwd.
+  function entryDirectoryGuidance(expectedPathHint) {
+    return '当前宿主没有提供可识别的工作目录。'
+      + (expectedPathHint ? `本次接入指令属于项目目录 ${expectedPathHint}；` : '')
+      + '如果你的聊天确实在该项目目录中工作，请把该绝对路径作为 declaredWorkspace 参数重新调用，并核对与你当前工作区一致。';
+  }
+
+  async function resolveEntryProject(workingDirectory, declaredWorkspace, expectedPathHint = null) {
+    let working;
+    try {
+      working = await resolveMcpWorkingProject(workingDirectory);
+    } catch (error) {
+      if (error?.code !== 'PROJECT_NOT_FOUND') throw error;
+      if (typeof declaredWorkspace === 'string' && declaredWorkspace.trim()) {
+        working = await resolveMcpWorkingProject(declaredWorkspace);
+      } else {
+        error.publicMessage = entryDirectoryGuidance(expectedPathHint);
+        throw error;
+      }
+    }
+    return working;
+  }
+
   async function resolveMcpWorkingCandidates(workingDirectory) {
     if (typeof workingDirectory !== 'string' || !workingDirectory.trim()) {
       const error = new Error('MCP working directory is unavailable.');
@@ -2818,7 +2883,12 @@ export async function createCockpitHttpServer({
       next_command: null,
       warnings: [],
     };
-    const matches = await resolveMcpWorkingCandidates(body.mcpWorkingDirectory);
+    const matches = body.declaredWorkspace
+      ? await Promise.all([
+        resolveMcpWorkingCandidates(body.mcpWorkingDirectory),
+        (async () => { try { return await resolveMcpWorkingCandidates(body.declaredWorkspace); } catch { return []; } })(),
+      ]).then(([fromCwd, fromDeclared]) => (fromCwd.length > 0 ? fromCwd : fromDeclared))
+      : await resolveMcpWorkingCandidates(body.mcpWorkingDirectory);
     if (matches.length === 0) {
       return {
         ok: true,
@@ -3370,7 +3440,11 @@ export async function createCockpitHttpServer({
         if (!result.ok) { sendError(response, result.code, { extra: { sessionId, revision: result.revision ?? context.revision } }); return; }
         sendJson(response, 200, result.transferCode ? {
           ...result, expiresAt: new Date(result.expiresAt).toISOString(),
-          continueMessage: `请在目标项目的聊天中使用工作台授权接手，调用 ugk_work_takeover，参数为 sessionId: "${sessionId}"、transferCode: "${result.transferCode}"，并生成新的 clientRequestId。不要重新 init，不清理或覆盖代码。成功后先查询 ugk_work_context({})，报告平台返回的会话 ID、revision 和 canContinue，等待用户安排。`,
+          continueMessage: [
+            `请在目标项目的聊天中使用工作台授权接手，调用 ugk_work_takeover，参数为 sessionId: "${sessionId}"、transferCode: "${result.transferCode}"，并生成新的 clientRequestId。`,
+            ...workspaceHintLines(readProjectContext(db, context.projectId)?.canonical_path ?? null),
+            '不要重新 init，不清理或覆盖代码。成功后先查询 ugk_work_context({})，报告平台返回的会话 ID、revision 和 canContinue，等待用户安排。',
+          ].join('\n'),
         } : result);
         return;
       }
@@ -4160,6 +4234,7 @@ export async function createCockpitHttpServer({
           dispatchCode,
           agent: body.agent,
           task,
+          canonicalPath: result.canonicalPath,
         });
         sendJson(response, 201, {
           ok: true,
@@ -4272,6 +4347,7 @@ export async function createCockpitHttpServer({
             dispatchCode,
             agent: assignment.agent_id,
             task: assignment.task_id,
+            canonicalPath: observedTarget.project.canonical_path,
           }),
         });
         return;
@@ -4452,7 +4528,8 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
-        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        const expectedPathHint = readProjectContext(db, context.projectId)?.canonical_path ?? null;
+        const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         if (working.project.id !== context.projectId
           || working.worktreeId !== context.worktreeId) {
           sendError(response, 'DISPATCH_GRANT_BINDING_MISMATCH');
@@ -4569,7 +4646,7 @@ export async function createCockpitHttpServer({
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/resume') {
         const body = await readMcpBody(request);
         validateMcpResumeBody(body);
-        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace);
         const result = resumeRelay(db, {
           ...body,
           conversationKey: key,
@@ -4597,7 +4674,11 @@ export async function createCockpitHttpServer({
           sendError(response, 'CONVERSATION_IDENTITY_REQUIRED');
           return;
         }
-        const working = await resolveMcpWorkingProject(body.mcpWorkingDirectory);
+        const sessionHintContext = readSessionContext(db, body.sessionId);
+        const expectedPathHint = sessionHintContext?.ok
+          ? readProjectContext(db, sessionHintContext.projectId)?.canonical_path ?? null
+          : null;
+        const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         const context = readSessionContext(db, body.sessionId);
         if (!context.ok) {
           sendError(response, context.code);
@@ -5131,6 +5212,9 @@ export async function createCockpitHttpServer({
         : (sqliteBusy ? 'DATABASE_BUSY' : error?.code);
       sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED', {
         context: error?.context,
+        // Curated guidance (e.g. the declaredWorkspace fallback hint) may
+        // replace the generic whitelist text for its own code.
+        extra: publicMessageExtra(error),
       });
     }
     });

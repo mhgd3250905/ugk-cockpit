@@ -73,7 +73,10 @@ test('existing Agent initializes the registered project, continues, and hands of
   assert.match(assignment.message, /只有用户明确要求结束/);
   assert.equal(assignment.message.includes('ugk_work_begin'), false);
   assert.equal(assignment.message.includes(`当前目标：${explicitTarget}`), true);
-  assert.equal(assignment.message.includes(root), false);
+  // The dispatch message now carries the project directory on purpose: it is
+  // the self-locate hint for hosts whose bridge cannot resolve a working
+  // directory. The service token still must never appear.
+  assert.equal(assignment.message.includes(`项目目录：${root}`), true);
   assert.equal(assignment.message.includes(TOKEN), false);
   const reissueResponse = await post(
     service,

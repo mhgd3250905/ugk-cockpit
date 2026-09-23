@@ -79,11 +79,11 @@ test('TOOLS definition includes preflight and no path/projectId/worktreeId/token
     assert.strictEqual(tool.inputSchema.additionalProperties, false);
   }
   const contextTool = TOOLS.find((tool) => tool.name === 'ugk_work_context');
-  assert.deepEqual(Object.keys(contextTool.inputSchema.properties), ['confirmSessionId', 'expectedRevision']);
+  assert.deepEqual(Object.keys(contextTool.inputSchema.properties), ['confirmSessionId', 'expectedRevision', 'declaredWorkspace']);
   assert.deepEqual(contextTool.inputSchema.required ?? [], []);
   const takeoverTool = TOOLS.find((tool) => tool.name === 'ugk_work_takeover');
   assert.deepEqual(Object.keys(takeoverTool.inputSchema.properties), [
-    'sessionId', 'clientRequestId', 'transferCode',
+    'sessionId', 'clientRequestId', 'transferCode', 'declaredWorkspace',
   ]);
   assert.deepEqual(takeoverTool.inputSchema.required, [
     'sessionId', 'clientRequestId', 'transferCode',

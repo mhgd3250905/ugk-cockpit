@@ -6,7 +6,13 @@
 
 ## 实施状态
 
-### alpha.50：Antigravity 一条命令接入（2026-09-23）
+### alpha.51：接入指令即归属，全局登记服务所有宿主（2026-09-23）
+
+- `0.1.0-alpha.51`：入口工具（`ugk_work_context` / `ugk_work_init` / `ugk_work_resume` / `ugk_work_takeover`）在工作目录无法解析到项目时，接受代理声明的 `declaredWorkspace` 回退：声明仍须落在已登记项目的授权根内（复用既有路径授权与探测），随后与一次性指令（dispatch/relay/transfer）所属项目严格比对，错配拒绝（`DISPATCH_GRANT_BINDING_MISMATCH` / `RELAY_BINDING_MISMATCH`）；可解析的工作目录事实始终优先，声明不得覆盖。操作台生成的接入指令、重发指令、接力消息与工作台转交消息均自带「项目目录」提示行，错误响应给出带路径的行动指引。stdio 门仅在这四个入口工具放行该字段，`path`/`projectId`/`worktreeId`/`token` 仍全局禁止。由此全局一份 MCP 登记 + Skill 即可服务所有宿主的所有项目；alpha.50 的按项目插件成为可选的更严格模式。Codex/ZCode 路径行为不变。无新增生产依赖。
+
+验证（2026-09-23，Windows / Node.js 24.15.0，本轮工作树）：`test/declared-workspace.test.mjs` **2/2**，端到端覆盖「无声明引导报错（含路径指引）、错报项目拒绝、正确声明 init 接入成功、relay 消息带目录、声明恢复接力成功、可解析 cwd 优先于声明、context 声明回退、stdio schema 四工具限定」；邻近回归（relays/assignments/mcp-first-http/conversation-takeover-http/mcp-stdio-protocol）**41/41**，其中三处断言按新契约更新（接入消息携带项目目录、context/takeover schema 含 declaredWorkspace）。
+
+### 历史：alpha.50：Antigravity 一条命令接入（2026-09-23）
 
 - `0.1.0-alpha.50`：新增 `npm run setup:antigravity -- <项目绝对路径>`，为项目写入 Antigravity 官方工作区插件（`.agents/plugins/ugk-cockpit/`），使该项目内聊天经插件启动的桥进程正确解析项目——用户无需了解宿主内部形态。幂等重装，保留插件配置内的其他 MCP 服务器，拒绝覆盖外来插件；配置不可读时须显式 `--force` 重建。配套在[宿主支持清单](MCP_HOST_SUPPORT.md)完整记录宿主形态（全局单进程 daemon、工作目录为安装目录、`_meta` 无工作区路径）与按项目接入验收。无新增生产依赖。
 

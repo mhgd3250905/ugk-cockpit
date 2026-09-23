@@ -264,7 +264,12 @@ function relayRowByCodeHash(db, codeHash) {
   return db.prepare('SELECT * FROM relays WHERE code_hash = ?').get(codeHash) ?? null;
 }
 
-function continueMessage(code = null) {
+function relayProjectPath(db, row) {
+  if (!row?.worktree_id) return null;
+  return db.prepare('SELECT canonical_path FROM worktrees WHERE id = ?').get(row.worktree_id)?.canonical_path ?? null;
+}
+
+function continueMessage(code = null, canonicalPath = null) {
   if (!code) {
     return '接力记录已保存；当前会话仍保持 active。请在新的 AI 会话中调用 ugk_work_resume，并使用此前收到的一次性 continueCode；不要重新 init。';
   }
@@ -272,6 +277,11 @@ function continueMessage(code = null) {
     '请在与原会话相同的项目目录中使用 `$cockpit-relay` 恢复 UGK Cockpit 接力。',
     '',
     `continueCode: "${code}"`,
+    ...(canonicalPath ? [
+      '',
+      `项目目录：${canonicalPath}`,
+      '如果你的宿主不提供工作目录（工具报“没有可识别的工作目录”），请把上面的项目目录作为 ugk_work_resume 的 declaredWorkspace 参数传入，并核对你当前工作区确实是该目录。',
+    ] : []),
     '',
     '不要重新 init，也不要清理、覆盖或重置已有改动。',
     '恢复成功后告诉我 `sessionId` 和 `revision`，然后等待我的下一步安排。',
@@ -279,14 +289,14 @@ function continueMessage(code = null) {
   ].join('\n');
 }
 
-function preparedResponse(row, continueCode = null) {
+function preparedResponse(row, continueCode = null, canonicalPath = null) {
   const relay = mapRelay(row);
   return {
     ok: true,
     relayPrepared: true,
     status: 'awaiting_resume',
     continueCode,
-    continueMessage: continueMessage(continueCode),
+    continueMessage: continueMessage(continueCode, canonicalPath),
     sessionId: row.session_id,
     revision: row.revision,
     relayId: row.id,
@@ -310,13 +320,13 @@ function preparedResponse(row, continueCode = null) {
   };
 }
 
-function preparedReplayResponse(command, continueCode) {
+function preparedReplayResponse(command, continueCode, canonicalPath = null) {
   const response = parseCommandResponse(command);
   if (!response?.ok || response.relayPrepared !== true) return null;
   return {
     ...response,
     continueCode,
-    continueMessage: continueMessage(continueCode),
+    continueMessage: continueMessage(continueCode, canonicalPath),
   };
 }
 
@@ -475,8 +485,8 @@ export function createRelay(db, request = {}, options = {}) {
     if (replay.ok && replay.relayPrepared && persisted
       && sameRelayRequest(persisted, fields, expectedRevision)
       && codeMatches(persisted.code_hash, continueCode)) {
-      return preparedReplayResponse(begun.command, continueCode)
-        ?? preparedResponse(persisted, continueCode);
+      return preparedReplayResponse(begun.command, continueCode, relayProjectPath(db, persisted))
+        ?? preparedResponse(persisted, continueCode, relayProjectPath(db, persisted));
     }
     return replay;
   }
@@ -490,8 +500,8 @@ export function createRelay(db, request = {}, options = {}) {
       if (commandReplay.ok && commandReplay.relayPrepared && persisted
         && sameRelayRequest(persisted, fields, expectedRevision)
         && codeMatches(persisted.code_hash, continueCode)) {
-        return preparedReplayResponse(command, continueCode)
-          ?? preparedResponse(persisted, continueCode);
+        return preparedReplayResponse(command, continueCode, relayProjectPath(db, persisted))
+          ?? preparedResponse(persisted, continueCode, relayProjectPath(db, persisted));
       }
       return commandReplay;
     }
@@ -525,20 +535,20 @@ export function createRelay(db, request = {}, options = {}) {
         existing.state = 'expired';
       }
       if (existing.state !== 'active') {
-        const safe = preparedResponse(existing);
+        const safe = preparedResponse(existing, null, relayProjectPath(db, existing));
         commitCommand(db, commandId, safe, at, sessionId);
         return {
           ...safe,
           continueCode,
-          continueMessage: continueMessage(continueCode),
+          continueMessage: continueMessage(continueCode, relayProjectPath(db, existing ?? row)),
         };
       }
-      const safe = preparedResponse(existing);
+      const safe = preparedResponse(existing, null, relayProjectPath(db, existing));
       commitCommand(db, commandId, safe, at, sessionId);
       return {
         ...safe,
         continueCode,
-        continueMessage: continueMessage(continueCode),
+        continueMessage: continueMessage(continueCode, relayProjectPath(db, existing ?? row)),
       };
     }
 
@@ -637,13 +647,13 @@ export function createRelay(db, request = {}, options = {}) {
     options.faultInjector?.('relay.after_insert');
     const row = relayRow(db, relayId);
     // Never commit the one-time secret to commands.response_json.
-    const safe = preparedResponse(row);
+    const safe = preparedResponse(row, null, relayProjectPath(db, row));
     commitCommand(db, commandId, safe, at, sessionId);
     options.faultInjector?.('relay.after_command_commit_before_transaction_commit');
     return {
       ...safe,
       continueCode,
-      continueMessage: continueMessage(continueCode),
+      continueMessage: continueMessage(continueCode, relayProjectPath(db, existing ?? row)),
     };
   };
 
