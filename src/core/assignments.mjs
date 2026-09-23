@@ -1442,16 +1442,22 @@ export function completeAssignment(db, request = {}, options = {}) {
  * conditions: those are settled by the startWriteRun that follows, in the same
  * synchronous turn, and the core still enforces them.
  */
-export function assignmentBeginPreconditions(db, { sessionId, expectedRevision }) {
+export function assignmentBeginPreconditions(db, { sessionId, expectedRevision: rawRevision }) {
+  // beginAssignmentWork coerces before comparing; mirror that so a caller that
+  // passes "1" is not rejected here and then accepted by the core.
+  const expectedRevision = Number(rawRevision);
   const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);
   if (!assignment) return { ok: false, code: 'SESSION_NOT_FOUND', sessionId };
   // Same order as beginAssignmentWork, so a request rejected here would have
-  // been rejected by the core with the identical code.
+  // been rejected by the core with the identical code. One exception: the core
+  // answers a settled command from the journal before it checks anything, so
+  // replaying a begin that already succeeded, after the session has moved on,
+  // used to echo the frozen success and now reports the conflict instead.
   if (assignment.revision !== expectedRevision) {
     return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
   }
-  // A Run only exists here on a replay, in which case beginAssignmentWork will
-  // compare its revision against the same expectedRevision.
+  // Normally no Run exists yet, because begin is what creates it. One does on a
+  // replay, and the core compares that row's revision the same way.
   const run = db.prepare('SELECT revision FROM runs WHERE id = ?').get(sessionId);
   if (run && run.revision !== expectedRevision) {
     return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };

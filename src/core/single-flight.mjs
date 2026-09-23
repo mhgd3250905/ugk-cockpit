@@ -29,6 +29,10 @@ export function singleFlight(db, request, operation) {
   // otherwise collide on the same undefined key.
   if (typeof commandId !== 'string' || commandId === '') return Promise.resolve().then(operation);
   const digest = canonicalJson(request);
+  // The digest covers the raw request, not the frozen intent the journal
+  // stores, so two concurrent callers that differ only in a field the core
+  // ignores are treated as a conflict rather than a replay. Refusing the extra
+  // driver is the safe direction; the journal still answers genuine replays.
   const previous = active.get(commandId);
   if (previous) {
     return previous.digest === digest

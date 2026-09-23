@@ -42,7 +42,7 @@ npm run setup:zcode
 
 2026-09-22 源码已合并至 main 并完成复审；本机服务仍运行 alpha.48 / schema 29，未迁移正式数据库。部署 alpha.49 需按规程备份并重启（重启即对正式库执行 schema 30 迁移），待用户授权后执行；已知限制与部署边界见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。
 
-> 上面这行的「仍在 alpha.48 / schema 29」只是 2026-09-22 的现场快照，已经过期。正式库此后完成过 schema 29 → 30 迁移，当前实际运行版本、schema 与核对记录一律以[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)开头的部署验收小节为准；本文件不重复登记运行版本，以免再次过期。
+> 上面这行的「仍在 alpha.48 / schema 29」只是 2026-09-22 的现场快照，已经过期。正式库此后完成过 schema 29 → 30 迁移，当前实际运行版本、schema 与核对记录一律以[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)的「alpha.52 部署验收」小节为准；本文件不重复登记运行版本，以免再次过期。
 
 以下为 alpha.48 的宿主身份记录：
 

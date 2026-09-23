@@ -278,25 +278,6 @@ test('a merge aborts before any write if its repository lock is taken over', asy
   f.db.prepare('DELETE FROM repository_locks').run();
 });
 
-test('an expired merge lock is refused rather than trusted', async (t) => {
-  const f = await approvedSubmission(t);
-  let fastForwarded = 0;
-  const options = {
-    // Acquired already expired: the re-assert must notice on this same tick.
-    lockTtlMs: 1,
-    fastForwardMain: async () => { fastForwarded += 1; },
-    pushIntegratedMain: async () => {},
-  };
-  const result = await mergeApprovedSubmission(f.db, {
-    commandId: 'lock-expired', sessionId: 'session-audit-main', submissionId: f.submissionId,
-    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
-    expectedClaimRevision: f.reviewed.claimRevision, summary: '锁已过期',
-  }, options);
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'REPOSITORY_LOCKED');
-  assert.equal(fastForwarded, 0);
-});
-
 test('concurrent same id with a different body is refused without disturbing the driver', async (t) => {
   const f = await approvedSubmission(t);
   let started = 0;
@@ -326,4 +307,90 @@ test('concurrent same id with a different body is refused without disturbing the
   assert.equal(first.ok, false);
   assert.equal(first.code, 'STUB_STOPS_BEFORE_WRITE', 'the in-flight driver ran to its own failure point');
   assert.equal(started, 1, 'the conflicting caller must never start a second driver');
+});
+
+test('a lock lost before the reviewed-delivery import stops that import', async (t) => {
+  const f = await approvedSubmission(t);
+  // The import branch only runs for a submission that carries a delivery, so
+  // attach one. Nothing else about the row changes, so the frozen revisions the
+  // merge re-checks still match.
+  f.db.prepare("UPDATE submissions SET delivery_json = ? WHERE id = ?")
+    .run(JSON.stringify({ sourceId: 'source-under-test' }), f.submissionId);
+
+  let imports = 0;
+  let stolen = false;
+  const options = {
+    lockTtlMs: 60_000,
+    // probeMain runs before the import, which makes it the point where a lock
+    // taken over during the earlier awaits has to be noticed.
+    probe: async (target) => {
+      if (!stolen) {
+        stolen = true;
+        f.db.prepare('UPDATE repository_locks SET holder = ?, lock_id = ?')
+          .run('integrate:another-operation', 'lock_taken_over_before_import');
+      }
+      return probeGitWorktree(target);
+    },
+    importReviewedDelivery: async () => { imports += 1; },
+    fastForwardMain: async () => {},
+    pushIntegratedMain: async () => {},
+  };
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'lock-before-import', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '导入前丢锁',
+  }, options);
+  assert.equal(stolen, true, 'the merge must have reached the point after the first probe');
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'REPOSITORY_LOCKED');
+  assert.equal(imports, 0, 'objects must not be fetched into a repository this driver no longer holds');
+});
+
+test('an unexpired lock is honoured when the caller injects a clock', async (t) => {
+  const f = await approvedSubmission(t);
+  let reached = 0;
+  const options = {
+    // A clock far behind wall time. Expiry must be judged against this clock:
+    // comparing expires_at to Date.now() instead would report a lock that has
+    // not expired and refuse a merge that is allowed to run.
+    clock: () => 0,
+    lockTtlMs: 60_000,
+    fastForwardMain: async () => {
+      reached += 1;
+      throw Object.assign(new Error('stubbed'), { code: 'STUB_STOPS_BEFORE_WRITE' });
+    },
+    pushIntegratedMain: async () => {},
+  };
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'injected-clock', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '注入时钟',
+  }, options);
+  assert.equal(reached, 1, 'the lock is valid on the injected clock, so the merge may proceed');
+  assert.equal(result.code, 'STUB_STOPS_BEFORE_WRITE');
+  assert.notEqual(result.code, 'REPOSITORY_LOCKED');
+});
+
+test('a merge aborts before any write if its repository lock expires', async (t) => {
+  const f = await approvedSubmission(t);
+  let fastForwarded = 0;
+  const options = {
+    lockTtlMs: 1,
+    // Make the expiry a fact rather than a race: the re-assert happens after
+    // this step, so the one-millisecond ttl has certainly elapsed by then.
+    isCommitDescendant: async () => {
+      await wait(25);
+      return true;
+    },
+    fastForwardMain: async () => { fastForwarded += 1; },
+    pushIntegratedMain: async () => {},
+  };
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'lock-expired', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '锁已过期',
+  }, options);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'REPOSITORY_LOCKED');
+  assert.equal(fastForwarded, 0);
 });

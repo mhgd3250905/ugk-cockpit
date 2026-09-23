@@ -594,7 +594,7 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
         // so it is a write into that repository and needs the same fence as
         // the fast-forward and the push.
         assertLockHeld();
-        try { await importReviewedDelivery(latestSubmission, binding.project); }
+        try { await (options.importReviewedDelivery ?? importReviewedDelivery)(latestSubmission, binding.project); }
         catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
       }
       if (main.after.branch !== attempt.targetBranch) {
