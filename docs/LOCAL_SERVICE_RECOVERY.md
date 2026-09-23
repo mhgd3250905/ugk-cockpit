@@ -4,15 +4,17 @@
 
 修复前 `POST /api/v1/mcp/work/begin` 先建 Run 并取写锁，之后才比对工作指派 revision；代理填入过期的 `expectedRevision` 时，请求以 `ASSIGNMENT_REVISION_CONFLICT` 失败，但写锁与 active Run 已经落库，工作指派仍停在 `accepted`。修复后不再产生新的这类记录，但**已在正式库中留下的行不会自动消失**，需要显式收束。
 
-识别（只读，不修改任何数据）：
+识别（只读，不修改任何数据）。该半状态的定义很窄：写锁被一个 active Run 持有，而这份工作指派仍停在 `accepted`——即从未被提升为 `active`。
 
 ```sql
 SELECT l.worktree_id, l.run_id, a.status, a.revision
 FROM write_leases l
 JOIN runs r ON r.id = l.run_id AND r.lifecycle = 'active'
 JOIN assignments a ON a.session_id = r.id
-WHERE a.status NOT IN ('active', 'completed', 'blocked', 'abandoned');
+WHERE a.status = 'accepted';
 ```
+
+按字面状态而不是「非 active」来筛，是为了不把 `pending`、`cancelled` 等正常状态误报成故障：在健康安装上这条查询返回 0 行，任何返回的行都是需要处理的记录。
 
 处理：让该会话本身显式结束，这是唯一受支持的出口——`ugk_work_finish`（或 `work/handoff`）带 `outcome: 'abandoned'` 和数据库里 `runs.revision` 一致的 `expectedRevision`。这会正常释放写锁，并留下一条可追溯的结束记录；不要用清理数据库行、重新接入或新建会话来代替。
 
