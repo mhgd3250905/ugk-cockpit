@@ -1,0 +1,246 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { openCockpitDatabase } from '../src/core/database.mjs';
+import { registerProject, worktreeIdFor } from '../src/core/projects.mjs';
+import { probeGitWorktree } from '../src/git/probe.mjs';
+import { startWriteRun } from '../src/core/runs.mjs';
+import { appendProgressEvent } from '../src/core/assignments.mjs';
+import { createDevelopmentSpace } from '../src/core/spaces.mjs';
+import { submitDevelopmentSpace } from '../src/core/submission-service.mjs';
+import {
+  beginIntegrationReview,
+  mergeApprovedSubmission,
+  recordSessionIntegrationReview,
+} from '../src/core/integration-service.mjs';
+import { createCockpitHttpServer } from '../src/service/http-server.mjs';
+
+// POSIX temp roots are themselves symlinks and path authorization refuses to
+// follow them, so fixtures must live under the resolved root.
+const tmpRoot = () => (process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir()));
+const git = (cwd, args) => execFileSync('git', args, {
+  cwd, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+}).trim();
+const snapshot = (o) => ({
+  head: o.after.head, branch: o.after.branch,
+  indexFingerprint: o.after.indexFingerprint, worktreeFingerprint: o.after.worktreeFingerprint,
+  repositoryIdentity: o.repositoryIdentity, worktreeIdentity: o.worktreeIdentity,
+  headRelation: 'same', coherence: o.coherence, observedAt: o.observedAt,
+});
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const TOKEN = 'audit-2026-09-24-token-that-is-long-enough';
+
+async function standbySession(t) {
+  const root = mkdtempSync(path.join(tmpRoot(), 'ugk-audit-begin-'));
+  git(root, ['init', '--quiet', '-b', 'main']);
+  writeFileSync(path.join(root, 'README.md'), '# fixture\n');
+  git(root, ['add', 'README.md']);
+  git(root, ['-c', 'user.name=UGK Test', '-c', 'user.email=ugk@example.invalid', 'commit', '--quiet', '-m', 'fixture']);
+  const dbPath = path.join(root, 'cockpit.db');
+  const observation = await probeGitWorktree(root);
+  const db = openCockpitDatabase(dbPath);
+  const project = registerProject(db, {
+    commandId: 'register-audit-fixture', name: 'Audit fixture', authorizedRoot: root, observation,
+  });
+  db.close();
+  const service = await createCockpitHttpServer({ dbPath, token: TOKEN });
+  const post = async (pathname, body) => {
+    const response = await fetch(`http://${service.host}:${service.port}${pathname}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, json: await response.json().catch(() => null) };
+  };
+  const created = await post(`/api/v1/projects/${project.projectId}/assignments`, {
+    clientRequestId: 'create-standby', agent: 'Codex', mode: 'handoff', task: '',
+  });
+  const dispatchCode = created.json.message.match(/dispatchCode: "([^"]+)"/)?.[1];
+  const accepted = await post('/api/v1/mcp/work/accept', { dispatchCode, clientRequestId: 'accept-standby' });
+  t.after(async () => {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  return { post, dbPath, sessionId: accepted.json.sessionId, revision: accepted.json.revision };
+}
+
+test('a rejected work/begin leaves no write lease and no active Run behind', async (t) => {
+  const { post, dbPath, sessionId } = await standbySession(t);
+
+  // expectedRevision is supplied by the agent, so a stale value is ordinary
+  // misuse. Before the precondition check ran first, this single request
+  // created a Run and took the lease and then reported a bare conflict.
+  const rejected = await post('/api/v1/mcp/work/begin', {
+    sessionId, clientRequestId: 'begin-stale', expectedRevision: 999, task: 'stale revision work',
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.json.code, 'ASSIGNMENT_REVISION_CONFLICT');
+
+  const db = openCockpitDatabase(dbPath, { migrate: false });
+  try {
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM write_leases').get().n, 0,
+      'a rejected begin must not leave a held write lease');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM runs').get().n, 0,
+      'a rejected begin must not leave an active Run');
+    assert.equal(db.prepare('SELECT status FROM assignments WHERE session_id = ?').get(sessionId).status, 'accepted');
+  } finally {
+    db.close();
+  }
+
+  // The obvious recovery -- retrying with the revision actually held -- must
+  // work, and must not be blocked by the lease the failed attempt used to take.
+  const retry = await post('/api/v1/mcp/work/begin', {
+    sessionId, clientRequestId: 'begin-corrected', expectedRevision: 1, task: 'real work',
+  });
+  assert.equal(retry.status, 200, JSON.stringify(retry.json));
+  assert.equal(retry.json.status, 'active');
+
+  const after = openCockpitDatabase(dbPath, { migrate: false });
+  try {
+    assert.equal(after.prepare('SELECT COUNT(*) AS n FROM write_leases').get().n, 1);
+    assert.equal(after.prepare('SELECT status, revision FROM assignments WHERE session_id = ?').get(sessionId).status, 'active');
+  } finally {
+    after.close();
+  }
+});
+
+test('work/begin does not consume an idempotency key it is going to reject', async (t) => {
+  const { post, dbPath, sessionId } = await standbySession(t);
+
+  const first = await post('/api/v1/mcp/work/begin', {
+    sessionId, clientRequestId: 'begin-once', expectedRevision: 999, task: 'stale',
+  });
+  assert.equal(first.json.code, 'ASSIGNMENT_REVISION_CONFLICT');
+
+  // Reusing the same clientRequestId with the corrected revision used to fail
+  // with COMMAND_CONFLICT because the rejected attempt had already frozen the
+  // stale intent under that key.
+  const corrected = await post('/api/v1/mcp/work/begin', {
+    sessionId, clientRequestId: 'begin-once', expectedRevision: 1, task: 'stale',
+  });
+  assert.equal(corrected.status, 200, JSON.stringify(corrected.json));
+
+  const db = openCockpitDatabase(dbPath, { migrate: false });
+  try {
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM write_leases').get().n, 1);
+  } finally {
+    db.close();
+  }
+});
+
+async function approvedSubmission(t) {
+  const container = mkdtempSync(path.join(tmpRoot(), 'ugk-audit-merge-'));
+  const mainPath = path.join(container, 'main');
+  const spacePath = path.join(container, 'space');
+  const remotePath = path.join(container, 'remote.git');
+  git(container, ['init', '--bare', remotePath]);
+  git(container, ['init', '-b', 'main', mainPath]);
+  git(mainPath, ['config', 'user.name', 'UGK Test']);
+  git(mainPath, ['config', 'user.email', 'ugk@example.invalid']);
+  writeFileSync(path.join(mainPath, 'README.md'), 'seed\n');
+  git(mainPath, ['add', 'README.md']);
+  git(mainPath, ['commit', '-m', 'seed']);
+  git(mainPath, ['remote', 'add', 'origin', remotePath]);
+  git(mainPath, ['push', '--set-upstream', 'origin', 'main']);
+  git(mainPath, ['worktree', 'add', '-b', 'cockpit/work/audit', spacePath, 'HEAD']);
+
+  const db = openCockpitDatabase(path.join(container, 'cockpit.db'));
+  const main = await probeGitWorktree(mainPath);
+  const space = await probeGitWorktree(spacePath);
+  const project = registerProject(db, {
+    commandId: 'register-audit-merge', name: 'Merge fixture', authorizedRoot: mainPath, observation: main,
+  });
+  const spaceRow = createDevelopmentSpace(db, {
+    commandId: 'create-audit-space', projectId: project.projectId, name: 'dev',
+    branch: space.after.branch, baseCommit: space.after.head, worktreeId: worktreeIdFor(space.worktreeIdentity),
+    canonicalPath: space.canonicalPath, repositoryIdentity: space.repositoryIdentity,
+    worktreeIdentity: space.worktreeIdentity,
+  });
+  const createdAt = new Date().toISOString();
+  for (const [id, sid, wt, goal, o] of [
+    ['assignment-audit-dev', 'session-audit-dev', worktreeIdFor(space.worktreeIdentity), 'impl', space],
+    ['assignment-audit-main', 'session-audit-main', worktreeIdFor(main.worktreeIdentity), 'review', main],
+  ]) {
+    db.prepare(`
+      INSERT INTO assignments (
+        id, project_id, worktree_id, agent_id, task_id, scope_json,
+        status, revision, session_id, created_at, updated_at
+      ) VALUES (?, ?, ?, 'Codex', ?, '{"mode":"write"}', 'active', 1, ?, ?, ?)
+    `).run(id, project.projectId, wt, goal, sid, createdAt, createdAt);
+    assert.equal(startWriteRun(db, {
+      commandId: `start-${sid}`, runId: sid, worktreeId: wt, canonicalPath: o.canonicalPath,
+      repositoryIdentity: o.repositoryIdentity, worktreeIdentity: o.worktreeIdentity,
+      agentClaim: 'Codex', goal, baseline: snapshot(o),
+    }).ok, true);
+    assert.equal(appendProgressEvent(db, {
+      sessionId: sid, clientRequestId: `activate-${sid}`, expectedRevision: 1, status: 'active', summary: goal,
+    }).ok, true);
+  }
+  writeFileSync(path.join(spacePath, 'feature.txt'), 'ready\n');
+  const submitted = await submitDevelopmentSpace(db, {
+    commandId: 'submit-audit-feature', sessionId: 'session-audit-dev',
+    expectedRevision: 2, summary: '完成功能',
+  });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  const begun = await beginIntegrationReview(db, {
+    commandId: 'begin-audit-review', sessionId: 'session-audit-main',
+    submissionId: submitted.submissionId, expectedRevision: 2, expectedSubmissionRevision: 0,
+  });
+  assert.equal(begun.ok, true, JSON.stringify(begun));
+  const reviewed = await recordSessionIntegrationReview(db, {
+    commandId: 'record-audit-review', sessionId: 'session-audit-main', submissionId: submitted.submissionId,
+    claimId: begun.claimId, expectedRevision: 2, expectedClaimRevision: begun.claimRevision,
+    verdict: 'approved', summary: '审核通过', findings: [], checks: ['tests passed'],
+  });
+  assert.equal(reviewed.ok, true, JSON.stringify(reviewed));
+  t.after(() => {
+    db.close();
+    rmSync(container, { recursive: true, force: true });
+  });
+  return { db, submissionId: submitted.submissionId, claimId: begun.claimId, reviewed };
+}
+
+test('concurrent replays of one merge command share a single driver', async (t) => {
+  const f = await approvedSubmission(t);
+  let entries = 0;
+  let peakConcurrent = 0;
+  const options = {
+    fastForwardMain: async () => {
+      entries += 1;
+      peakConcurrent = Math.max(peakConcurrent, entries);
+      await wait(120);
+      entries -= 1;
+      throw Object.assign(new Error('stubbed'), { code: 'STUB_STOPS_BEFORE_WRITE' });
+    },
+    pushIntegratedMain: async () => {},
+  };
+  const request = {
+    commandId: 'concurrent-audit-merge', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '并发合并',
+  };
+
+  // Both calls use the identical request id a losing client is told to reuse.
+  const settled = await Promise.allSettled([
+    mergeApprovedSubmission(f.db, request, options),
+    mergeApprovedSubmission(f.db, request, options),
+  ]);
+
+  // Before the single-flight guard the second driver raced the
+  // integration_attempts insert and threw a raw SQLite constraint error.
+  for (const outcome of settled) {
+    assert.equal(outcome.status, 'fulfilled', String(outcome.reason?.message));
+    assert.equal(typeof outcome.value, 'object');
+    assert.equal(outcome.value.ok, false);
+    assert.equal(typeof outcome.value.code, 'string');
+    assert.notEqual(outcome.value.code, undefined);
+  }
+  assert.equal(peakConcurrent, 1, 'only one driver may reach the durable merge');
+  assert.equal(settled[0].value.code, settled[1].value.code, 'both callers see the same typed outcome');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM repository_locks').get().n, 0,
+    'no repository lock is left stranded');
+});

@@ -13,6 +13,7 @@ import {
 import { conversationIdentity, conversationKey } from '../mcp/conversation-identity.mjs';
 import {
   acceptAssignment,
+  assignmentBeginPreconditions,
   beginAssignmentWork,
   completeAssignment,
   createAssignment,
@@ -4505,6 +4506,20 @@ export async function createCockpitHttpServer({
           return;
         }
         const { observation } = await observeRegisteredProject(context.projectId, context);
+        // Resolve the assignment CAS before taking the lease: startWriteRun is
+        // the first durable step, so a rejection discovered afterwards would
+        // leave this session holding a write lease over an assignment that was
+        // never promoted to active.
+        const preconditions = assignmentBeginPreconditions(db, {
+          sessionId: body.sessionId,
+          expectedRevision: body.expectedRevision,
+        });
+        if (!preconditions.ok) {
+          sendError(response, preconditions.code, {
+            extra: { session_id: body.sessionId, revision: preconditions.revision ?? null },
+          });
+          return;
+        }
         const started = startWriteRun(db, {
           commandId: id('mcp_begin_run', `${body.sessionId}:${body.clientRequestId}`),
           runId: body.sessionId,

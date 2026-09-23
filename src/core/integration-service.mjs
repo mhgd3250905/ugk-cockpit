@@ -434,7 +434,45 @@ function retryableMergeError(db, attempt, code, message, options = {}) {
   };
 }
 
+const inFlightMerges = new WeakMap();
+
+/**
+ * Serialise concurrent attempts at the same merge command.
+ *
+ * A client that loses the response to a merge is told to retry with the
+ * identical request id, so two in-flight drivers for one commandId is a
+ * supported scenario rather than misuse. Without this gate they race before
+ * any lock exists: both reach the `INSERT INTO integration_attempts` whose
+ * primary key is command_id, and the loser surfaces as a raw
+ * `UNIQUE constraint failed` out of the service layer instead of a typed
+ * result -- which also leaves the command stuck in `received`. Two drivers
+ * would additionally share the `integrate:<commandId>` repository lock, since
+ * acquireRepositoryLock renews and hands back the existing row for a matching
+ * holder, so the first to finish would release the lock still in use by the
+ * other. This mirrors the guard delivery-service.mjs already applies.
+ */
+function once(db, request, operation) {
+  let active = inFlightMerges.get(db);
+  if (!active) { active = new Map(); inFlightMerges.set(db, active); }
+  const commandId = request?.commandId;
+  if (typeof commandId !== 'string' || commandId === '') return Promise.resolve().then(operation);
+  const digest = canonicalJson(request);
+  const previous = active.get(commandId);
+  if (previous) {
+    return previous.digest === digest
+      ? previous.promise
+      : Promise.resolve({ ok: false, code: 'COMMAND_CONFLICT', retryable: false });
+  }
+  const promise = Promise.resolve().then(operation).finally(() => active.delete(commandId));
+  active.set(commandId, { digest, promise });
+  return promise;
+}
+
 export async function mergeApprovedSubmission(db, request = {}, options = {}) {
+  return once(db, request, () => mergeApprovedSubmissionOnce(db, request, options));
+}
+
+async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
   const {
     commandId, sessionId, submissionId, claimId, expectedRevision,
     expectedSubmissionRevision, expectedClaimRevision,
@@ -521,6 +559,10 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     await options.faultInjector?.('after_integration_attempt_prepared', attempt);
   }
 
+  // The holder deliberately names the idempotency key so a sequential replay
+  // after a partial write renews its own lock (see mergeApprovedSubmission's
+  // single-flight guard, which is what keeps two drivers from ever reaching
+  // this call with the same commandId).
   const lockHolder = `integrate:${commandId}`;
   const lock = acquireRepositoryLock(db, {
     repositoryIdentity: binding.project.repository_identity,
@@ -529,6 +571,15 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     ttlMs: options.lockTtlMs ?? 60_000,
   }, options);
   if (!lock.ok) return { ok: false, code: 'REPOSITORY_LOCKED', retryable: true };
+  // A renewal is not re-checked by anything below, so re-assert ownership
+  // immediately before each durable write instead of trusting the acquire.
+  const assertLockHeld = () => {
+    const current = db.prepare('SELECT holder, lock_id, expires_at FROM repository_locks WHERE repository_identity = ?')
+      .get(binding.project.repository_identity);
+    if (!current || current.holder !== lockHolder || current.lock_id !== lock.lockId || current.expires_at <= Date.now()) {
+      throw Object.assign(new Error('Integration repository lock was lost.'), { code: 'REPOSITORY_LOCKED' });
+    }
+  };
 
   try {
     if (attempt.state === 'attention') {
@@ -580,6 +631,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       let externalIntegration = false;
       if (main.after.head === attempt.targetHead) {
         assertWriteOwner();
+        assertLockHeld();
         await (options.fastForwardMain ?? fastForwardMain)(binding.project.canonical_path, attempt.sourceCommit);
         await options.faultInjector?.('after_fast_forward_before_persist', attempt);
         const after = await probeMain(binding.project, options);
@@ -616,6 +668,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
         return { ok: false, code: 'MAIN_CHANGED_AFTER_INTEGRATION', humanActionRequired: true };
       }
       assertWriteOwner();
+      assertLockHeld();
       try {
         await (options.pushIntegratedMain ?? pushIntegratedMain)(binding.project.canonical_path, {
           remote: attempt.remoteName,

@@ -1424,6 +1424,39 @@ export function completeAssignment(db, request = {}, options = {}) {
   return options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
 }
 
+/**
+ * The assignment-side preconditions of beginAssignmentWork, evaluated without
+ * writing anything.
+ *
+ * `/api/v1/mcp/work/begin` has to create the Run and take the write lease
+ * (startWriteRun) *before* beginAssignmentWork can run, because that core
+ * requires an active Run. Without this pre-check a rejected begin therefore
+ * leaves a durable side effect behind: the lease is held and a Run is active
+ * while the assignment is still 'accepted', and the error the caller gets says
+ * nothing about it. Both are single-threaded and synchronous, so checking here
+ * and mutating below cannot be raced by another request in this process.
+ * beginAssignmentWork keeps re-checking all of this inside its own transaction;
+ * this function is only ever the "do not write if it will be rejected" gate, so
+ * it must stay a subset of those checks, never a replacement for them.
+ */
+export function assignmentBeginPreconditions(db, { sessionId, expectedRevision }) {
+  const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);
+  if (!assignment) return { ok: false, code: 'SESSION_NOT_FOUND', sessionId };
+  if (assignment.status !== 'accepted' && assignment.status !== 'active') {
+    return { ok: false, code: 'ASSIGNMENT_NOT_ACTIVE', sessionId, status: assignment.status };
+  }
+  if (assignment.revision !== expectedRevision) {
+    return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
+  }
+  // A Run only exists here on a replay, in which case beginAssignmentWork will
+  // compare its revision against the same expectedRevision.
+  const run = db.prepare('SELECT revision FROM runs WHERE id = ?').get(sessionId);
+  if (run && run.revision !== expectedRevision) {
+    return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
+  }
+  return { ok: true, assignment };
+}
+
 /** Promote an accepted standby assignment into active work after a Run exists. */
 export function beginAssignmentWork(db, request = {}, options = {}) {
   const { sessionId, clientRequestId, task } = request;
