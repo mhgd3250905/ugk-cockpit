@@ -1,6 +1,6 @@
 # MCP 宿主支持清单
 
-核对日期：2026-09-20；源码版本：0.1.0-alpha.48。
+核对日期：2026-09-23；源码版本：0.1.0-alpha.49。
 
 连接 MCP、安装 Skill、识别当前聊天、成功恢复工作会话是不同的验收项。Skill 不能替宿主注入聊天身份，工作台转交也不能补齐缺失的宿主身份。
 
@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Codex | 每次请求的 `_meta.threadId` | 已适配，保留既有验收记录 |
 | ZCode | `_meta['com.zcode/request-context'].session_id`，以及命名空间存在时的镜像 `session_id` | 已适配，保留既有验收记录 |
-| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增适配；本机 CLI 实际请求已验证；2026-09-20 用户重载 IDE MCP 后确认接力测试通过 |
+| Antigravity IDE / CLI | `_meta['antigravity.google/conversation_id']` | alpha.48 新增身份适配；项目解析须按项目安装工作区插件（见下节，2026-09-23 本机实测通过并完成接力交接） |
 | Claude Code | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持；进程环境变量会过时 |
 | Cursor | 尚无已验证的逐请求原生聊天字段 | 不能宣称完整接力支持 |
 | Gemini CLI | 核对源码的 `_meta` 只有每次生成的 `progressToken` | 不接受进度编号作为聊天身份 |
@@ -16,13 +16,35 @@
 
 ## Antigravity 加载与验收
 
-已有 MCP 配置指向本仓库 `src/mcp/main.mjs` 时，更新源码后在宿主 MCP 管理界面重新加载该服务器，让桥接进程加载新解析器。仅重启 Cockpit HTTP 服务不能替代桥接进程重载。若使用复制出的安装包，应先更新包内源码；无需重新 init。
+### 宿主形态（2026-09-23 实测核实）
 
-没有配置时，按 [Antigravity 官方 MCP 文档](https://antigravity.google/docs/mcp) 配置 stdio 服务器：command 为 Node.js 可执行文件，args 指向 Cockpit 的 `src/mcp/main.mjs`，cwd 指向用户已登记且明确选择的项目目录。不要共享 token，也不要让模型填造聊天 ID。多项目配置必须明确对应目录，不根据最近聊天猜位置。
+Antigravity 的 MCP 登记全局只有一份，桥接进程是 Language Server 管理的常驻 daemon：**所有聊天共用一个进程**，其工作目录是宿主安装目录而非用户项目（经读取运行中桥进程的 PEB 核实）。`tools/call` 的 `_meta` 仅含 `antigravity.google/conversation_id`、`parent_conversation_id`、`agent_name`、`artifacts_dir` 四个字段（经官方二进制符号核实），没有任何工作区路径。因此「全局登记 + cwd 指向某个项目」无法区分聊天，按目录解析项目在此宿主上结构不可行；`artifacts_dir` 指向宿主内部缓存，不得用于推断项目。
 
-验证分两步：先在目标聊天调用 `ugk_work_context({})` 核对身份识别与绑定状态；有用户明确提供的接力指令时再执行该指令，只有返回的 sessionId、revision 和可继续状态才是恢复成功证据。身份被识别不自动取得已有工作会话的写权限。
+### 正确接入方式：按项目安装工作区插件（2026-09-23 本机实测通过）
 
-本机实际 CLI 探针收到的 `_meta` 字段为 `antigravity.google/artifacts_dir`、`antigravity.google/conversation_id`、`progressToken`。连续两次调用与重建 CLI 后恢复同一聊天的身份摘要相同，新聊天摘要不同，共 4 次真实调用通过；临时探针配置已移除。只使用聊天字段；不从 artifacts 目录推断身份。本机 IDE 程序包含同名字段，程序字段和 CLI 探针本身不代表 IDE 业务验收；2026-09-20 的 IDE 接力通过来自用户重载后的现场确认，未另行取得其 sessionId/revision 回执。
+使用 Antigravity 官方插件机制（`.agents/plugins/`，见其内置文档 plugins.md 与 mcp_servers.md）按项目接入。在需要接入的项目根目录创建两个文件：
+
+```
+.agents/plugins/ugk-cockpit/plugin.json
+  {"name": "ugk-cockpit"}
+
+.agents/plugins/ugk-cockpit/mcp_config.json
+  {"mcpServers":{"ugk-cockpit":{"command":"node",
+   "args":["<Cockpit 仓库>/src/mcp/main.mjs"],
+   "cwd":"<该项目绝对路径>"}}}
+```
+
+重启宿主后，该项目内的聊天由插件启动自己的桥进程，`process.cwd()` 即项目目录，项目解析、会话识别、接力全部沿用既有机制。每个要接入 Antigravity 的项目重复这一份两文件安装。**不要在全局 `~/.gemini/*/mcp_config.json` 登记 Cockpit**：全局登记只会让所有聊天解析到错误位置（本机已于 2026-09-23 移除）。更新 Cockpit 源码后须重启宿主让桥进程重载；无需重新 init。
+
+验收分两步：先在目标聊天调用 `ugk_work_context({})`，核对返回的项目与绑定状态；有用户明确提供的接力指令时再执行该指令，只有返回的 sessionId、revision 和可继续状态才是恢复成功证据。身份被识别不自动取得已有工作会话的写权限。2026-09-23 本机按上述流程实测：播客项目装插件后项目解析正确，旧聊天完成接力、新聊天接手并正常写入进展。
+
+### 事件记录
+
+2026-09-22 曾发生一次未授权的源码热修：Agent 在 `src/mcp/main.mjs` 硬编码 cwd 重定向以绕过项目解析失败，当日回退（详见阶段记录）。上节宿主形态核实与插件接入方案即为该事件的根因收束。
+
+### 历史验收记录
+
+alpha.48 身份适配（2026-09-20）：本机 CLI 探针 `_meta` 为 `artifacts_dir`、`conversation_id`、`progressToken`；连续两次调用与重建 CLI 后恢复同一聊天的身份摘要相同，新聊天摘要不同，共 4 次真实调用通过；只使用聊天字段，不从 artifacts 目录推断身份。IDE 接力验收来自用户重载 MCP 后的现场确认，未另行取得其 sessionId/revision 回执。
 
 ## 其他常用宿主的已知边界
 
