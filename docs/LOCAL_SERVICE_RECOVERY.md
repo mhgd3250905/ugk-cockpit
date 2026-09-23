@@ -1,5 +1,9 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.52 源码合并（2026-09-23，未部署）
+
+PR #18（审计修复：归属凭据遮蔽、交付索引锁原子发布、改派幂等键、resume 契约退役参数、路径守卫与 schema 29 守卫）经独立复审后合并为 `1da1652`，开发版本 `0.1.0-alpha.52`。本轮仅源码合并与文档对齐：未重启本机服务，未动正式数据库，无新增 schema 迁移（schema 30 不变），宿主插件与全局登记无需变更。当前本机服务仍运行 alpha.51（PID 50972），运行版本以现场 /health 核验为准；部署 alpha.52 按既有规程（备份 → 重启 → 核对项目列表与详情）执行即可。macOS 侧回归仍未在真机执行。
+
 ## alpha.51 部署与 schema 30 迁移（2026-09-23）
 
 用户明确授权部署。重启前运行版本 alpha.48 / schema 29，10 个可见项目。通过 SQLite backup API 创建 `cockpit-schema-29-before-30-2026-09-23T05-46-52-446Z.db`，完整性 `ok`、外键错误 0、10 条项目记录。既有启动器核验并停止旧 PID 23160，隐藏启动 PID 50972，继续使用 `E:/AII/ugk-cockpit/.data/service`。/health 确认 `0.1.0-alpha.51`；正式库完成 schema 29 → 30 迁移，user_version 30、integrity ok、外键 0；`verify-service-data` 核对 10 个项目及全部详情通过，未覆盖数据库、未重新 init。

@@ -26,6 +26,10 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.52` — 审计修复（PR #18，合并提交 `1da1652`）：聊天归属凭据不再下发给非持有方（宿主/会话定位符默认遮蔽，返回 `identityWithheld: true`；持有方自证与工作台控制台仍可读）；交付索引锁改为「临时名写入 fsync 后硬链接发布」，消灭崩溃留下不可归属空锁卡死仓库的窗口，并新增真实进程终止回归；改派命令幂等键改按 `clientRequestId` 作用域，A→B→A 不再重放陈旧回执；`ugk_work_resume` 全面退役过期确认参数（schema/stdio/HTTP 一致）；路径守卫修复 `..` 前缀目录名误判；schema 29 迁移补表存在守卫。合并树 Windows 全量 654 项 0 失败、Phase 0 97/97。
+
+以下为 alpha.51 的记录：
+
 `0.1.0-alpha.51` — 接入指令即归属：接入/接力/接手入口工具在宿主桥进程无法解析工作目录时，以代理声明的工作区回退解析（`declaredWorkspace`），声明必须落在已登记项目内、不得覆盖可解析的工作目录事实，并与一次性指令的项目比对；操作台复制的接入指令自带「项目目录」提示行。全局一份 MCP 登记 + Skill 即可服务所有 Agent 的所有项目，无需逐项目配置（Codex/ZCode 行为不变）。协议细节见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)与[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。
 
 以下为 alpha.50 的记录：

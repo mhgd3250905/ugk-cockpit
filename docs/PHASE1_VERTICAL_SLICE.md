@@ -6,6 +6,12 @@
 
 ## 实施状态
 
+### alpha.52：审计修复——归属凭据、锁原子性、幂等键与契约面（2026-09-23，PR #18）
+
+- `0.1.0-alpha.52`：审计修复轮（PR #18，合并提交 `1da1652`，源码合并、未部署），修复 1 项 P0、3 项 P1、2 项 P2。P0：宿主/会话定位符是聊天归属的唯一凭据，此前平台向任意 MCP 调用方回显该值，等于把钥匙贴在锁上——现在非持有方收到遮蔽视图（`identityWithheld` / `actorIdentityWithheld`），仅持有方自证与工作台控制台两处显式放开；技能文案同步改为「不猜测、请用户到工作台辨认」，并有守卫测试防止文案回退。P1：交付索引锁改为私有临时名写入并 fsync 后硬链接发布（无硬链接文件系统回退原路径并留有记录），消灭「创建后写入前被杀留下不可归属空锁」永久卡死仓库的窗口，reclaim 限一次，清扫按 10 分钟阈值；`ugk_work_resume` 从 schema/stdio/HTTP 三处一致退役过期确认参数，stdio 本地拒绝并指引工作台转交；改派命令幂等键改按 `clientRequestId` 作用域（缺失即 `INVALID_REQUEST`），A→B→A 不再重放最旧回执与陈旧派发码。P2：路径守卫不再把合法 `..` 前缀目录名误判为越界（并因此漏扫链接）；schema 29 迁移补齐同族的表存在守卫。
+- 合并适配（PR 基于 alpha.49）：resume 入口工具保留 alpha.51 的 `declaredWorkspace` 并排除退役参数（`MCP_RESUME_KEYS`、stdio 白名单、schema 三处融合）；`test/mcp-stdio-protocol.test.mjs` 的 schema 断言与 `docs/PHASE0_EVIDENCE.md` 发布行按 alpha.52 订正。已知遗留（审计分支如实披露）：从其他渠道取得会话 id 的冒充在本机信任边界内仍可行（后续以「同一身份多连接声明」可观测告警跟进）；FAT/exFAT 无硬链接回退分支无测试覆盖；工作台 conversation-control GET 未限 browser kind。
+- 验证（2026-09-23，Windows / Node.js 24.15.0，隔离 worktree 的合并树 = 合并提交树）：全量 `npm test` **654 项 / 647 通过 / 0 失败 / 7 跳过**（真实退出码 0）；`npm run test:phase0` **97/97**；新增回归 12 项中四组代表性用例经基线（`754fda6` 旧实现）实测确认失败（锁发布窗口、路径守卫 2/3、技能守卫、改派 A→B→A）。审计分支自身的 642→654 基线核对与 PoC 复现记录见 PR #18 描述。
+
 ### alpha.51：接入指令即归属，全局登记服务所有宿主（2026-09-23）
 
 - `0.1.0-alpha.51`：入口工具（`ugk_work_context` / `ugk_work_init` / `ugk_work_resume` / `ugk_work_takeover`）在工作目录无法解析到项目时，接受代理声明的 `declaredWorkspace` 回退：声明仍须落在已登记项目的授权根内（复用既有路径授权与探测），随后与一次性指令（dispatch/relay/transfer）所属项目严格比对，错配拒绝（`DISPATCH_GRANT_BINDING_MISMATCH` / `RELAY_BINDING_MISMATCH`）；可解析的工作目录事实始终优先，声明不得覆盖。操作台生成的接入指令、重发指令、接力消息与工作台转交消息均自带「项目目录」提示行，错误响应给出带路径的行动指引。stdio 门仅在这四个入口工具放行该字段，`path`/`projectId`/`worktreeId`/`token` 仍全局禁止。由此全局一份 MCP 登记 + Skill 即可服务所有宿主的所有项目；alpha.50 的按项目插件成为可选的更严格模式。Codex/ZCode 路径行为不变。无新增生产依赖。
