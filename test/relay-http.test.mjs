@@ -237,18 +237,25 @@ test('HTTP relay/resume keeps one active session and exposes relay_waiting in th
   assert.equal(expiringResponse.status, 200, await expiringResponse.clone().text());
   const expiring = await expiringResponse.json();
   state.prepare('UPDATE relays SET expires_at = 0 WHERE id = ?').run(expiring.relayId);
-  for (const confirmation of [false, true]) {
-    const rejected = await post(service, '/api/v1/mcp/work/resume', {
-      continueCode: expiring.continueCode, clientRequestId: `relay-http-expired-${confirmation}`,
-      mcpWorkingDirectory: root,
-      ...(confirmation ? { confirmationRequestId: 'old-offer', expectedRevision: expiring.revision } : {}),
-    });
-    assert.equal(rejected.status, 409);
-    const error = await rejected.json();
-    assert.equal(error.code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
-    assert.equal(error.session_id, initialized.sessionId);
-    assert.equal(error.revision, expiring.revision);
-  }
+  const rejected = await post(service, '/api/v1/mcp/work/resume', {
+    continueCode: expiring.continueCode, clientRequestId: 'relay-http-expired',
+    mcpWorkingDirectory: root,
+  });
+  assert.equal(rejected.status, 409);
+  const error = await rejected.json();
+  assert.equal(error.code, 'CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED');
+  assert.equal(error.session_id, initialized.sessionId);
+  assert.equal(error.revision, expiring.revision);
+  // The retired in-chat confirmation parameters are no longer part of the
+  // resume contract: an expired code is never offered for confirmation here, so
+  // accepting the parameters would only invite callers into a dead end.
+  const retired = await post(service, '/api/v1/mcp/work/resume', {
+    continueCode: expiring.continueCode, clientRequestId: 'relay-http-retired',
+    mcpWorkingDirectory: root,
+    confirmationRequestId: 'old-offer', expectedRevision: expiring.revision,
+  });
+  assert.equal(retired.status, 400);
+  assert.equal((await retired.json()).code, 'INVALID_REQUEST');
   assert.equal(state.prepare('SELECT revision FROM runs WHERE id = ?').get(initialized.sessionId).revision, expiring.revision);
   state.close();
 });

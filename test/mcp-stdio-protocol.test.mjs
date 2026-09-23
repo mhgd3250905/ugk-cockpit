@@ -118,6 +118,31 @@ test('context validation keeps confirmation fields optional but paired', async (
   assert.deepEqual(received, [{ confirmSessionId: 'session-1', expectedRevision: 4 }]);
 });
 
+test('the published resume schema offers only the parameters that can succeed', async () => {
+  const listed = await dispatchMessage({ jsonrpc: '2.0', id: 'resume-schema', method: 'tools/list' });
+  const resume = listed.result.tools.find((tool) => tool.name === 'ugk_work_resume');
+  assert.ok(resume, 'ugk_work_resume must stay published');
+  // declaredWorkspace arrived later on main (alpha.51) and is a parameter that
+  // can succeed, so the "only usable parameters" set includes it here.
+  assert.deepEqual(Object.keys(resume.inputSchema.properties).sort(),
+    ['clientRequestId', 'continueCode', 'declaredWorkspace']);
+  assert.deepEqual(resume.inputSchema.required, ['continueCode', 'clientRequestId']);
+  // Retiring the expired-relay confirmation route must not leave its parameters
+  // advertised: a second step that the server always refuses is a dead end for
+  // the agent and reads like a platform failure to the user.
+  assert.equal(JSON.stringify(resume).includes('confirmationRequestId'), false);
+
+  const rejected = await dispatchMessage({
+    jsonrpc: '2.0', id: 'resume-retired', method: 'tools/call',
+    params: { name: 'ugk_work_resume', arguments: {
+      continueCode: 'code-1', clientRequestId: 'ask-2',
+      confirmationRequestId: 'old-offer', expectedRevision: 4,
+    } },
+  });
+  assert.equal(rejected.result.isError, true);
+  assert.match(rejected.result.content[0].text, /workbench/);
+});
+
 test('takeover requires workbench authorization and rejects the old chat confirmation route', async () => {
   const invalid = await dispatchMessage({
     jsonrpc: '2.0', id: 'takeover-invalid', method: 'tools/call',
