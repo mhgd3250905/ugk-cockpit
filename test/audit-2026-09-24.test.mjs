@@ -344,15 +344,28 @@ test('a lock lost before the reviewed-delivery import stops that import', async 
   assert.equal(result.ok, false);
   assert.equal(result.code, 'REPOSITORY_LOCKED');
   assert.equal(imports, 0, 'objects must not be fetched into a repository this driver no longer holds');
+
+  // Control: with the lock left alone the same request does reach the import,
+  // so the assertion above is about the fence and not about a branch that was
+  // never entered.
+  f.db.prepare('DELETE FROM repository_locks').run();
+  const control = await mergeApprovedSubmission(f.db, {
+    commandId: 'lock-before-import-control', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '对照：锁未失',
+  }, { ...options, probe: undefined, importReviewedDelivery: async () => { imports += 1; } });
+  assert.equal(imports, 1, 'the delivery-import branch must be reachable from this fixture');
+  assert.notEqual(control.code, 'REPOSITORY_LOCKED', 'the control run must not be stopped by the fence');
 });
 
 test('an unexpired lock is honoured when the caller injects a clock', async (t) => {
   const f = await approvedSubmission(t);
   let reached = 0;
   const options = {
-    // A clock far behind wall time. Expiry must be judged against this clock:
-    // comparing expires_at to Date.now() instead would report a lock that has
-    // not expired and refuse a merge that is allowed to run.
+    // A clock far behind wall time. Expiry has to be judged against this clock:
+    // comparing expires_at to Date.now() instead would see a lock that is
+    // perfectly valid on the injected clock as already past its deadline and
+    // refuse a merge that is allowed to run.
     clock: () => 0,
     lockTtlMs: 60_000,
     fastForwardMain: async () => {
