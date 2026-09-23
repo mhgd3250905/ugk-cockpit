@@ -122,7 +122,10 @@ test('the published resume schema offers only the parameters that can succeed', 
   const listed = await dispatchMessage({ jsonrpc: '2.0', id: 'resume-schema', method: 'tools/list' });
   const resume = listed.result.tools.find((tool) => tool.name === 'ugk_work_resume');
   assert.ok(resume, 'ugk_work_resume must stay published');
-  assert.deepEqual(Object.keys(resume.inputSchema.properties).sort(), ['clientRequestId', 'continueCode']);
+  // The published set is exactly what can succeed: the two required fields plus
+  // the host cwd fallback, and nothing from the retired confirmation route.
+  assert.deepEqual(Object.keys(resume.inputSchema.properties).sort(),
+    ['clientRequestId', 'continueCode', 'declaredWorkspace']);
   assert.deepEqual(resume.inputSchema.required, ['continueCode', 'clientRequestId']);
   // Retiring the expired-relay confirmation route must not leave its parameters
   // advertised: a second step that the server always refuses is a dead end for
