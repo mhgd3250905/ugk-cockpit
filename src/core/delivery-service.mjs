@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { beginCommand, canonicalJson, parseCommandResponse } from './command-journal.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { acquireRepositoryLock, releaseRepositoryLock, readSubmission } from './integrations.mjs';
@@ -8,18 +9,6 @@ import { inspectDelivery, readDeliveryLocation, chooseRemote, saveDelivery, push
 import { discardDeliveryCache } from './delivery-cache.mjs';
 
 const now = () => new Date().toISOString();
-const inFlight = new WeakMap();
-function once(db, request, operation) {
-  let active = inFlight.get(db);
-  if (!active) { active = new Map(); inFlight.set(db, active); }
-  const digest = canonicalJson(request);
-  const previous = active.get(request.commandId);
-  if (previous) return previous.digest === digest ? previous.promise
-    : Promise.resolve({ ok: false, code: 'COMMAND_CONFLICT', retryable: false });
-  const promise = Promise.resolve().then(operation).finally(() => active.delete(request.commandId));
-  active.set(request.commandId, { digest, promise });
-  return promise;
-}
 function finishCommand(db, commandId, result) {
   db.prepare("UPDATE commands SET state = ?, response_json = ?, updated_at = ? WHERE id = ? AND state = 'received'")
     .run(result.ok ? 'committed' : 'failed', canonicalJson(result), now(), commandId);
@@ -42,7 +31,7 @@ function checkRemotes(source, inspection) {
 }
 
 export function prepareDelivery(db, request, options = {}) {
-  return once(db, request, () => prepareDeliveryOnce(db, request, options));
+  return singleFlight(db, request, () => prepareDeliveryOnce(db, request, options));
 }
 async function prepareDeliveryOnce(db, request, options = {}) {
   const { commandId, sourceId, sessionId, expectedRevision, files } = request;
@@ -158,7 +147,7 @@ function recordDelivery(db, source, project, inspection, sourceCommit, request) 
 }
 
 export function submitDelivery(db, request, options = {}) {
-  return once(db, request, () => submitDeliveryOnce(db, request, options));
+  return singleFlight(db, request, () => submitDeliveryOnce(db, request, options));
 }
 async function submitDeliveryOnce(db, request, options = {}) {
   const { commandId, preflightId, mcpWorkingDirectory } = request;

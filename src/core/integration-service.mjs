@@ -3,12 +3,14 @@ import {
   canonicalJson,
   parseCommandResponse,
 } from './command-journal.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { verifyReviewDelivery, importReviewedDelivery } from './delivery-review.mjs';
 import { discardDeliveryCache } from './delivery-cache.mjs';
 import {
   acquireRepositoryLock,
   claimSubmission,
+  nowMillis,
   readIntegrationClaim,
   readSubmission,
   recordIntegrationReceipt,
@@ -434,42 +436,8 @@ function retryableMergeError(db, attempt, code, message, options = {}) {
   };
 }
 
-const inFlightMerges = new WeakMap();
-
-/**
- * Serialise concurrent attempts at the same merge command.
- *
- * A client that loses the response to a merge is told to retry with the
- * identical request id, so two in-flight drivers for one commandId is a
- * supported scenario rather than misuse. Without this gate they race before
- * any lock exists: both reach the `INSERT INTO integration_attempts` whose
- * primary key is command_id, and the loser surfaces as a raw
- * `UNIQUE constraint failed` out of the service layer instead of a typed
- * result -- which also leaves the command stuck in `received`. Two drivers
- * would additionally share the `integrate:<commandId>` repository lock, since
- * acquireRepositoryLock renews and hands back the existing row for a matching
- * holder, so the first to finish would release the lock still in use by the
- * other. This mirrors the guard delivery-service.mjs already applies.
- */
-function once(db, request, operation) {
-  let active = inFlightMerges.get(db);
-  if (!active) { active = new Map(); inFlightMerges.set(db, active); }
-  const commandId = request?.commandId;
-  if (typeof commandId !== 'string' || commandId === '') return Promise.resolve().then(operation);
-  const digest = canonicalJson(request);
-  const previous = active.get(commandId);
-  if (previous) {
-    return previous.digest === digest
-      ? previous.promise
-      : Promise.resolve({ ok: false, code: 'COMMAND_CONFLICT', retryable: false });
-  }
-  const promise = Promise.resolve().then(operation).finally(() => active.delete(commandId));
-  active.set(commandId, { digest, promise });
-  return promise;
-}
-
 export async function mergeApprovedSubmission(db, request = {}, options = {}) {
-  return once(db, request, () => mergeApprovedSubmissionOnce(db, request, options));
+  return singleFlight(db, request, () => mergeApprovedSubmissionOnce(db, request, options));
 }
 
 async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
@@ -559,10 +527,14 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
     await options.faultInjector?.('after_integration_attempt_prepared', attempt);
   }
 
-  // The holder deliberately names the idempotency key so a sequential replay
-  // after a partial write renews its own lock (see mergeApprovedSubmission's
-  // single-flight guard, which is what keeps two drivers from ever reaching
-  // this call with the same commandId).
+  // The holder deliberately names the idempotency key, so a sequential replay
+  // after a partial write renews the lock it already owns instead of being
+  // denied by itself. That design depends on singleFlight: without it two
+  // concurrent same-commandId drivers would share this one lock row, and the
+  // first to reach its finally block would release the lock the other is
+  // still working under. singleFlight only serialises within this process and
+  // for this database handle, which is the whole scope today because the
+  // instance lock allows a single service process.
   const lockHolder = `integrate:${commandId}`;
   const lock = acquireRepositoryLock(db, {
     repositoryIdentity: binding.project.repository_identity,
@@ -571,12 +543,17 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
     ttlMs: options.lockTtlMs ?? 60_000,
   }, options);
   if (!lock.ok) return { ok: false, code: 'REPOSITORY_LOCKED', retryable: true };
-  // A renewal is not re-checked by anything below, so re-assert ownership
-  // immediately before each durable write instead of trusting the acquire.
+  // The acquire is not re-checked by anything below, so ownership is
+  // re-asserted immediately before each write into the main repository
+  // instead of trusting a result captured before several awaits. The deadline
+  // is compared on the same injected clock acquireRepositoryLock used to
+  // compute expires_at, never on wall time, or a caller that supplies a clock
+  // would see a lock that has not expired.
   const assertLockHeld = () => {
     const current = db.prepare('SELECT holder, lock_id, expires_at FROM repository_locks WHERE repository_identity = ?')
       .get(binding.project.repository_identity);
-    if (!current || current.holder !== lockHolder || current.lock_id !== lock.lockId || current.expires_at <= Date.now()) {
+    if (!current || current.holder !== lockHolder || current.lock_id !== lock.lockId
+      || current.expires_at <= nowMillis(options)) {
       throw Object.assign(new Error('Integration repository lock was lost.'), { code: 'REPOSITORY_LOCKED' });
     }
   };
@@ -613,6 +590,10 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
       if (latestSubmission.delivery?.sourceId) {
         if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
         assertWriteOwner();
+        // The import fetches objects into the main repository's object store,
+        // so it is a write into that repository and needs the same fence as
+        // the fast-forward and the push.
+        assertLockHeld();
         try { await importReviewedDelivery(latestSubmission, binding.project); }
         catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
       }

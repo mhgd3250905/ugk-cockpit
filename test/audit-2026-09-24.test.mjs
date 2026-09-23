@@ -244,3 +244,86 @@ test('concurrent replays of one merge command share a single driver', async (t) 
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM repository_locks').get().n, 0,
     'no repository lock is left stranded');
 });
+
+test('a merge aborts before any write if its repository lock is taken over', async (t) => {
+  const f = await approvedSubmission(t);
+  let fastForwarded = 0;
+  let pushed = 0;
+  const options = {
+    lockTtlMs: 60_000,
+    // The last override that runs before the fast-forward branch, so this is
+    // where a lock lost during the preceding awaits has to be noticed.
+    isCommitDescendant: async () => {
+      f.db.prepare('UPDATE repository_locks SET holder = ?, lock_id = ?')
+        .run('integrate:someone-elses-command', 'lock_stolen_by_another_holder');
+      return true;
+    },
+    fastForwardMain: async () => { fastForwarded += 1; },
+    pushIntegratedMain: async () => { pushed += 1; },
+  };
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'lock-taken-over', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '锁被接管',
+  }, options);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'REPOSITORY_LOCKED');
+  assert.equal(fastForwarded, 0, 'the main repository must not be written after the lock was lost');
+  assert.equal(pushed, 0);
+  assert.notEqual(result.localIntegrated, true, 'a merge that never fast-forwarded must not claim local integration');
+  // The real holder's row survives the losing driver's release attempt.
+  const row = f.db.prepare('SELECT holder FROM repository_locks').get();
+  assert.equal(row?.holder, 'integrate:someone-elses-command');
+  f.db.prepare('DELETE FROM repository_locks').run();
+});
+
+test('an expired merge lock is refused rather than trusted', async (t) => {
+  const f = await approvedSubmission(t);
+  let fastForwarded = 0;
+  const options = {
+    // Acquired already expired: the re-assert must notice on this same tick.
+    lockTtlMs: 1,
+    fastForwardMain: async () => { fastForwarded += 1; },
+    pushIntegratedMain: async () => {},
+  };
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'lock-expired', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision, summary: '锁已过期',
+  }, options);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'REPOSITORY_LOCKED');
+  assert.equal(fastForwarded, 0);
+});
+
+test('concurrent same id with a different body is refused without disturbing the driver', async (t) => {
+  const f = await approvedSubmission(t);
+  let started = 0;
+  const base = {
+    commandId: 'divergent-body', sessionId: 'session-audit-main', submissionId: f.submissionId,
+    claimId: f.claimId, expectedRevision: 2, expectedSubmissionRevision: f.reviewed.submissionRevision,
+    expectedClaimRevision: f.reviewed.claimRevision,
+  };
+  const slow = {
+    lockTtlMs: 60_000,
+    fastForwardMain: async () => {
+      started += 1;
+      // While this driver is in flight, a second caller arrives with the same
+      // id but edited text: that is a different command, not a retry.
+      const clash = await mergeApprovedSubmission(f.db, { ...base, summary: 'second body' }, {
+        lockTtlMs: 60_000, fastForwardMain: async () => { started += 100; }, pushIntegratedMain: async () => {},
+      });
+      assert.equal(clash.ok, false);
+      assert.equal(clash.code, 'COMMAND_CONFLICT');
+      assert.equal(clash.retryable, false);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      throw Object.assign(new Error('stubbed'), { code: 'STUB_STOPS_BEFORE_WRITE' });
+    },
+    pushIntegratedMain: async () => {},
+  };
+  const first = await mergeApprovedSubmission(f.db, { ...base, summary: 'first body' }, slow);
+  assert.equal(first.ok, false);
+  assert.equal(first.code, 'STUB_STOPS_BEFORE_WRITE', 'the in-flight driver ran to its own failure point');
+  assert.equal(started, 1, 'the conflicting caller must never start a second driver');
+});

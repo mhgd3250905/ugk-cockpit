@@ -1437,7 +1437,10 @@ export function completeAssignment(db, request = {}, options = {}) {
  * and mutating below cannot be raced by another request in this process.
  * beginAssignmentWork keeps re-checking all of this inside its own transaction;
  * this function is only ever the "do not write if it will be rejected" gate, so
- * it must stay a subset of those checks, never a replacement for them.
+ * it must stay a subset of those checks, never a replacement for them. It does
+ * not pre-check the run-lifecycle, worktree-binding and workspace-admission
+ * conditions: those are settled by the startWriteRun that follows, in the same
+ * synchronous turn, and the core still enforces them.
  */
 export function assignmentBeginPreconditions(db, { sessionId, expectedRevision }) {
   const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);

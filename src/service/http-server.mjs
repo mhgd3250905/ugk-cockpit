@@ -4602,6 +4602,13 @@ export async function createCockpitHttpServer({
           });
           return;
         }
+        // No assignmentBeginPreconditions() guard here, unlike work/begin:
+        // acceptAssignment seeds the assignment at the run's revision (1 when
+        // startWriteRun has just created it, which is the only case init
+        // reaches) and the revision below is a constant rather than caller
+        // input, so beginAssignmentWork cannot be the step that rejects an
+        // already-taken lease. work/begin takes expectedRevision from the
+        // agent, which is why it needs the pre-check.
         const begun = beginAssignmentWork(db, {
           sessionId: accepted.sessionId,
           clientRequestId: `${body.clientRequestId}:begin`,
