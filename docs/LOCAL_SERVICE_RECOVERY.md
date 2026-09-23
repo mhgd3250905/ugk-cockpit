@@ -1,6 +1,12 @@
 # 本机服务数据一致性与故障恢复
 
-## alpha.49 源码合并与部署边界（2026-09-22）
+## alpha.51 部署与 schema 30 迁移（2026-09-23）
+
+用户明确授权部署。重启前运行版本 alpha.48 / schema 29，10 个可见项目。通过 SQLite backup API 创建 `cockpit-schema-29-before-30-2026-09-23T05-46-52-446Z.db`，完整性 `ok`、外键错误 0、10 条项目记录。既有启动器核验并停止旧 PID 23160，隐藏启动 PID 50972，继续使用 `E:/AII/ugk-cockpit/.data/service`。/health 确认 `0.1.0-alpha.51`；正式库完成 schema 29 → 30 迁移，user_version 30、integrity ok、外键 0；`verify-service-data` 核对 10 个项目及全部详情通过，未覆盖数据库、未重新 init。
+
+本轮同机生效的改动：alpha.49（指纹去 device + schema 30 原地迁移）、alpha.50（setup:antigravity 安装命令）、alpha.51（接入指令即归属，declaredWorkspace 声明回退）。已知噪音：迁移扫描 folder: 项目时 git 在 stderr 留下「not a git repository」提示，已被同步安全门按预期捕获，不影响结果；后续版本可静默。Antigravity 全局 MCP 登记已恢复为唯一登记（alpha.51 机制下无需逐项目配置）；LSBK 按项目插件暂保留（播客活跃会话在用，现场验证全局+声明路径后可摘除）。macOS 侧回归仍未在真机执行，见下方 alpha.49 边界。
+
+## 历史：alpha.49 源码合并与部署边界（2026-09-22）
 
 PR #17 的最终返修提交 `30c3277c178fc3572df407bbe9e5d46b7fd5a49a` 已快进接入 main，开发版本为 `0.1.0-alpha.49`，源码引入 schema 30（目录指纹去 device + 存量原地迁移）与用户确认的代码位置重绑。本轮完成源码合并、独立复审与文档收束，未重启本机服务、未迁移正式数据库、未更新宿主插件；最近一次已记录的本机部署验收仍为下方 alpha.48，运行版本以现场核验为准。
 
