@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { openCockpitDatabase } from '../src/core/database.mjs';
+import { remoteAuthArguments } from '../src/git/remote-auth.mjs';
+import { safeGitEnvironment } from '../src/git/delivery-ops.mjs';
 import { registerProject, worktreeIdFor } from '../src/core/projects.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { startWriteRun } from '../src/core/runs.mjs';
@@ -406,4 +409,49 @@ test('a merge aborts before any write if its repository lock expires', async (t)
   assert.equal(result.ok, false);
   assert.equal(result.code, 'REPOSITORY_LOCKED');
   assert.equal(fastForwarded, 0);
+});
+
+test('the Windows credential helper is a shape git will actually execute', async (t) => {
+  const argv = await remoteAuthArguments(['push', 'origin', 'main'], 'win32');
+  if (argv.length === 0) {
+    t.skip('Git Credential Manager is not installed at the resolved location');
+    return;
+  }
+  assert.equal(argv[0], '-c');
+  const value = argv[1];
+  assert.match(value, /^credential\.helper=!/u, 'git only runs a helper through the shell in the "!" form');
+  // The regression itself: the value used to be credential.helper="<path>", and
+  // because it then does not look like a path, git looked for a helper *named*
+  // credential-"<path>" and the helper never ran.
+  assert.doesNotMatch(value, /^credential\.helper="/u);
+  const parsed = execFileSync('git', ['-c', value, 'config', '--get', 'credential.helper'], {
+    encoding: 'utf8', windowsHide: true,
+  }).trim();
+  assert.equal(parsed[0], '!', 'git must read back the shell form, not a quoted name');
+  assert.ok(parsed.includes('git-credential-manager.exe'), 'the helper path survives parsing');
+});
+
+test('git resolves the emitted credential helper to an executable, not a helper name', { skip: process.platform !== 'win32' }, async (t) => {
+  const argv = await remoteAuthArguments(['push', 'origin', 'main']);
+  if (argv.length === 0) {
+    t.skip('Git Credential Manager is not installed at the resolved location');
+    return;
+  }
+  // Ask git to actually dispatch the helper against an unreachable host with
+  // prompts disabled. A helper that is mis-resolved produces git's
+  // "is not a git command" lookup failure; a correctly resolved one launches
+  // Git Credential Manager, which answers with its own output instead.
+  const { stderr } = await new Promise((resolve) => {
+    const child = execFile('git', ['-c', 'credential.helper=', ...argv, 'credential', 'fill'], {
+      cwd: process.cwd(), env: safeGitEnvironment(), windowsHide: true, shell: false,
+      timeout: 25_000, encoding: 'utf8',
+    }, (error, stdout, stderrOut) => resolve({ error, stdout, stderr: stderrOut }));
+    child.stdin.on('error', () => {});
+    child.stdin.end('protocol=https\nhost=ugk-nonexistent.invalid\n\n');
+  });
+  const text = String(stderr ?? '');
+  assert.ok(!/is not a git command/i.test(text),
+    `git could not find the helper it was told to run: ${text.split('\n')[0]}`);
+  assert.ok(!/credential-[^ ]*git-credential-manager\.exe/i.test(text),
+    'the helper path must not be treated as a helper name');
 });
