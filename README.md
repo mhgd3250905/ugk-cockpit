@@ -26,6 +26,10 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.50` — 新增 `npm run setup:antigravity -- <项目绝对路径>`：一条命令把 Antigravity 工作区插件写入指定项目，该项目内的聊天即可正确解析项目并使用 Cockpit，无需了解宿主内部细节。宿主形态与接入验收见[宿主支持清单](docs/MCP_HOST_SUPPORT.md)。
+
+以下为 alpha.49 的记录：
+
 `0.1.0-alpha.49` — 修复 macOS 卷号漂移导致的身份误报并补上用户确认的代码位置重绑：目录身份指纹不再包含 device 编号，目录被真正替换（inode 变化）仍被拒绝；schema 30 迁移把健康机器上可精确重算的存量指纹原地改写为新格式，真漂移记录走浏览器确认的同路径重绑，同一仓库的全部工作副本一并重绑，活跃工作链一律拒绝确认。协议细节见[会话身份与中断恢复](docs/CONVERSATION_DURABILITY.md)。
 
 2026-09-22 源码已合并至 main 并完成复审；本机服务仍运行 alpha.48 / schema 29，未迁移正式数据库。部署 alpha.49 需按规程备份并重启（重启即对正式库执行 schema 30 迁移），待用户授权后执行；已知限制与部署边界见[本机服务恢复](docs/LOCAL_SERVICE_RECOVERY.md)。

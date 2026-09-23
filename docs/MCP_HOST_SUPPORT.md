@@ -22,7 +22,13 @@ Antigravity 的 MCP 登记全局只有一份，桥接进程是 Language Server �
 
 ### 正确接入方式：按项目安装工作区插件（2026-09-23 本机实测通过）
 
-使用 Antigravity 官方插件机制（`.agents/plugins/`，见其内置文档 plugins.md 与 mcp_servers.md）按项目接入。在需要接入的项目根目录创建两个文件：
+使用 Antigravity 官方插件机制（`.agents/plugins/`，见其内置文档 plugins.md 与 mcp_servers.md）按项目接入。推荐用安装命令（幂等；保留插件配置内的其他 MCP 服务器；拒绝覆盖外来插件）：
+
+```
+npm run setup:antigravity -- <项目绝对路径>
+```
+
+该命令等价于在项目根目录写入两个文件，也可手写：
 
 ```
 .agents/plugins/ugk-cockpit/plugin.json

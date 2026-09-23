@@ -6,7 +6,13 @@
 
 ## 实施状态
 
-### alpha.49：macOS 卷号漂移修复与用户确认重绑（2026-09-22）
+### alpha.50：Antigravity 一条命令接入（2026-09-23）
+
+- `0.1.0-alpha.50`：新增 `npm run setup:antigravity -- <项目绝对路径>`，为项目写入 Antigravity 官方工作区插件（`.agents/plugins/ugk-cockpit/`），使该项目内聊天经插件启动的桥进程正确解析项目——用户无需了解宿主内部形态。幂等重装，保留插件配置内的其他 MCP 服务器，拒绝覆盖外来插件；配置不可读时须显式 `--force` 重建。配套在[宿主支持清单](MCP_HOST_SUPPORT.md)完整记录宿主形态（全局单进程 daemon、工作目录为安装目录、`_meta` 无工作区路径）与按项目接入验收。无新增生产依赖。
+
+背景与验收：2026-09-22 一次未授权热修（`src/mcp/main.mjs` 硬编码 cwd 重定向）暴露了 Antigravity 无法解析项目的结构性缺口，当日回退并经宿主方逐条确认根因。2026-09-23 按插件方案实测：播客项目接入后项目解析正确，旧聊天完成接力交接、新聊天接手并正常写入进展。验证（2026-09-23，Windows / Node.js 24.15.0，基于本轮工作树）：`test/setup-antigravity.test.mjs` **7/7**，覆盖安装内容、幂等与同文件保留、外来插件拒绝、不可读配置与 `--force`、非法路径与 CLI 用法；全量 `npm test` **640 项 / 633 通过 / 0 失败 / 7 平台跳过**；`npm run test:phase0` **97/97**；`npm run build:web` 通过。
+
+### 历史：alpha.49：macOS 卷号漂移修复与用户确认重绑（2026-09-22）
 
 - `0.1.0-alpha.49`：目录身份指纹不再哈希 stat device 编号（macOS APFS 卷号随重启/系统更新漂移，inode+birthtime 已唯一定位卷内目录条目；目录被真正替换时 inode 变化，仍 100% 拒绝）。schema 30 迁移按 canonical_path 以当前 stat 重算旧格式指纹，仅与库存精确相等者原地改写（覆盖 worktrees/projects/snapshots/repository_locks/workspace_lifecycle_reservations），真漂移、不可达或 hostile 配置仓库保持原样；repository 重算前经同步 repository-policy 门，升级前已开始的 run 迁移后仍可正常结束。新增浏览器专属 `POST /api/v1/projects/:id/confirm-location`：同路径不变式下重绑同一 repository_identity 的全部工作副本（含开发空间与送审来源）、退休旧键控锁与预留、历史快照随迁；存在活跃 run/租约/pending·accepted·active 邀请/未过期锁或预留时拒绝并保持零改动。命令日志重放前移到 grant 领取之前，选择授权 TTL 过期后同 commandId 仍返回原回执。无新增生产依赖。
 
