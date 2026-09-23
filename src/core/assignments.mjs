@@ -1445,9 +1445,8 @@ export function completeAssignment(db, request = {}, options = {}) {
 export function assignmentBeginPreconditions(db, { sessionId, expectedRevision }) {
   const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);
   if (!assignment) return { ok: false, code: 'SESSION_NOT_FOUND', sessionId };
-  if (assignment.status !== 'accepted' && assignment.status !== 'active') {
-    return { ok: false, code: 'ASSIGNMENT_NOT_ACTIVE', sessionId, status: assignment.status };
-  }
+  // Same order as beginAssignmentWork, so a request rejected here would have
+  // been rejected by the core with the identical code.
   if (assignment.revision !== expectedRevision) {
     return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
   }
@@ -1456,6 +1455,9 @@ export function assignmentBeginPreconditions(db, { sessionId, expectedRevision }
   const run = db.prepare('SELECT revision FROM runs WHERE id = ?').get(sessionId);
   if (run && run.revision !== expectedRevision) {
     return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
+  }
+  if (assignment.status !== 'accepted' && assignment.status !== 'active') {
+    return { ok: false, code: 'ASSIGNMENT_NOT_ACTIVE', sessionId, status: assignment.status };
   }
   return { ok: true, assignment };
 }
