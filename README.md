@@ -163,6 +163,8 @@ npm run test:phase0
 
 MCP 后端未新增生产依赖。
 
+main 分支与外部 PR 由 GitHub Actions 自动运行同一组门禁（windows-latest / Node 24：全量 `npm test`、`test:phase0`、网页构建，见 `.github/workflows/ci.yml`）；macOS 与 Linux 尚未纳入 CI，平台结论仍以真机记录为准。
+
 ## 面向用户的首版目标
 
 Phase 1 会交付最小网页闭环：添加项目、查看首页、开始或继续 AI 工作、创建独立功能开发空间、发布工作说明供主项目按需处理、显式结束并生成接手记录、处理未登记改动。旧代码审核与规范接入保留为独立能力，不是每条说明必须走的流程。普通路径不会要求用户填写项目 ID、worktree、分支、JSON 或 Git 命令。

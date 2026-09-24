@@ -17,6 +17,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      # The runner image points TEMP at the 8.3 short name (C:\Users\RUNNER~1\...).
+      # The service realpaths every user-visible path to the long form, and the
+      # fixtures compare against raw os.tmpdir(), so the suite recorded for
+      # acceptance -- where TEMP is already the long path -- fails on path
+      # equality. Normalize once, for the runner image only; product code is
+      # unchanged.
+      - name: Normalize the runner temp path to its long form
+        run: |
+          $long = (Get-Item $env:TEMP).FullName
+          "TEMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Install dependencies
         run: npm ci
       - name: Full test suite
