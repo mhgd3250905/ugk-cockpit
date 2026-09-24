@@ -1,0 +1,65 @@
+name: diag
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Normalize the runner temp path to its long form
+        run: |
+          $long = (Get-Item $env:TEMP).FullName
+          "TEMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$long" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Reproduce the failing primitives on the runner
+        run: |
+          git --version
+          git config --list --show-scope --show-origin
+          node --input-type=module -e "
+          import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { probeGitWorktree } from './src/git/probe.mjs';
+          import { readDeliveryLocation } from './src/git/delivery-ops.mjs';
+          const g = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+          const root = mkdtempSync(path.join(os.tmpdir(), 'ci-diag-'));
+          try {
+            console.log('== primitive 1: worktree add + probe ==');
+            console.log('os.tmpdir():', os.tmpdir());
+            const main = path.join(root, 'main');
+            const space = path.join(root, 'space');
+            g(root, ['init', '-b', 'main', main]);
+            g(main, ['config', 'user.name', 'diag']);
+            g(main, ['config', 'user.email', 'diag@invalid']);
+            writeFileSync(path.join(main, 'a.txt'), 'a\n');
+            g(main, ['add', 'a.txt']);
+            g(main, ['commit', '-m', 'a']);
+            g(main, ['worktree', 'add', space, 'HEAD']);
+            console.log('space:', space);
+            try {
+              const o = await probeGitWorktree(space);
+              console.log('probe OK head:', o.after.head, 'branch:', o.after.branch, 'coherent:', o.coherence);
+            } catch (error) {
+              console.log('probe FAILED code:', error.code, 'message:', error.message);
+            }
+            console.log('== primitive 2: delivery location change count ==');
+            const source = path.join(root, 'source');
+            g(root, ['clone', main, source]);
+            writeFileSync(path.join(source, 'file1.txt'), 'content 1\n');
+            g(source, ['add', 'file1.txt']);
+            writeFileSync(path.join(source, 'file2.txt'), 'content 2\n');
+            const loc = await readDeliveryLocation(source);
+            console.log('changes:', JSON.stringify(loc.changes));
+            console.log('== primitive 3: tree identity (content only) ==');
+            console.log('tree:', g(main, ['rev-parse', 'HEAD^{tree}']));
+          } finally {
+            try { rmSync(root, { recursive: true, force: true, maxRetries: 5 }); } catch {}
+          }
+          "
