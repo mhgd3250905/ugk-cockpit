@@ -1,8 +1,12 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.53 部署验收（2026-09-24）
+
+PR #19（审计修复：Windows 凭据助手参数、`work/begin` 拒绝后半状态、合并指令并发单飞与锁复核）合并为 `9a0f750` 并收束 `022a9e1`（0.1.0-alpha.53）后，用户授权一条龙部署。重启前运行版本 alpha.52（PID 26788），10 个可见项目。先以 VACUUM INTO 创建部署前快照 `.data/service/backups/before-alpha53-deploy-2026-09-24T14-41-22-018Z.db`（schema 30、integrity ok、外键 0、10 条项目记录）。既有启动器构建网页、核验并停止旧 PID 26788，隐藏启动 PID 35288（14:41:49 UTC，`node src/main.mjs --data-directory E:\AII\ugk-cockpit\.data\service`）。/health 确认 `0.1.0-alpha.53`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个项目及全部详情通过。启动器外壳进程因输出管道阻塞滞留，验收会话终止外壳后复测服务健康（分离启动确认），未影响服务进程。未重新 init、未覆盖数据库。macOS 侧回归仍未在真机执行。
+
 ## alpha.53 源码合并（2026-09-24，未部署）
 
-PR #19（审计修复：Windows 凭据助手参数、`work/begin` 拒绝后半状态、合并指令并发单飞与锁复核）经独立复审后合并为 `9a0f750`，开发版本 `0.1.0-alpha.53`。本轮仅源码合并与文档对齐：未重启本机服务，未动正式数据库，无 schema 迁移。当前本机服务仍运行 alpha.52（PID 26788），运行版本以现场 /health 核验为准；部署 alpha.53 按既有规程执行。macOS 侧回归仍未在真机执行。
+PR #19（审计修复：Windows 凭据助手参数、`work/begin` 拒绝后半状态、合并指令并发单飞与锁复核）经独立复审后合并为 `9a0f750`，开发版本 `0.1.0-alpha.53`。本轮完成源码合并与文档对齐：未动正式数据库，无 schema 迁移，宿主插件与全局登记无需变更。部署验收见上方小节。macOS 侧回归仍未在真机执行。
 
 ## 遗留的「半开工作会话」（work/begin 修复之前产生）
 
