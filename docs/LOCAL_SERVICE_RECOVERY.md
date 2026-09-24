@@ -1,8 +1,8 @@
 # 本机服务数据一致性与故障恢复
 
-## alpha.54 源码合并（2026-09-25，未部署）
+## alpha.54 审计分支（2026-09-25，未合并、未部署）
 
-PR #20（审计修复：生命周期围栏的用户确认出路、stdio U+2028/U+2029 分帧、`work/finish` 与 `work/handoff` 字段白名单、代码位置重绑后的 id 解析、工作说明归属不再猜最新绑定、`conversation-control` 读路径限浏览器、未处理 Promise 拒绝走正常关停、Windows 启动器的 `!` 与 `--port`、构建不再清空在线资源）仅完成源码合并与文档收束。**本轮没有重启本机服务，也没有迁移正式数据库**：2026-09-25 复核 `/health` 仍为 `0.1.0-alpha.53`（PID 35288，数据目录 `E:\AII\ugk-cockpit\.data\service`）。本轮无 schema 迁移、无数据改写；身份重绑那项是读取路径改为按位置解析到既有 durable 行，因此部署后此前会抛 `FOREIGN KEY constraint failed` 或对正确身份回 `WORKTREE_IDENTITY_CHANGED` 的已重绑目录直接恢复可用，不需要重新添加项目。宿主插件与全局 MCP 登记不受影响。部署需按既有规程另行授权。
+PR #20（审计分支，尚未合并：生命周期围栏的用户确认出路、stdio U+2028/U+2029 分帧、`work/finish` 与 `work/handoff` 字段白名单、代码位置重绑后的 id 解析、工作说明归属不再猜最新绑定、`conversation-control` 读路径限浏览器、未处理 Promise 拒绝走正常关停、Windows 启动器的 `!` 与 `--port`、构建不再清空在线资源）仅完成源码合并与文档收束。**本轮没有重启本机服务，也没有迁移正式数据库**：2026-09-25 复核 `/health` 仍为 `0.1.0-alpha.53`（PID 35288，数据目录 `E:\AII\ugk-cockpit\.data\service`）。本轮无 schema 迁移、无数据改写；身份重绑那项是读取路径改为按位置解析到既有 durable 行，因此部署后此前会抛 `FOREIGN KEY constraint failed` 或对正确身份回 `WORKTREE_IDENTITY_CHANGED` 的已重绑目录直接恢复可用，不需要重新添加项目。宿主插件与全局 MCP 登记不受影响。部署需按既有规程另行授权。
 
 ## 卡住的工作副本操作（生命周期围栏）：只读识别与用户确认解除
 
