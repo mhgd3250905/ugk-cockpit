@@ -6,6 +6,12 @@
 
 ## 实施状态
 
+### CI 门禁建成与 runner 环境修复（2026-09-24，无版本变更，alpha.53 之后）
+
+- main 与外部 PR 建立自动门禁 `.github/workflows/ci.yml`（windows-latest / Node 24：全量 `npm test`、`test:phase0`、`build:web`）；README「本地验证」小节有说明。macOS 与 Linux 暂不纳入——套件尚未在那些平台验证，先红无意义。本项为 PR #19 遗留建议之一落地；产品代码零改动，只有测试基建与 workflow。
+- 经 5 轮迭代全绿（42 失败 → 5 → 0 → 偶发 → 稳定），暴露并修复三类只在 CI 环境出现的问题：其一，runner 镜像的 `TEMP` 指向 8.3 短路径（`C:\Users\RUNNER~1\...`），与服务一律 realpath 的长路径口径冲突，42 项路径比对失败 → workflow 首步把 `TEMP`/`TMP` 归一为长形式（只改 runner 环境）。其二，runner 的 Git 2.55 按宿主 `core.autocrlf=true` 在 clone/worktree add 时垫出 CRLF，而产品全部 git 调用经 `safeGitEnvironment` 屏蔽 system/global 配置（无转换视图），夹具 git 继承宿主配置即产生只有产品视图可见的幻影改动——交付变更计数 +1、commit 复用判定失效、无改动提交被接受、开发空间创建 UNCERTAIN——四个受影响测试文件夹具配置隔离为与产品相同的契约（`node --test` 每文件独立进程，默认值不串扰）。其三，phase0 的 100 路并发 finish 在 runner 慢盘上 `BEGIN IMMEDIATE` 等锁超出 worker 约 1 秒的 busy 重试预算，同一测试全量段通过、phase0 段失败 → `scripts/phase0-worker.mjs` 的重试放宽至 300 次、sleep 封顶 50ms（连接 `busy_timeout=150ms` 为产品设计未动，胜者选举断言不变）。
+- 验证（2026-09-24）：HEAD `0bf164c` 的 CI 完整通过——全量 664 项 0 失败、`test:phase0` 97/97、`build:web` 通过（GitHub Actions run 36035620736、36043062680）；本地四个改动测试文件 72/72、concurrency 5/5。诊断方法沉淀：本地不可复现的「CI 才暴露」问题，先在 runner 上写只复刻失败原语（worktree add + probe、变更计数、tree SHA）的 30 秒最小 workflow 取事实，再定位修复，避免用 25 分钟全量轮盲试。
+
 ### alpha.53：审计修复——Windows 凭据助手、begin 原子性、合并单飞（2026-09-24，PR #19）
 
 - `0.1.0-alpha.53`：审计修复轮（PR #19，合并提交 `9a0f750`，源码合并、未部署），三项缺陷全部先在 pristine main 上复现再修复。其一，Windows 凭据助手参数是带字面双引号的 `credential.helper="<path>"`，git 把非绝对路径值解析为 `git-credential-<value>` 经 shell 执行，带前导引号的值因此被当作名为 `credential-"D:/…"` 的 helper 查找而从不运行——而 `SAFE_GIT_PREFIX` 已清空其他 helper 且安全环境关闭交互提示，该死条目是 Windows 上唯一凭据来源，所有认证 HTTPS fetch/push/ls-remote 失败并被 `REMOTE_SOURCE_UNREACHABLE` 等误报为网络问题；现改用 git 文档的 `!"<path>"` shell 形式（实测空格路径也正确），路径按保守白名单校验（白名单外不发覆盖参数而非拼进 shell 行），检测失败不再被进程终身缓存。其二，`work/begin` 先建 Run 并取写锁、后比对指派 revision，代理传过期 `expectedRevision` 时请求报裸冲突但锁与 Run 已落库，自然恢复动作（重试）被自己刚取的锁挡住、`release-lease` 又拒绝；现新增 `assignmentBeginPreconditions()` 在首个持久写入前按核心相同顺序求值前置条件（它是核心事务内复查的子集而非替代），`work/init` 因 revision 是常量不在此列。其三，`mergeApprovedSubmission` 无单飞保护，两个同 `commandId` 驱动竞争 `integration_attempts` 主键并以裸 SQLite 约束错误逃逸，且 `integrate:<commandId>` 持有者形态使第二驱动续期同一把锁、先完成者释放后另一方裸奔；现以从 delivery-service 统一提取的 `singleFlight`（按 `commandId` 串行、同 id 同体加入在飞结果、同 id 异体拒绝）包裹，并在 reviewed-delivery import、`fastForwardMain`、`pushIntegratedMain` 三次写主仓库前复核 holder + `lock_id` + 有效期（过期判定用注入时钟）。行为变化知悉：已成功 begin 的同请求重放由「幂等回放冻结成功」改为报 `ASSIGNMENT_REVISION_CONFLICT`（拒绝优于伪造成功，方向安全）。
