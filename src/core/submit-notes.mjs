@@ -6,7 +6,7 @@ import { withImmediateTransaction } from './database.mjs';
 import { authorizeExistingPath, revalidateAuthorizedPath } from './path-guard.mjs';
 import { fileIdentity, gitText } from '../git/probe.mjs';
 import { normalizeReferences } from './submit-notes-contract.mjs';
-import { readConversationBinding } from './conversation-bindings.mjs';
+import { readUnambiguousConversationBinding } from './conversation-bindings.mjs';
 
 export { normalizeReferences };
 
@@ -350,7 +350,7 @@ export async function createSubmitNote(db, request, options = {}) {
   // Resolve after asynchronous probes so a concurrent Relay cannot leave stale attribution.
   // Host identity takes precedence over all client-supplied legacy binding fields.
   let bridgeBinding = options.conversationKey
-    ? readConversationBinding(db, options.conversationKey, candidate.worktree_id)
+    ? readUnambiguousConversationBinding(db, options.conversationKey, candidate.worktree_id)
     : request.bridgeBinding;
   if (!options.conversationKey && bridgeBinding?.sessionId
     && db.prepare('SELECT 1 FROM conversation_bindings WHERE session_id = ? AND revoked = 0').get(bridgeBinding.sessionId)) {
