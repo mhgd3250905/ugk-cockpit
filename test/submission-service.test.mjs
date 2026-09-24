@@ -9,11 +9,19 @@ import { registerProject, worktreeIdFor } from '../src/core/projects.mjs';
 import { createDevelopmentSpace, readDevelopmentSpace } from '../src/core/spaces.mjs';
 import { startWriteRun } from '../src/core/runs.mjs';
 import {
+
   readSubmissionAttempt,
   submitDevelopmentSpace,
 } from '../src/core/submission-service.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
+
+// Fixture git must observe the same config contract as the product
+// (safeGitEnvironment strips system/global git config): a runner whose
+// ambient autocrlf smudges checkouts would otherwise leave phantom
+// modifications that only the product's no-config git can see.
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 const git = (cwd, args) => execFileSync('git', args, {
   cwd,

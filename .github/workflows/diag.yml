@@ -22,7 +22,7 @@ jobs:
           git --version
           git config --list --show-scope --show-origin
           node --input-type=module -e "
-          import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+          import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
           import { execFileSync } from 'node:child_process';
           import os from 'node:os';
           import path from 'node:path';
@@ -48,6 +48,16 @@ jobs:
               console.log('probe OK head:', o.after.head, 'branch:', o.after.branch, 'coherent:', o.coherence);
             } catch (error) {
               console.log('probe FAILED code:', error.code, 'message:', error.message);
+            }
+            console.log('== primitive 1b: worktree add into an existing EMPTY dir ==');
+            const emptyTarget = path.join(root, 'empty-target');
+            mkdirSync(emptyTarget, { recursive: true });
+            try {
+              g(main, ['worktree', 'add', '-b', 'diag-empty-branch', emptyTarget, 'HEAD']);
+              const o2 = await probeGitWorktree(emptyTarget);
+              console.log('empty-dir probe OK branch:', o2.after.branch, 'coherent:', o2.coherence);
+            } catch (error) {
+              console.log('empty-dir FAILED code:', error.code ?? 'git', 'message:', (error.message ?? String(error)).slice(0, 300));
             }
             console.log('== primitive 2: delivery location change count ==');
             const source = path.join(root, 'source');

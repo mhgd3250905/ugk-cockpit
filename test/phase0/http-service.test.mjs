@@ -11,12 +11,18 @@ import { probeGitWorktree } from '../../src/git/probe.mjs';
 import { createCockpitHttpServer } from '../../src/service/http-server.mjs';
 import { VERSION } from '../../src/version.mjs';
 
+// Fixture git must observe the same config contract as the product
+// (safeGitEnvironment strips system/global git config): a runner whose
+// ambient autocrlf smudges checkouts would otherwise leave phantom
+// modifications that only the product's no-config git can see.
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
 // POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
 // 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
 function fixtureTempRoot() {
   return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
 }
-
 
 const TOKEN = 'phase-zero-test-token-that-is-long-enough';
 
