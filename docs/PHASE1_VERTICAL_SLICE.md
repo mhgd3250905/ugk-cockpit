@@ -6,6 +6,12 @@
 
 ## 实施状态
 
+### alpha.53：审计修复——Windows 凭据助手、begin 原子性、合并单飞（2026-09-24，PR #19）
+
+- `0.1.0-alpha.53`：审计修复轮（PR #19，合并提交 `9a0f750`，源码合并、未部署），三项缺陷全部先在 pristine main 上复现再修复。其一，Windows 凭据助手参数是带字面双引号的 `credential.helper="<path>"`，git 把非绝对路径值解析为 `git-credential-<value>` 经 shell 执行，带前导引号的值因此被当作名为 `credential-"D:/…"` 的 helper 查找而从不运行——而 `SAFE_GIT_PREFIX` 已清空其他 helper 且安全环境关闭交互提示，该死条目是 Windows 上唯一凭据来源，所有认证 HTTPS fetch/push/ls-remote 失败并被 `REMOTE_SOURCE_UNREACHABLE` 等误报为网络问题；现改用 git 文档的 `!"<path>"` shell 形式（实测空格路径也正确），路径按保守白名单校验（白名单外不发覆盖参数而非拼进 shell 行），检测失败不再被进程终身缓存。其二，`work/begin` 先建 Run 并取写锁、后比对指派 revision，代理传过期 `expectedRevision` 时请求报裸冲突但锁与 Run 已落库，自然恢复动作（重试）被自己刚取的锁挡住、`release-lease` 又拒绝；现新增 `assignmentBeginPreconditions()` 在首个持久写入前按核心相同顺序求值前置条件（它是核心事务内复查的子集而非替代），`work/init` 因 revision 是常量不在此列。其三，`mergeApprovedSubmission` 无单飞保护，两个同 `commandId` 驱动竞争 `integration_attempts` 主键并以裸 SQLite 约束错误逃逸，且 `integrate:<commandId>` 持有者形态使第二驱动续期同一把锁、先完成者释放后另一方裸奔；现以从 delivery-service 统一提取的 `singleFlight`（按 `commandId` 串行、同 id 同体加入在飞结果、同 id 异体拒绝）包裹，并在 reviewed-delivery import、`fastForwardMain`、`pushIntegratedMain` 三次写主仓库前复核 holder + `lock_id` + 有效期（过期判定用注入时钟）。行为变化知悉：已成功 begin 的同请求重放由「幂等回放冻结成功」改为报 `ASSIGNMENT_REVISION_CONFLICT`（拒绝优于伪造成功，方向安全）。
+- 配套：README 不再登记会过期的运行版本声明、指向恢复文档最新验收小节；恢复文档新增遗留「半开工作会话」的只读识别 SQL（限 standby 指派，避免把进行中的 task 会话误判为故障，四场景验证）与显式 `abandoned` 收束路径；宿主支持清单说明 alpha.52 起归属凭据遮蔽的呈现方式变化。
+- 验证（2026-09-24，Windows / Node.js 24.15.0，隔离 worktree 的合并树 = 合并提交树）：全量 `npm test` **664 项 / 657 通过 / 0 失败 / 7 跳过**（真实退出码 0）；`npm run test:phase0` **97/97**。基线（pristine main `bf60de1`）实测新增回归 10 项中 9 项失败（唯一通过项为行为保护测试而非缺陷复现）；凭据助手三项格式声明经本机 git 直接实测复现（旧格式回读保留字面引号、dispatch 报 `is not a git command` 且 helper 从不运行、`!` 形式 GCM 真正启动）。审计者的七条「已证伪假设」与未证实项披露经抽查可信；其遗留建议（补 CI、固定最低 git 版本、`hasUncommittedChanges` 对齐 `--untracked-files`）留待后续。
+
 ### alpha.52：审计修复——归属凭据、锁原子性、幂等键与契约面（2026-09-23，PR #18）
 
 - `0.1.0-alpha.52`：审计修复轮（PR #18，合并提交 `1da1652`，源码合并、未部署），修复 1 项 P0、3 项 P1、2 项 P2。P0：宿主/会话定位符是聊天归属的唯一凭据，此前平台向任意 MCP 调用方回显该值，等于把钥匙贴在锁上——现在非持有方收到遮蔽视图（`identityWithheld` / `actorIdentityWithheld`），仅持有方自证与工作台控制台两处显式放开；技能文案同步改为「不猜测、请用户到工作台辨认」，并有守卫测试防止文案回退。P1：交付索引锁改为私有临时名写入并 fsync 后硬链接发布（无硬链接文件系统回退原路径并留有记录），消灭「创建后写入前被杀留下不可归属空锁」永久卡死仓库的窗口，reclaim 限一次，清扫按 10 分钟阈值；`ugk_work_resume` 从 schema/stdio/HTTP 三处一致退役过期确认参数，stdio 本地拒绝并指引工作台转交；改派命令幂等键改按 `clientRequestId` 作用域（缺失即 `INVALID_REQUEST`），A→B→A 不再重放最旧回执与陈旧派发码。P2：路径守卫不再把合法 `..` 前缀目录名误判为越界（并因此漏扫链接）；schema 29 迁移补齐同族的表存在守卫。

@@ -1,5 +1,9 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.53 源码合并（2026-09-24，未部署）
+
+PR #19（审计修复：Windows 凭据助手参数、`work/begin` 拒绝后半状态、合并指令并发单飞与锁复核）经独立复审后合并为 `9a0f750`，开发版本 `0.1.0-alpha.53`。本轮仅源码合并与文档对齐：未重启本机服务，未动正式数据库，无 schema 迁移。当前本机服务仍运行 alpha.52（PID 26788），运行版本以现场 /health 核验为准；部署 alpha.53 按既有规程执行。macOS 侧回归仍未在真机执行。
+
 ## 遗留的「半开工作会话」（work/begin 修复之前产生）
 
 修复前 `POST /api/v1/mcp/work/begin` 先建 Run 并取写锁，之后才比对工作指派 revision；代理填入过期的 `expectedRevision` 时，请求以 `ASSIGNMENT_REVISION_CONFLICT` 失败，但写锁与 active Run 已经落库，工作指派仍停在 `accepted`。修复后不再产生新的这类记录，但**已在正式库中留下的行不会自动消失**，需要显式收束。
