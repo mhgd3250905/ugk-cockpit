@@ -8,7 +8,7 @@ import {
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
-import { readProjectContext, worktreeIdFor } from './projects.mjs';
+import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import {
   listDevelopmentSpaces,
   readDevelopmentSpace,
@@ -124,7 +124,7 @@ function registerAndCompleteWorkspace({
   options = {},
 }) {
   const timestamp = iso(nowMillis(options));
-  const worktreeId = worktreeIdFor(observation.worktreeIdentity);
+  const worktreeId = resolveWorktreeId(db, observation);
   const spaceId = spaceIdFor(projectId, worktreeId);
 
   return withImmediateTransaction(db, () => {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { authorizeExistingPath, revalidateAuthorizedPath } from './path-guard.mjs';
-import { readProjectContext, worktreeIdFor } from './projects.mjs';
+import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { probeGitWorktree } from '../git/probe.mjs';
 import { readDeliveryLocation, checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
@@ -86,7 +86,7 @@ export async function registerDeliveryLocation(db, { observation, authorizedRoot
   const { project, targetRemote } = matches[0];
   authorizeDeliveryObservation(observation, [authorizedRoot, project.authorized_root]);
   const sourceRemote = primaryRemote(sourceLocation);
-  const worktreeId = worktreeIdFor(observation.worktreeIdentity);
+  const worktreeId = resolveWorktreeId(db, observation);
   const sourceId = deliveryId('delivery_source', `${project.id}:${worktreeId}`);
   return withImmediateTransaction(db, () => {
     const byPath = db.prepare('SELECT * FROM worktrees WHERE canonical_path = ?').get(observation.canonicalPath);
