@@ -10,6 +10,29 @@ import { PROGRESS_STATUSES } from '../core/assignments-contract.mjs';
 // 与服务端 HTTP MCP 路由的 18MB 请求体上限对齐：stdio 桥进程不能被一条无上限
 // 的入站行无限缓冲。超限即 fail-closed 关停，stderr 留下可诊断的说明。
 const MCP_STDIO_LINE_LIMIT = 18 * 1024 * 1024;
+const EMPTY_BUFFER = Buffer.alloc(0);
+const LINE_SEPARATOR_BYTES = Buffer.from('\\u2028', 'utf8');
+const PARAGRAPH_SEPARATOR_BYTES = Buffer.from('\\u2029', 'utf8');
+
+// Rewrites raw U+2028/U+2029 into their JSON escape text. On the way in this
+// keeps readline's LF-only framing intact; on the way out it keeps one response
+// in one line. Both are semantics-preserving for valid JSON, because these two
+// characters may only ever appear inside a string there.
+function escapeWireSeparators(input) {
+  const parts = [];
+  let last = 0;
+  for (let index = 0; index + 2 < input.length; index += 1) {
+    if (input[index] !== 0xe2 || input[index + 1] !== 0x80) continue;
+    if (input[index + 2] !== 0xa8 && input[index + 2] !== 0xa9) continue;
+    parts.push(input.subarray(last, index));
+    parts.push(input[index + 2] === 0xa8 ? LINE_SEPARATOR_BYTES : PARAGRAPH_SEPARATOR_BYTES);
+    index += 2;
+    last = index + 1;
+  }
+  if (parts.length === 0) return input;
+  parts.push(input.subarray(last));
+  return Buffer.concat(parts);
+}
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const STRUCTURED_TOOL_NAMES = new Set([
@@ -1443,6 +1466,7 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
   // readline 会无条件缓冲整行，因此在上游加一层按行计数的限流：单行超过上限
   // 时立即销毁输入并触发同一条关停路径，避免桥进程被异常宿主无限喂大内存。
   let pendingLineBytes = 0;
+  let separatorCarry = EMPTY_BUFFER;
   let failClosedInvoked = false;
   let readlineInterface = null;
   // 超限行与输入读取错误共用同一条 fail-closed 路径：拆管道、销毁守卫层与
@@ -1488,7 +1512,32 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
         callback();
         return;
       }
-      callback(null, chunk);
+      // JSON 允许 U+2028/U+2029 裸出现在字符串里，而 readline 把它们当行终止符。
+      // 一个这样的字符会把一条合法请求切成两段无法解析的碎片，宿主因此收不到
+      // 任何回执；出向同理会让一次已经写入成功的操作看起来像丢了。这里统一把
+      // 它们改写成 JSON 转义文本，解析结果不变，分帧只认换行。
+      const combined = separatorCarry.length === 0
+        ? bytes
+        : Buffer.concat([separatorCarry, bytes]);
+      let cut = combined.length;
+      if (cut >= 2 && combined[cut - 2] === 0xe2 && combined[cut - 1] === 0x80) cut -= 2;
+      else if (cut >= 1 && combined[cut - 1] === 0xe2) cut -= 1;
+      separatorCarry = cut === combined.length
+        ? EMPTY_BUFFER
+        : Buffer.from(combined.subarray(cut));
+      const framed = escapeWireSeparators(combined.subarray(0, cut));
+      if (framed.length === 0) callback();
+      else callback(null, framed);
+    },
+    flush(callback) {
+      // 流结束时残留的半个序列已经无法构成合法 JSON，按原样交出即可。
+      if (separatorCarry.length === 0) {
+        callback();
+        return;
+      }
+      const rest = separatorCarry;
+      separatorCarry = EMPTY_BUFFER;
+      callback(null, rest);
     },
   });
   // 宿主管道的读取错误（如 EPIPE）同样必须进入统一关停：只拆限流层不会终结
@@ -1512,7 +1561,7 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
 
   const writeResponse = (response) => {
     try {
-      outStream.write(`${JSON.stringify(response)}\n`);
+      outStream.write(`${JSON.stringify(response).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')}\n`);
     } catch (writeErr) {
       // A lost response would leave the host waiting on its own timeout with
       // no signal at all. Surface the failure on stderr and answer with a
