@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
+import { canonicalJson, beginCommand, parseCommandResponse } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
 
 const ACTIVE_ASSIGNMENT_STATES = ['pending', 'accepted', 'active'];
@@ -690,4 +691,374 @@ export function checkWorkspaceWriteAdmission(db, {
 
 export function workspaceLifecycleAllowedStatuses() {
   return [...['ready', 'cleanup_ready', 'paused', 'attention']];
+}
+
+const NON_TERMINAL_COMMAND_STATES = ['received', 'observing', 'uncertain'];
+
+/**
+ * Settle a command that is still waiting for its outcome. Unlike the journal's
+ * ordinary failure path this one also covers `observing` and `uncertain`,
+ * because a lifecycle command that died mid-flight is exactly what gets stuck.
+ */
+function settleCommand(db, commandId, response, timestamp) {
+  db.prepare(`
+    UPDATE commands SET state = 'failed', response_json = ?, updated_at = ?
+    WHERE id = ? AND state IN (${NON_TERMINAL_COMMAND_STATES.map(() => '?').join(', ')})
+  `).run(canonicalJson(response), timestamp, commandId, ...NON_TERMINAL_COMMAND_STATES);
+  return response;
+}
+
+function commitCommand(db, commandId, response, timestamp) {
+  db.prepare(`
+    UPDATE commands SET state = 'committed', response_json = ?, updated_at = ?
+    WHERE id = ? AND state = 'received'
+  `).run(canonicalJson(response), timestamp, commandId);
+  return response;
+}
+
+function activeWorkOnWorktree(db, worktreeId) {
+  const lease = db.prepare('SELECT run_id FROM write_leases WHERE worktree_id = ?').get(worktreeId);
+  const assignment = db.prepare(`
+    SELECT id, status FROM assignments
+    WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
+    ORDER BY updated_at DESC, id DESC LIMIT 1
+  `).get(worktreeId, ...ACTIVE_ASSIGNMENT_STATES);
+  return conflictFromActiveWork(worktreeId, lease, assignment);
+}
+
+/**
+ * Commands that keep the lifecycle fence up without owning a reservation.
+ *
+ * A repository with two or more unsettled lifecycle commands deliberately gets
+ * no reservation row (the migration that backfilled them refused to guess which
+ * command produced which Git effect), and a command can outlive its reservation
+ * during recovery. Those rows still fence the repository through
+ * `checkWorkspaceWriteAdmission` and `acquireRepositoryLock`, so an exit that
+ * only understood reservations would report "nothing is stuck" while every write
+ * session kept being refused.
+ */
+// Both spellings appear in frozen lifecycle requests (the core reads
+// `request.projectId ?? request.project_id`), so the fence scan has to match
+// what the write admission scans match — otherwise a row the fence blocks on is
+// invisible to the console that is supposed to explain it.
+const SPACE_ID_PATH = "COALESCE(json_extract(commands.request_json, '$.spaceId'),"
+  + " json_extract(commands.request_json, '$.space_id'))";
+const PROJECT_ID_PATH = "COALESCE(json_extract(commands.request_json, '$.projectId'),"
+  + " json_extract(commands.request_json, '$.project_id'))";
+
+function readJournalFenceCommands(db, repositoryIdentity) {
+  if (!reservationTableExists(db) || !isNonEmptyString(repositoryIdentity)) return [];
+  return db.prepare(`
+    SELECT commands.id, commands.kind, commands.state, commands.created_at, commands.updated_at,
+           development_spaces.project_id, development_spaces.id AS space_id,
+           development_spaces.worktree_id
+    FROM commands
+    JOIN development_spaces
+      ON development_spaces.id = ${SPACE_ID_PATH}
+     AND development_spaces.project_id = ${PROJECT_ID_PATH}
+    JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+    WHERE commands.kind IN ('workspace.reuse', 'workspace.remove')
+      AND commands.state IN (${NON_TERMINAL_COMMAND_STATES.map(() => '?').join(', ')})
+      AND worktrees.repository_identity = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM workspace_lifecycle_reservations reservations
+        WHERE reservations.command_id = commands.id
+      )
+    ORDER BY commands.created_at ASC, commands.id ASC
+  `).all(...NON_TERMINAL_COMMAND_STATES, repositoryIdentity);
+}
+
+function journalSpaceOf(db, commandId) {
+  const row = db.prepare(`
+    SELECT development_spaces.id AS space_id, development_spaces.worktree_id AS worktree_id
+    FROM commands
+    JOIN development_spaces
+      ON development_spaces.id = ${SPACE_ID_PATH}
+     AND development_spaces.project_id = ${PROJECT_ID_PATH}
+    WHERE commands.id = ?
+  `).get(commandId);
+  return row ? { spaceId: row.space_id, worktreeId: row.worktree_id } : null;
+}
+
+/**
+ * Which repository a project's fence lives in. The project row is the normal
+ * source, but the escape hatch also has to work for a project that is no longer
+ * on the dashboard: the reservation and the space rows still carry the
+ * repository identity, and that is the fact the fence is keyed on.
+ */
+export function resolveFenceRepositoryIdentity(db, projectId) {
+  if (!isNonEmptyString(projectId)) return null;
+  const fromProject = db.prepare(`
+    SELECT worktrees.repository_identity AS repository_identity
+    FROM projects JOIN worktrees ON worktrees.id = projects.worktree_id
+    WHERE projects.id = ?
+  `).get(projectId);
+  if (fromProject?.repository_identity) return fromProject.repository_identity;
+  if (reservationTableExists(db)) {
+    const fromReservation = db.prepare(
+      `SELECT repository_identity FROM workspace_lifecycle_reservations
+        WHERE project_id = ? ORDER BY started_at DESC, repository_identity LIMIT 1`,
+    ).get(projectId);
+    if (fromReservation?.repository_identity) return fromReservation.repository_identity;
+  }
+  const fromSpace = db.prepare(`
+    SELECT worktrees.repository_identity AS repository_identity
+    FROM development_spaces JOIN worktrees ON worktrees.id = development_spaces.worktree_id
+    WHERE development_spaces.project_id = ?
+    ORDER BY development_spaces.created_at ASC, development_spaces.id ASC
+    LIMIT 1
+  `).get(projectId);
+  return fromSpace?.repository_identity ?? null;
+}
+
+function journalFenceDescription(entries) {
+  const oldest = entries[0];
+  return {
+    source: 'journal',
+    blockedCommandId: oldest.id,
+    pendingCommandIds: entries.map((entry) => entry.id),
+    operation: oldest.kind === 'workspace.reuse' ? 'reuse' : 'remove',
+    state: oldest.state,
+    projectId: oldest.project_id,
+    spaceId: oldest.space_id,
+    worktreeId: oldest.worktree_id,
+    since: oldest.created_at,
+    updatedAt: oldest.updated_at,
+    effectObservedAt: null,
+    lastErrorCode: oldest.state,
+    executorCouldBeRunning: false,
+    canAbandon: true,
+  };
+}
+
+function fenceLock(db, repositoryIdentity) {
+  const lock = db.prepare(
+    'SELECT holder, operation, expires_at FROM repository_locks WHERE repository_identity = ?',
+  ).get(repositoryIdentity);
+  if (!lock) return null;
+  return { holder: lock.holder, operation: lock.operation, expiresAt: lock.expires_at };
+}
+
+/**
+ * Read-only description of the durable lifecycle fence held for a repository,
+ * so the workbench can explain what is blocked and whether an abandon is
+ * permitted. It reports facts only; it never releases anything.
+ *
+ * The reservation is not the only thing that refuses a write: sibling journal
+ * rows keep `acquireRepositoryLock` closed even while a reservation exists, and
+ * a persistent lock can outlive its command. Every one of those is named here,
+ * because a console that answers "nothing is stuck" while writes are still
+ * refused would be a second version of the original defect.
+ */
+export function describeWorkspaceLifecycleFence(db, repositoryIdentity) {
+  const siblings = readJournalFenceCommands(db, repositoryIdentity);
+  const lock = fenceLock(db, repositoryIdentity);
+  const row = readReservationRow(db, repositoryIdentity);
+  if (row) {
+    const executorCouldBeRunning = reservationOwnerCouldBeExecuting(row);
+    return {
+      source: 'reservation',
+      blockedCommandId: row.command_id,
+      pendingCommandIds: [row.command_id, ...siblings.map((entry) => entry.id)],
+      operation: row.operation,
+      state: row.state,
+      projectId: row.project_id,
+      spaceId: row.space_id,
+      worktreeId: row.worktree_id,
+      since: row.started_at,
+      updatedAt: row.updated_at,
+      effectObservedAt: row.effect_observed_at,
+      lastErrorCode: row.last_error_code,
+      lock,
+      executorCouldBeRunning,
+      canAbandon: !executorCouldBeRunning,
+    };
+  }
+  if (siblings.length > 0) return { ...journalFenceDescription(siblings), lock };
+  if (lock) {
+    // Observability only: an orphaned lock is named, but nothing here releases a
+    // lock no command still answers for, and that path has not been shown to be
+    // reachable in this codebase.
+    return {
+      source: 'lock',
+      blockedCommandId: null,
+      pendingCommandIds: [],
+      operation: lock.operation,
+      state: 'locked',
+      projectId: null,
+      spaceId: null,
+      worktreeId: null,
+      since: null,
+      updatedAt: null,
+      effectObservedAt: null,
+      lastErrorCode: null,
+      lock,
+      executorCouldBeRunning: false,
+      canAbandon: false,
+    };
+  }
+  return null;
+}
+
+/**
+ * The only supported exit from a stranded lifecycle fence.
+ *
+ * A lifecycle reservation exists so that a Git effect whose outcome was never
+ * reconciled cannot race a second lifecycle operation. The reservation and the
+ * persistent repository lock it holds are keyed on the *command*, and that
+ * command's admission checks are frozen from the client's view — so once the
+ * space moves on (a pause, an archive, any unrelated revision) the original
+ * command can never finalise, no new command can take over, and every write
+ * session in the repository stays blocked. Those durable rows have no TTL by
+ * design; the escape has to be an explicit user decision.
+ *
+ * The abandon settles the layers in one transaction: the journal row, the
+ * reservation where there is one, and the persistent repository lock that
+ * command holds. It refuses while the recorded executor could still be running
+ * in this process generation, and refuses while the worktree still has live
+ * work; both of those refusals leave the request open so the same command can be
+ * retried once the condition clears, instead of caching a permanent "no". The
+ * code is never touched — the space goes to `attention` rather than `ready`,
+ * because the Git effect did happen while its business outcome was not confirmed.
+ *
+ * A fence carried only by journal rows (two or more unsettled commands, or a
+ * command that outlived its reservation) is settled the same way, one named
+ * command at a time, because each unknown effect needs its own confirmation.
+ */
+export function abandonWorkspaceLifecycle(db, request = {}, options = {}) {
+  const timestamp = iso(nowMillis(options));
+  const { commandId, repositoryIdentity, blockedCommandId } = request;
+  if (!isNonEmptyString(commandId) || !isNonEmptyString(repositoryIdentity)
+    || !isNonEmptyString(blockedCommandId)) {
+    return {
+      ok: false, code: 'INVALID_REQUEST',
+      outcome: 'confirmed_failure', state: 'failed', retryable: false,
+    };
+  }
+  if (request.userConfirmed !== true) {
+    return {
+      ok: false,
+      code: 'WORKSPACE_LIFECYCLE_CONFIRMATION_REQUIRED',
+      commandId,
+      blockedCommandId,
+      outcome: 'confirmed_failure',
+      state: 'failed',
+      retryable: false,
+    };
+  }
+
+  const begun = beginCommand(db, {
+    commandId,
+    kind: 'workspace.lifecycle_abandon',
+    request: { commandId, repositoryIdentity, blockedCommandId, userConfirmed: true },
+  });
+  if (begun.command.state === 'committed' || begun.command.state === 'failed') {
+    return parseCommandResponse(begun.command);
+  }
+
+  return withImmediateTransaction(db, () => {
+    const refusal = (code, extra = {}) => settleCommand(db, commandId, {
+      ok: false,
+      code,
+      commandId,
+      blockedCommandId,
+      outcome: 'confirmed_failure',
+      state: 'failed',
+      retryable: false,
+      ...extra,
+    }, timestamp);
+    const transient = (code, extra = {}) => ({
+      ok: false,
+      code,
+      commandId,
+      blockedCommandId,
+      outcome: 'unknown',
+      state: 'received',
+      retryable: true,
+      ...extra,
+    });
+
+    const row = readReservationRow(db, repositoryIdentity);
+    if (row && row.command_id !== blockedCommandId) return refusal('WORKSPACE_LIFECYCLE_NOT_STUCK');
+    if (!row) {
+      const journal = readJournalFenceCommands(db, repositoryIdentity);
+      if (!journal.some((entry) => entry.id === blockedCommandId)) {
+        return refusal('WORKSPACE_LIFECYCLE_NOT_STUCK');
+      }
+    } else if (reservationOwnerCouldBeExecuting(row)) {
+      return transient('WORKSPACE_LIFECYCLE_EXECUTING');
+    }
+
+    const journalTarget = row ? null : journalSpaceOf(db, blockedCommandId);
+    const worktreeId = row?.worktree_id ?? journalTarget?.worktreeId ?? null;
+    const spaceId = row?.space_id ?? journalTarget?.spaceId ?? null;
+
+    if (worktreeId) {
+      const activeWork = activeWorkOnWorktree(db, worktreeId);
+      if (activeWork) {
+        return transient(activeWork.code, {
+          worktreeId,
+          runId: activeWork.runId ?? null,
+          assignmentId: activeWork.assignmentId ?? null,
+        });
+      }
+    }
+
+    settleCommand(db, blockedCommandId, {
+      ok: false,
+      code: 'WORKSPACE_LIFECYCLE_ABANDONED',
+      commandId: blockedCommandId,
+      abandonedByCommandId: commandId,
+      outcome: 'confirmed_failure',
+      state: 'failed',
+      retryable: false,
+    }, timestamp);
+
+    if (row) {
+      db.prepare('DELETE FROM workspace_lifecycle_reservations WHERE repository_identity = ?')
+        .run(repositoryIdentity);
+      // The worktree did change out from under any observation taken before this
+      // point, so those observations must stop being usable as a baseline.
+      db.prepare('UPDATE worktrees SET lifecycle_completed_at = ? WHERE id = ? AND lifecycle_epoch = ?')
+        .run(timestamp, row.worktree_id, row.epoch);
+    }
+
+    const lock = db.prepare('SELECT * FROM repository_locks WHERE repository_identity = ?')
+      .get(repositoryIdentity);
+    let lockReleased = false;
+    if (lock && (lock.holder === blockedCommandId
+      || lock.holder === `workspace-lifecycle:${blockedCommandId}`)) {
+      lockReleased = db.prepare(
+        'DELETE FROM repository_locks WHERE repository_identity = ? AND holder = ? AND lock_id = ?',
+      ).run(repositoryIdentity, lock.holder, lock.lock_id).changes === 1;
+    }
+
+    let spaceMarkedForAttention = false;
+    if (spaceId) {
+      spaceMarkedForAttention = db.prepare(`
+        UPDATE development_spaces
+        SET status = 'attention', status_reason = ?, revision = revision + 1, updated_at = ?
+        WHERE id = ? AND status <> 'archived'
+      `).run('workspace_lifecycle_abandoned', timestamp, spaceId).changes === 1;
+    }
+
+    // Sibling journal rows and a lock that outlived its command keep the
+    // repository closed after this one settles, so the receipt has to say so
+    // rather than imply the fence is gone.
+    const remaining = readJournalFenceCommands(db, repositoryIdentity);
+    return commitCommand(db, commandId, {
+      ok: true,
+      commandId,
+      repositoryIdentity,
+      abandonedCommandId: blockedCommandId,
+      fenceSource: row ? 'reservation' : 'journal',
+      worktreeId,
+      spaceId,
+      lockReleased,
+      spaceMarkedForAttention,
+      remainingPendingCommandIds: remaining.map((entry) => entry.id),
+      blockingLock: fenceLock(db, repositoryIdentity),
+      updatedAt: timestamp,
+    }, timestamp);
+  });
 }
