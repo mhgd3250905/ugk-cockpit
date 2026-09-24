@@ -1424,6 +1424,50 @@ export function completeAssignment(db, request = {}, options = {}) {
   return options.inTransaction === true ? operation() : withImmediateTransaction(db, operation);
 }
 
+/**
+ * The assignment-side preconditions of beginAssignmentWork, evaluated without
+ * writing anything.
+ *
+ * `/api/v1/mcp/work/begin` has to create the Run and take the write lease
+ * (startWriteRun) *before* beginAssignmentWork can run, because that core
+ * requires an active Run. Without this pre-check a rejected begin therefore
+ * leaves a durable side effect behind: the lease is held and a Run is active
+ * while the assignment is still 'accepted', and the error the caller gets says
+ * nothing about it. Both are single-threaded and synchronous, so checking here
+ * and mutating below cannot be raced by another request in this process.
+ * beginAssignmentWork keeps re-checking all of this inside its own transaction;
+ * this function is only ever the "do not write if it will be rejected" gate, so
+ * it must stay a subset of those checks, never a replacement for them. It does
+ * not pre-check the run-lifecycle, worktree-binding and workspace-admission
+ * conditions: those are settled by the startWriteRun that follows, in the same
+ * synchronous turn, and the core still enforces them.
+ */
+export function assignmentBeginPreconditions(db, { sessionId, expectedRevision: rawRevision }) {
+  // beginAssignmentWork coerces before comparing; mirror that so a caller that
+  // passes "1" is not rejected here and then accepted by the core.
+  const expectedRevision = Number(rawRevision);
+  const assignment = db.prepare('SELECT * FROM assignments WHERE session_id = ?').get(sessionId);
+  if (!assignment) return { ok: false, code: 'SESSION_NOT_FOUND', sessionId };
+  // Same order as beginAssignmentWork, so a request rejected here would have
+  // been rejected by the core with the identical code. One exception: the core
+  // answers a settled command from the journal before it checks anything, so
+  // replaying a begin that already succeeded, after the session has moved on,
+  // used to echo the frozen success and now reports the conflict instead.
+  if (assignment.revision !== expectedRevision) {
+    return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
+  }
+  // Normally no Run exists yet, because begin is what creates it. One does on a
+  // replay, and the core compares that row's revision the same way.
+  const run = db.prepare('SELECT revision FROM runs WHERE id = ?').get(sessionId);
+  if (run && run.revision !== expectedRevision) {
+    return { ok: false, code: 'ASSIGNMENT_REVISION_CONFLICT', sessionId, revision: assignment.revision };
+  }
+  if (assignment.status !== 'accepted' && assignment.status !== 'active') {
+    return { ok: false, code: 'ASSIGNMENT_NOT_ACTIVE', sessionId, status: assignment.status };
+  }
+  return { ok: true, assignment };
+}
+
 /** Promote an accepted standby assignment into active work after a Run exists. */
 export function beginAssignmentWork(db, request = {}, options = {}) {
   const { sessionId, clientRequestId, task } = request;

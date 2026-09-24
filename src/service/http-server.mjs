@@ -13,6 +13,7 @@ import {
 import { conversationIdentity, conversationKey } from '../mcp/conversation-identity.mjs';
 import {
   acceptAssignment,
+  assignmentBeginPreconditions,
   beginAssignmentWork,
   completeAssignment,
   createAssignment,
@@ -4505,6 +4506,20 @@ export async function createCockpitHttpServer({
           return;
         }
         const { observation } = await observeRegisteredProject(context.projectId, context);
+        // Resolve the assignment CAS before taking the lease: startWriteRun is
+        // the first durable step, so a rejection discovered afterwards would
+        // leave this session holding a write lease over an assignment that was
+        // never promoted to active.
+        const preconditions = assignmentBeginPreconditions(db, {
+          sessionId: body.sessionId,
+          expectedRevision: body.expectedRevision,
+        });
+        if (!preconditions.ok) {
+          sendError(response, preconditions.code, {
+            extra: { session_id: body.sessionId, revision: preconditions.revision ?? null },
+          });
+          return;
+        }
         const started = startWriteRun(db, {
           commandId: id('mcp_begin_run', `${body.sessionId}:${body.clientRequestId}`),
           runId: body.sessionId,
@@ -4587,6 +4602,13 @@ export async function createCockpitHttpServer({
           });
           return;
         }
+        // No assignmentBeginPreconditions() guard here, unlike work/begin:
+        // acceptAssignment seeds the assignment at the run's revision (1 when
+        // startWriteRun has just created it, which is the only case init
+        // reaches) and the revision below is a constant rather than caller
+        // input, so beginAssignmentWork cannot be the step that rejects an
+        // already-taken lease. work/begin takes expectedRevision from the
+        // agent, which is why it needs the pre-check.
         const begun = beginAssignmentWork(db, {
           sessionId: accepted.sessionId,
           clientRequestId: `${body.clientRequestId}:begin`,

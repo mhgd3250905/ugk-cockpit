@@ -60,7 +60,7 @@ function now() {
   return new Date().toISOString();
 }
 
-function nowMillis(options = {}) {
+export function nowMillis(options = {}) {
   const source = options.clock ?? options.now;
   const value = typeof source === 'function' ? source() : source;
   if (value === undefined) return Date.now();

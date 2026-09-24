@@ -3,12 +3,14 @@ import {
   canonicalJson,
   parseCommandResponse,
 } from './command-journal.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { verifyReviewDelivery, importReviewedDelivery } from './delivery-review.mjs';
 import { discardDeliveryCache } from './delivery-cache.mjs';
 import {
   acquireRepositoryLock,
   claimSubmission,
+  nowMillis,
   readIntegrationClaim,
   readSubmission,
   recordIntegrationReceipt,
@@ -435,6 +437,10 @@ function retryableMergeError(db, attempt, code, message, options = {}) {
 }
 
 export async function mergeApprovedSubmission(db, request = {}, options = {}) {
+  return singleFlight(db, request, () => mergeApprovedSubmissionOnce(db, request, options));
+}
+
+async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
   const {
     commandId, sessionId, submissionId, claimId, expectedRevision,
     expectedSubmissionRevision, expectedClaimRevision,
@@ -521,6 +527,14 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     await options.faultInjector?.('after_integration_attempt_prepared', attempt);
   }
 
+  // The holder deliberately names the idempotency key, so a sequential replay
+  // after a partial write renews the lock it already owns instead of being
+  // denied by itself. That design depends on singleFlight: without it two
+  // concurrent same-commandId drivers would share this one lock row, and the
+  // first to reach its finally block would release the lock the other is
+  // still working under. singleFlight only serialises within this process and
+  // for this database handle, which is the whole scope today because the
+  // instance lock allows a single service process.
   const lockHolder = `integrate:${commandId}`;
   const lock = acquireRepositoryLock(db, {
     repositoryIdentity: binding.project.repository_identity,
@@ -529,6 +543,20 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
     ttlMs: options.lockTtlMs ?? 60_000,
   }, options);
   if (!lock.ok) return { ok: false, code: 'REPOSITORY_LOCKED', retryable: true };
+  // The acquire is not re-checked by anything below, so ownership is
+  // re-asserted immediately before each write into the main repository
+  // instead of trusting a result captured before several awaits. The deadline
+  // is compared on the same injected clock acquireRepositoryLock used to
+  // compute expires_at, never on wall time, or a caller that supplies a clock
+  // would see a lock that has not expired.
+  const assertLockHeld = () => {
+    const current = db.prepare('SELECT holder, lock_id, expires_at FROM repository_locks WHERE repository_identity = ?')
+      .get(binding.project.repository_identity);
+    if (!current || current.holder !== lockHolder || current.lock_id !== lock.lockId
+      || current.expires_at <= nowMillis(options)) {
+      throw Object.assign(new Error('Integration repository lock was lost.'), { code: 'REPOSITORY_LOCKED' });
+    }
+  };
 
   try {
     if (attempt.state === 'attention') {
@@ -562,7 +590,11 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       if (latestSubmission.delivery?.sourceId) {
         if (main.after.head !== attempt.targetHead && main.after.head !== attempt.sourceCommit) return { ok: false, code: 'TARGET_HEAD_STALE' };
         assertWriteOwner();
-        try { await importReviewedDelivery(latestSubmission, binding.project); }
+        // The import fetches objects into the main repository's object store,
+        // so it is a write into that repository and needs the same fence as
+        // the fast-forward and the push.
+        assertLockHeld();
+        try { await (options.importReviewedDelivery ?? importReviewedDelivery)(latestSubmission, binding.project); }
         catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
       }
       if (main.after.branch !== attempt.targetBranch) {
@@ -580,6 +612,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
       let externalIntegration = false;
       if (main.after.head === attempt.targetHead) {
         assertWriteOwner();
+        assertLockHeld();
         await (options.fastForwardMain ?? fastForwardMain)(binding.project.canonical_path, attempt.sourceCommit);
         await options.faultInjector?.('after_fast_forward_before_persist', attempt);
         const after = await probeMain(binding.project, options);
@@ -616,6 +649,7 @@ export async function mergeApprovedSubmission(db, request = {}, options = {}) {
         return { ok: false, code: 'MAIN_CHANGED_AFTER_INTEGRATION', humanActionRequired: true };
       }
       assertWriteOwner();
+      assertLockHeld();
       try {
         await (options.pushIntegratedMain ?? pushIntegratedMain)(binding.project.canonical_path, {
           remote: attempt.remoteName,

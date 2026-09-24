@@ -1,5 +1,26 @@
 # 本机服务数据一致性与故障恢复
 
+## 遗留的「半开工作会话」（work/begin 修复之前产生）
+
+修复前 `POST /api/v1/mcp/work/begin` 先建 Run 并取写锁，之后才比对工作指派 revision；代理填入过期的 `expectedRevision` 时，请求以 `ASSIGNMENT_REVISION_CONFLICT` 失败，但写锁与 active Run 已经落库，工作指派仍停在 `accepted`。修复后不再产生新的这类记录，但**已在正式库中留下的行不会自动消失**，需要显式收束。
+
+识别（只读，不修改任何数据）。该半状态的定义很窄：写锁被一个 active Run 持有，而这份**待命中（standby）**的工作指派仍停在 `accepted`——即从未被提升为 `active`。
+
+```sql
+SELECT l.worktree_id, l.run_id, a.status, a.revision
+FROM write_leases l
+JOIN runs r ON r.id = l.run_id AND r.lifecycle = 'active'
+JOIN assignments a ON a.session_id = r.id
+WHERE a.status = 'accepted'
+  AND json_extract(a.scope_json, '$.mode') = 'standby';
+```
+
+`scope_json.mode` 这一条不能省：`task` 派发（`scope_json.mode` 为 `write`）在接入时就取锁并写入 Run，但要等第一次 progress 才离开 `accepted`，那是完全正常的进行中会话；少了这个条件就会把正在干活的代理误判成故障。也不要写成「状态不属于那几个正常值」，那会连 `cancelled`、`failed` 一起匹配上。上面这条查询在四类现场都验证过：健康 task 会话 0 行、已接入但从未开始的 standby 会话 0 行、成功开始的 standby 会话 0 行、被本缺陷卡住的会话 1 行。返回的每一行都是需要处理的记录；一条也没有，就说明没有被本缺陷卡住的记录。注意 `write` 会话在接入后、第一次 progress 前失联会留下相同形态，但不在这条查询的范围内，需要另按通用结束流程判断。
+
+处理：让该会话本身显式结束，这是唯一受支持的出口——`ugk_work_finish`（或 `work/handoff`）带 `outcome: 'abandoned'` 和数据库里 `runs.revision` 一致的 `expectedRevision`。这会正常释放写锁，并留下一条可追溯的结束记录；不要用清理数据库行、重新接入或新建会话来代替。
+
+不要用 `runs/release-lease`：工作指派仍存在时它会以 `RUN_LEASE_MANAGED_SESSION` 拒绝，这是设计如此。同一个 `clientRequestId` 改值重试会以 `COMMAND_CONFLICT` 拒绝（幂等键已冻结原始意图），换新 `clientRequestId` 则以 `WRITE_LEASE_CONFLICT` 拒绝且报出的正是该会话自己的 id——看到这两种返回时按上面的显式结束处理，不要继续重试。
+
 ## alpha.52 部署验收（2026-09-23）
 
 PR #18（审计修复：归属凭据遮蔽、交付索引锁原子发布、改派幂等键、resume 契约退役参数、路径守卫与 schema 29 守卫）合并为 `1da1652` 并收束 `ca00fcb`（0.1.0-alpha.52）后，服务于 10:49:55 UTC 被外部重启（非验收会话执行，`node src/main.mjs --data-directory E:\AII\ugk-cockpit\.data\service`，PID 50972→26788）。重启时无 schema 迁移（schema 30 保持）。验收会话随后补齐核对：/health 确认 `0.1.0-alpha.52`；`verify-service-data` 核对 10 个可见项目及全部详情与数据库一致；`PRAGMA user_version` 30、integrity ok、外键错误 0；命令行核对进程使用本仓库源码与原数据目录，未重新 init、未覆盖数据库。因重启发生在验收会话之外，未留存部署前备份；已补做部署后基线快照 `.data/service/backups/after-alpha52-deploy-2026-09-23T15-07-36-779Z.db`（VACUUM INTO，schema 30、integrity ok、外键 0、10 条项目记录）。macOS 侧回归仍未在真机执行。
