@@ -11,15 +11,19 @@ const request = JSON.parse(Buffer.from(process.argv[3], 'base64url').toString('u
 const db = openCockpitDatabase(process.argv[2], { migrate: false });
 
 async function retryDatabaseBusy(operation) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // The connection's busy_timeout is 150ms by design, and 100-way write
+  // contention on a slow CI disk can hold BEGIN IMMEDIATE well past the ~1s
+  // a small retry budget tolerates. The worker exists to check who wins the
+  // election, not how fast the disk is, so stay patient: SQLITE_BUSY is
+  // retried for up to 300 attempts with the sleep capped at 50ms.
+  for (let attempt = 0; ; attempt += 1) {
     try {
       return operation();
     } catch (error) {
-      if (error?.errcode !== 5 || attempt === 39) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 5 + attempt));
+      if (error?.errcode !== 5 || attempt >= 299) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(50, 5 + attempt)));
     }
   }
-  throw new Error('unreachable');
 }
 
 try {
