@@ -2538,11 +2538,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                       <article className={`workspace-card development-card ${closed ? 'is-closed' : ''}`} key={space.spaceId}>
                         <div className="space-card-heading">
                           <span className="space-emblem" aria-hidden="true">{space.name?.slice(0, 1).toUpperCase() || '◇'}</span>
-                          <span className="space-state">{removed ? '已移除副本' : closed ? '已结束' : space.status === 'cleanup_ready' ? '已完成' : space.status === 'awaiting_review' ? '待审核' : space.status === 'archived' ? '已归档' : '可继续'}</span>
+                          <span className="space-state">{removed ? '已移除副本' : space.status === 'attention' ? '需要处理' : closed ? '已结束' : space.status === 'cleanup_ready' ? '已完成' : space.status === 'awaiting_review' ? '待审核' : space.status === 'archived' ? '已归档' : '可继续'}</span>
                         </div>
                         <div className="space-card-copy">
                           <strong>{space.name}</strong>
-                          <span>{removed ? '本地副本已删除，工作记录已保留' : closed ? '工作线已结束，历史记录仍可查看' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '独立推进功能，进展汇入项目工作线'}</span>
+                          <span>{removed ? '本地副本已删除，工作记录已保留' : space.status === 'attention' ? (space.statusReason === 'workspace_lifecycle_abandoned' ? '上一次操作没有确认完成，代码保持原样；请核对当前分支后再继续' : '当前状态需要确认，代码没有被自动改动') : closed ? '工作线已结束，历史记录仍可查看' : space.status === 'archived' ? '已归档' : space.status === 'awaiting_review' ? '等待主项目审核' : space.status === 'cleanup_ready' ? '已完成，可以重新开始或删除' : '独立推进功能，进展汇入项目工作线'}</span>
                         </div>
                         <div className="workspace-card-actions">
                           {pendingAction ? (

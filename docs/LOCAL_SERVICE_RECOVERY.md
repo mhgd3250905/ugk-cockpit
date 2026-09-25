@@ -1,5 +1,51 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.54 审计分支（2026-09-25，未合并、未部署）
+
+PR #20（审计分支，尚未合并：生命周期围栏的用户确认出路、stdio U+2028/U+2029 分帧、`work/finish` 与 `work/handoff` 字段白名单、代码位置重绑后的 id 解析、工作说明归属不再猜最新绑定、`conversation-control` 读路径限浏览器、未处理 Promise 拒绝走正常关停、Windows 启动器的 `!` 与 `--port`、构建不再清空在线资源）仅完成源码合并与文档收束。**本轮没有重启本机服务，也没有迁移正式数据库**：2026-09-25 复核 `/health` 仍为 `0.1.0-alpha.53`（PID 35288，数据目录 `E:\AII\ugk-cockpit\.data\service`）。本轮无 schema 迁移、无数据改写；身份重绑那项是读取路径改为按位置解析到既有 durable 行，因此部署后此前会抛 `FOREIGN KEY constraint failed` 或对正确身份回 `WORKTREE_IDENTITY_CHANGED` 的已重绑目录直接恢复可用，不需要重新添加项目。宿主插件与全局 MCP 登记不受影响。部署需按既有规程另行授权。
+
+## 卡住的工作副本操作（生命周期围栏）：只读识别与用户确认解除
+
+适用于：项目的「交给 AI / 继续工作 / 开发空间复用或移除」持续返回 `WORKSPACE_LIFECYCLE_IN_PROGRESS` 或 `REPOSITORY_LOCKED`，而工作台上没有任何进行中的提示。围栏由三层耐久事实构成：预约行（按仓库标识、**没有 TTL**）、非终态的命令流水行、以及 persistent 仓库锁（过期时间被写成公元 9999 年，只有原持有命令能续或释放）。它不会自己消失；alpha.53 之前没有任何产品内出路，alpha.54 起提供用户确认的解除。
+
+只读识别（不写库，服务运行中也可执行；`<db>` 换成实际数据目录下的 `cockpit.db`）：
+
+```sql
+SELECT repository_identity, command_id, operation, state, started_at, updated_at,
+       last_error_code, owner_pid, owner_started_at
+FROM workspace_lifecycle_reservations;
+
+SELECT id, holder, operation, datetime(expires_at / 1000, 'unixepoch') AS expires_at_utc
+FROM repository_locks;
+
+SELECT id, kind, state, created_at, updated_at
+FROM commands
+WHERE kind IN ('workspace.reuse', 'workspace.remove')
+  AND state IN ('received', 'observing', 'uncertain');
+```
+
+`GET /api/v1/projects/:id/workspace-lifecycle` 返回同一仓库的围栏摘要，`canAbandon` 表示执行者是否已可被证明地消失（进程代际不在、或已交还执行令牌）。
+
+解除（**必须由用户在工作台页面发起并明确确认**；Agent 连接与 bearer 凭据一律拒绝。不改动任何代码、不删除工作副本、不回滚分支）：在已登录的工作台标签页开发者工具中执行，`<项目 id>` 与 `<被卡住的 command_id>` 取自上面的查询：
+
+```js
+fetch('/api/v1/projects/<项目 id>/workspace-lifecycle', {
+  method: 'POST',
+  credentials: 'same-origin',
+  headers: {
+    'content-type': 'application/json',
+    'x-ugk-client-id': localStorage.getItem('ugk-cockpit-client-id'),
+  },
+  body: JSON.stringify({
+    commandId: 'abandon-' + crypto.randomUUID().replaceAll('-', '').slice(0, 24),
+    blockedCommandId: '<被卡住的 command_id>',
+    userConfirmed: true,
+  }),
+}).then((response) => response.json()).then(console.log);
+```
+
+一次调用在一个事务里同时结算流水行、删除预约行（并把该工作副本标记为生命周期已完成——仅在有预约行时；该标记让操作之前采集的旧观察不再被当作基线）（若围栏只由流水行构成——同一仓库有两条以上未结算命令时平台刻意不建预约行——则按点名的命令逐条结算，响应里的 `remainingPendingCommandIds` 给出还需要确认的其余命令）、按 holder + lock_id 释放该命令持有的仓库锁、把该工作副本标记为生命周期已完成（使此前的观察不再被当作基线），并把对应开发空间置为 `attention`。同一 `commandId` 重放返回原回执。若执行者仍可能在跑，或该工作副本还有写租约 / 活动会话，则返回拒绝且零改动——此时应让原会话正常结束或经工作台转交，不要强行解除。解除后请按 `GET /api/v1/projects/:id/workspace-lifecycle` 复查 `fence === null`，并核对 `development_spaces.status/revision` 已变为 `attention`/新值。工作台按钮尚未提供，与 alpha.41 的 `release-lease` 一样是「路由先行、按钮后补」，后续版本补入口。
+
 ## alpha.53 部署验收（2026-09-24）
 
 PR #19（审计修复：Windows 凭据助手参数、`work/begin` 拒绝后半状态、合并指令并发单飞与锁复核）合并为 `9a0f750` 并收束 `022a9e1`（0.1.0-alpha.53）后，用户授权一条龙部署。重启前运行版本 alpha.52（PID 26788），10 个可见项目。先以 VACUUM INTO 创建部署前快照 `.data/service/backups/before-alpha53-deploy-2026-09-24T14-41-22-018Z.db`（schema 30、integrity ok、外键 0、10 条项目记录）。既有启动器构建网页、核验并停止旧 PID 26788，隐藏启动 PID 35288（14:41:49 UTC，`node src/main.mjs --data-directory E:\AII\ugk-cockpit\.data\service`）。/health 确认 `0.1.0-alpha.53`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个项目及全部详情通过。启动器外壳进程因输出管道阻塞滞留，验收会话终止外壳后复测服务健康（分离启动确认），未影响服务进程。未重新 init、未覆盖数据库。macOS 侧回归仍未在真机执行。

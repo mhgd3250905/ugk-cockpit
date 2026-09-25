@@ -84,9 +84,33 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
     if (replay) return replay;
     assertFrozenIntent(current, commandRequest);
 
+    const createdAt = now();
+    const existingPath = db
+      .prepare('SELECT * FROM worktrees WHERE canonical_path = ?')
+      .get(canonicalPath);
+    if (
+      existingPath
+      && (
+        existingPath.repository_identity !== repositoryIdentity
+        || existingPath.identity_fingerprint !== worktreeIdentity
+      )
+    ) {
+      return failCommand(db, commandId, 'received', {
+        ok: false,
+        code: 'WORKTREE_IDENTITY_CHANGED',
+        runId,
+      });
+    }
+    // The row addressed by this location owns the lease, the runs and every
+    // lookup keyed on worktree_id. A rebound folder keeps its stored id while
+    // its fingerprint is rewritten in place, so the recomputed id from the
+    // caller may name nothing at all; the identity columns above are the real
+    // check, and they already passed.
+    const admittedWorktreeId = existingPath?.id ?? worktreeId;
+
     const occupied = db
       .prepare('SELECT run_id FROM write_leases WHERE worktree_id = ?')
-      .get(worktreeId);
+      .get(admittedWorktreeId);
     if (occupied) {
       const response = {
         ok: false,
@@ -97,27 +121,8 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
       return failCommand(db, commandId, 'received', response);
     }
 
-    const createdAt = now();
-    const existingPath = db
-      .prepare('SELECT * FROM worktrees WHERE canonical_path = ?')
-      .get(canonicalPath);
-    if (
-      existingPath
-      && (
-        existingPath.id !== worktreeId
-        || existingPath.repository_identity !== repositoryIdentity
-        || existingPath.identity_fingerprint !== worktreeIdentity
-      )
-    ) {
-      return failCommand(db, commandId, 'received', {
-        ok: false,
-        code: 'WORKTREE_IDENTITY_CHANGED',
-        runId,
-      });
-    }
-
     const lifecycleAdmission = checkWorkspaceWriteAdmission(db, {
-      worktreeId,
+      worktreeId: admittedWorktreeId,
       repositoryIdentity,
       baseline,
     });
@@ -131,29 +136,29 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
       INSERT OR IGNORE INTO worktrees (
         id, canonical_path, repository_identity, identity_fingerprint, created_at
       ) VALUES (?, ?, ?, ?, ?)
-    `).run(worktreeId, canonicalPath, repositoryIdentity, worktreeIdentity, createdAt);
+    `).run(admittedWorktreeId, canonicalPath, repositoryIdentity, worktreeIdentity, createdAt);
 
-    const worktree = db.prepare('SELECT * FROM worktrees WHERE id = ?').get(worktreeId);
+    const worktree = db.prepare('SELECT * FROM worktrees WHERE id = ?').get(admittedWorktreeId);
     if (
       !worktree
       || worktree.canonical_path !== canonicalPath
       || worktree.repository_identity !== repositoryIdentity
       || worktree.identity_fingerprint !== worktreeIdentity
     ) {
-      throw new Error(`Worktree identity ${worktreeId} was rebound without validation.`);
+      throw new Error(`Worktree identity ${admittedWorktreeId} was rebound without validation.`);
     }
     db.prepare('UPDATE worktrees SET lease_generation = lease_generation + 1 WHERE id = ?')
-      .run(worktreeId);
+      .run(admittedWorktreeId);
     const leaseGeneration = db
       .prepare('SELECT lease_generation FROM worktrees WHERE id = ?')
-      .get(worktreeId).lease_generation;
+      .get(admittedWorktreeId).lease_generation;
 
     db.prepare(`
       INSERT INTO runs (
         id, worktree_id, mode, lifecycle, health, revision, lease_generation,
         agent_claim, goal, created_at
       ) VALUES (?, ?, 'write', 'active', 'healthy', 1, ?, ?, ?, ?)
-    `).run(runId, worktreeId, leaseGeneration, agentClaim, goal, createdAt);
+    `).run(runId, admittedWorktreeId, leaseGeneration, agentClaim, goal, createdAt);
     faultInjector?.('start.after_run_insert');
 
     db.prepare(`
@@ -181,7 +186,7 @@ export function startWriteRun(db, request, { faultInjector } = {}) {
     db.prepare(`
       INSERT INTO write_leases (worktree_id, run_id, generation, acquired_at)
       VALUES (?, ?, ?, ?)
-    `).run(worktreeId, runId, leaseGeneration, createdAt);
+    `).run(admittedWorktreeId, runId, leaseGeneration, createdAt);
     faultInjector?.('start.after_lease_insert');
 
     const response = {

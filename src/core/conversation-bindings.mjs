@@ -18,6 +18,34 @@ export function readConversationBinding(db, key, worktreeId, sessionId = null) {
   };
 }
 
+/**
+ * The binding that proves who is working, or null when that cannot be shown.
+ *
+ * One chat can hold several live bindings on the same folder — the table is also
+ * keyed on session — and "the most recently bound row" is not the one that
+ * touched the code: a chat that accepted a second task and never ran it would
+ * otherwise take the credit. AGENTS.md requires `unattributed` over guessing an
+ * Agent, so an ambiguous set is only resolved when the durable write lease names
+ * exactly one of these sessions.
+ */
+export function readUnambiguousConversationBinding(db, key, worktreeId) {
+  if (!key || !worktreeId) return null;
+  const live = db.prepare(`
+    SELECT session_id FROM conversation_bindings
+    WHERE conversation_key = ? AND worktree_id = ? AND revoked = 0
+  `).all(key, worktreeId);
+  if (live.length <= 1) return readConversationBinding(db, key, worktreeId);
+  const leased = db.prepare(`
+    SELECT write_leases.run_id AS run_id
+    FROM write_leases
+    JOIN runs ON runs.id = write_leases.run_id
+    WHERE write_leases.worktree_id = ? AND runs.lifecycle = 'active'
+  `).all(worktreeId).map((row) => row.run_id);
+  const narrowed = live.filter((row) => leased.includes(row.session_id));
+  if (narrowed.length !== 1) return null;
+  return readConversationBinding(db, key, worktreeId, narrowed[0].session_id);
+}
+
 export function readConversationOwner(db, sessionId) {
   const row = db.prepare(`SELECT * FROM conversation_bindings
     WHERE session_id = ? AND revoked = 0 ORDER BY bound_at DESC, rowid DESC LIMIT 1`)

@@ -1,5 +1,9 @@
 @echo off
-setlocal enabledelayedexpansion
+REM No delayed expansion here on purpose: `!` is an ordinary character in a
+REM path or argument, and with expansion enabled cmd would consume every `!` in
+REM %* before PowerShell ever saw it (C:\work\da!ta silently became C:\work\data,
+REM so the launcher started against a different, empty data directory).
+setlocal
 
 set "REPO_ROOT=%~dp0"
 set "NO_PAUSE=0"

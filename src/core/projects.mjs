@@ -22,6 +22,33 @@ export function worktreeIdFor(worktreeIdentity) {
   return `worktree_${createHash('sha256').update(worktreeIdentity).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * Resolve the durable worktree row for a fresh observation.
+ *
+ * `worktrees.id` is a hash of the identity fingerprint captured when the row was
+ * first created, while `canonical_path` is the unique key. The schema 30
+ * migration and `confirm-location` both rewrite that fingerprint in place — a
+ * rebound folder is the same row with a new fingerprint — so recomputing the id
+ * from a later observation legitimately differs from the stored one. Callers
+ * must still reject a genuine identity change; this only stops a rewrite from
+ * turning into a dangling foreign key.
+ */
+export function resolveWorktreeId(db, observation) {
+  const byPath = db.prepare('SELECT id FROM worktrees WHERE canonical_path = ?')
+    .get(observation.canonicalPath);
+  return byPath?.id ?? worktreeIdFor(observation.worktreeIdentity);
+}
+
+/**
+ * The project of a worktree row. Registration keys a project by the same
+ * fingerprint-derived id, so a rebound location must keep its existing project
+ * rather than open a second one on the same worktree.
+ */
+export function resolveProjectId(db, worktreeId, observation) {
+  const byWorktree = db.prepare('SELECT id FROM projects WHERE worktree_id = ?').get(worktreeId);
+  return byWorktree?.id ?? projectIdFor(observation.worktreeIdentity);
+}
+
 export function readProjectContext(db, projectId) {
   return db.prepare(`
     SELECT projects.id, projects.name, projects.stage, projects.authorized_root,
@@ -53,8 +80,6 @@ export function registerProject(db, request) {
     authorizedRoot = observation.canonicalPath,
     grantId,
   } = request;
-  const worktreeId = worktreeIdFor(observation.worktreeIdentity);
-  const projectId = projectIdFor(observation.worktreeIdentity);
   const frozenRequest = {
     commandId,
     name,
@@ -103,6 +128,12 @@ export function registerProject(db, request) {
         projectId: null,
       });
     }
+
+    // Resolved after the identity checks above: a rebound location is the same
+    // durable row with a rewritten fingerprint, so its stored ids win over
+    // recomputed ones and the registration cannot dangle a foreign key.
+    const worktreeId = resolveWorktreeId(db, observation);
+    const projectId = resolveProjectId(db, worktreeId, observation);
 
     const timestamp = now();
     db.prepare(`

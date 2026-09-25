@@ -617,39 +617,16 @@ test('root cmd wrapper propagates arguments and exit codes without pausing when 
   assert.match(result.stdout, /Port 41749 is occupied by an unverified process/);
 });
 
-test('default cmd entry on Windows PowerShell 5.1 starts the service with isolated fixture and passes readiness plus project acceptance', { timeout: 150_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
-  // Pick a genuinely free port so the run never touches the production 41737.
-  // src/main.mjs hard-binds 41737, so the fixture uses a service double that
-  // honours the same data-directory contract (api-token file) and serves the
-  // /health, dashboard, and project detail shapes the launcher and acceptance
-  // flow rely on. The real service never runs and no formal data is touched.
-  const port = await new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port: freePort } = probe.address();
-      probe.close(() => resolve(freePort));
-    });
-  });
-
-  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-e2e-'));
-  const dataDir = path.join(tempDir, 'data');
-  const logDir = path.join(dataDir, 'logs');
-  mkdirSync(logDir, { recursive: true });
-  mkdirSync(path.join(tempDir, 'app'), { recursive: true });
-  // 11 stale runs. Together with this run (12 stamps) retention must keep the
-  // newest 10 and drop exactly the two oldest stamps. Stamps use the real
-  // yyyyMMdd-HHmmss shape (8 digits, dash, 6 digits).
-  for (let index = 1; index <= 11; index += 1) {
-    const stamp = `20200101-${String(index).padStart(6, '0')}`;
-    writeFileSync(path.join(logDir, `service-${stamp}.log`), `stale ${stamp}\n`, 'utf8');
-    writeFileSync(path.join(logDir, `launcher-${stamp}.log`), `stale launcher ${stamp}\n`, 'utf8');
-  }
-  const mockPath = path.join(tempDir, 'app', 'main.mjs');
-  writeFileSync(mockPath, `
+// The launcher fixture service: records the argv it was started with and
+// binds only the port the launcher passed, so both argument rewriting and
+// the port hand-off stay observable from the test side.
+function launcherMockSource({ dataDir, argvPath }) {
+  return `
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
 const dataDir = ${JSON.stringify(dataDir)};
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv) + '\\n', 'utf8');
 let token;
 try { token = readFileSync(dataDir + '/api-token', 'utf8').trim(); } catch {}
 if (!token || token.length < 32) {
@@ -686,8 +663,55 @@ const server = createServer((req, res) => {
   res.writeHead(404, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ code: 'NOT_FOUND' }));
 });
-server.listen(${port}, '127.0.0.1');
-`, 'utf8');
+const portFlag = process.argv.indexOf('--port');
+// A fixture that hard-coded its own port could never notice the launcher
+// omitting --port, so this service only ever binds the port it was handed.
+if (portFlag === -1) {
+  process.stderr.write('MOCK RECEIVED NO --port\\n');
+  process.exit(3);
+}
+const listenPort = Number(process.argv[portFlag + 1]);
+if (!Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) {
+  process.stderr.write('MOCK RECEIVED AN INVALID --port\\n');
+  process.exit(4);
+}
+server.listen(listenPort, '127.0.0.1');
+`;
+}
+
+test('default cmd entry on Windows PowerShell 5.1 starts the service with isolated fixture and passes readiness plus project acceptance', { timeout: 150_000, skip: process.platform !== 'win32' && 'launcher spawns Windows PowerShell/cmd; validated on the supported Windows platform' }, async (t) => {
+  // Pick a genuinely free port so the run never touches the production 41737.
+  // src/main.mjs hard-binds 41737, so the fixture uses a service double that
+  // honours the same data-directory contract (api-token file) and serves the
+  // /health, dashboard, and project detail shapes the launcher and acceptance
+  // flow rely on. The real service never runs and no formal data is touched.
+  const port = await new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port: freePort } = probe.address();
+      probe.close(() => resolve(freePort));
+    });
+  });
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-e2e-'));
+  const dataDir = path.join(tempDir, 'data');
+  const logDir = path.join(dataDir, 'logs');
+  mkdirSync(logDir, { recursive: true });
+  mkdirSync(path.join(tempDir, 'app'), { recursive: true });
+  // 11 stale runs. Together with this run (12 stamps) retention must keep the
+  // newest 10 and drop exactly the two oldest stamps. Stamps use the real
+  // yyyyMMdd-HHmmss shape (8 digits, dash, 6 digits).
+  for (let index = 1; index <= 11; index += 1) {
+    const stamp = `20200101-${String(index).padStart(6, '0')}`;
+    writeFileSync(path.join(logDir, `service-${stamp}.log`), `stale ${stamp}\n`, 'utf8');
+    writeFileSync(path.join(logDir, `launcher-${stamp}.log`), `stale launcher ${stamp}\n`, 'utf8');
+  }
+  const mockPath = path.join(tempDir, 'app', 'main.mjs');
+  writeFileSync(mockPath, launcherMockSource({
+    dataDir,
+    argvPath: path.join(tempDir, 'argv.json'),
+  }), 'utf8');
 
   let servicePid = null;
   t.after(async () => {
@@ -1045,4 +1069,62 @@ test('POSIX launcher refuses to reuse a matching-version service whose project r
   const ping = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) }).then((response) => response.json());
   assert.equal(ping.status, 'ok', 'the running service must stay untouched');
   assert.ok(!existsSync(path.join(savedDir, 'service.lock')), 'the saved directory must stay untouched');
+});
+
+// `%*` under `setlocal enabledelayedexpansion` silently eats every `!` in the
+// arguments, so a folder like C:\work\da!ta reached the PowerShell script as
+// C:\work\data: the launcher then created a different, empty data directory and
+// fell back to the well-known port, where it can find and stop the user's live
+// service. The argument must arrive verbatim.
+test('cmd entry delivers an exclamation mark in the data directory verbatim', {
+  timeout: 150_000,
+  skip: process.platform !== 'win32' && 'cmd.exe entry point is Windows-only',
+}, async (t) => {
+  const port = await new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port: freePortNumber } = probe.address();
+      probe.close(() => resolve(freePortNumber));
+    });
+  });
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ugk-launcher-bang-'));
+  const dataDir = path.join(tempDir, 'da!ta');
+  mkdirSync(path.join(dataDir, 'logs'), { recursive: true });
+  mkdirSync(path.join(tempDir, 'app'), { recursive: true });
+  const argvPath = path.join(tempDir, 'argv.json');
+  const mockPath = path.join(tempDir, 'app', 'main.mjs');
+  writeFileSync(mockPath, launcherMockSource({ dataDir, argvPath }), 'utf8');
+
+  let servicePid = null;
+  t.after(async () => {
+    if (servicePid) await terminateProcessTree(servicePid);
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const result = await runCaptured('cmd.exe', ['/d', '/c', launcherCmdPath,
+    '-RepoDirectory', repoRoot,
+    '-DataDirectory', dataDir,
+    '-TestPort', String(port),
+    '-TestMainEntry', mockPath,
+    '-SkipBuild',
+    '-NoPause',
+    '-TimeoutSeconds', '60',
+  ], { cwd: repoRoot, env: { ...process.env, UGK_LAUNCHER_NO_PAUSE: '1' } }, 140_000);
+
+  const pidMatch = /Service spawned in background \(PID: (\d+)/.exec(result.stdout);
+  if (pidMatch) servicePid = Number(pidMatch[1]);
+
+  assert.equal(result.status, 0, `launcher failed: ${result.stdout} ${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /is occupied by an unverified process/,
+    'a mangled data directory must not push the launcher onto the production port');
+
+  const argvLines = readFileSync(argvPath, 'utf8').trim().split(/\r?\n/);
+  const argv = JSON.parse(argvLines[argvLines.length - 1]);
+  assert.ok(argv.includes(dataDir),
+    `the service must start on the requested data directory, argv: ${JSON.stringify(argv)}`);
+  const portFlag = argv.indexOf('--port');
+  assert.ok(portFlag !== -1 && argv[portFlag + 1] === String(port),
+    `the service must be handed the requested port, argv: ${JSON.stringify(argv)}`);
 });

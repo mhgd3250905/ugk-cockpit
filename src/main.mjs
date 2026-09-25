@@ -52,6 +52,12 @@ try {
   // silently. Log what happened, then shut down through the normal path.
   process.on('unhandledRejection', (reason) => {
     process.stderr.write(`[ugk-cockpit] unhandled rejection: ${reason?.stack ?? reason}\n`);
+    // Registering this listener already suppresses Node's default behaviour of
+    // throwing, so a rejection that escapes the per-request catch-all has to
+    // leave through the same path as an escaped exception: a half-broken
+    // service still answers HTTP 200, and AGENTS.md forbids reading that as
+    // success. Lock release happens inside stop().
+    stop(1);
   });
   process.on('uncaughtException', (error) => {
     process.stderr.write(`[ugk-cockpit] uncaught exception: ${error?.stack ?? error}\n`);

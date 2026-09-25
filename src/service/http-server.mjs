@@ -56,6 +56,11 @@ import {
   removeDevelopmentWorkspace,
   reuseDevelopmentWorkspace,
 } from '../core/workspaces.mjs';
+import {
+  abandonWorkspaceLifecycle,
+  describeWorkspaceLifecycleFence,
+  resolveFenceRepositoryIdentity,
+} from '../core/workspace-lifecycle.mjs';
 import { readProjectDetail, readProjectTimeline } from '../core/timeline.mjs';
 import { readWorkLineContexts } from '../core/work-line-context.mjs';
 import { setProjectArchived, setWorkLineClosed, readWorkLineStates, removeProjectFromDashboard } from '../core/manual-records.mjs';
@@ -341,7 +346,7 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '释放残留的写入锁需要你明确确认。',
     impact: '原 AI 工作会话没有被结束，代码没有变化。',
-    requiredAction: '请先确认原来的 AI 已经停止，再带确认标记重新执行释放。',
+    requiredAction: '释放请求一经拒绝就会终止归档，请用一个新的操作编号重新发起释放；确认标记要带在这次新请求里。',
   },
   RUN_LEASE_MANAGED_SESSION: {
     status: 409,
@@ -791,6 +796,30 @@ const PUBLIC_ERRORS = {
   WORKSPACE_LIFECYCLE_CONFLICT: WORKSPACE_PENDING_ERROR,
   WORKSPACE_LIFECYCLE_RESERVATION_LOST: WORKSPACE_PENDING_ERROR,
   WORKSPACE_LIFECYCLE_RESERVATION_MISSING: WORKSPACE_PENDING_ERROR,
+  WORKSPACE_LIFECYCLE_CONFIRMATION_REQUIRED: {
+    status: 409,
+    message: '解除这个卡住的工作副本操作需要你明确确认。',
+    impact: '未完成的操作、开发空间状态和代码都保持原样。',
+    requiredAction: '请先确认那次操作确实已经中断，再带确认标记重新执行解除。',
+  },
+  WORKSPACE_LIFECYCLE_EXECUTING: {
+    status: 409,
+    message: '这个工作副本操作可能仍在执行，暂时不能解除围栏。',
+    impact: '代码和已有记录都没有被修改。',
+    requiredAction: '请等待当前 Cockpit 服务完成该操作，或确认它已经停止后再重试解除。',
+  },
+  WORKSPACE_LIFECYCLE_NOT_STUCK: {
+    status: 409,
+    message: '这个项目当前没有卡住的工作副本操作。',
+    impact: '没有任何围栏被改动，代码没有变化。',
+    requiredAction: '请刷新项目详情，按最新状态决定下一步。',
+  },
+  WORKSPACE_LIFECYCLE_ABANDONED: {
+    status: 409,
+    message: '这次工作副本操作已由你确认结束，不会再自动重试。',
+    impact: '当时已经发生的分支或工作副本变化保留原样，代码没有被回滚或删除。',
+    requiredAction: '请刷新开发空间状态后使用新的请求继续；该开发空间已标记为需要你确认。',
+  },
   WORKSPACE_OBSERVATION_STALE: {
     status: 409,
     message: '开发空间已发生变化，这次读取的代码状态已经过时。',
@@ -1720,6 +1749,7 @@ function validateMcpBeginBody(body) {
 }
 
 function validateMcpHandoffBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_HANDOFF_KEYS, 'handoff');
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
   const textFields = ['nextSessionFocus', 'summary', 'currentState'];
@@ -1794,6 +1824,38 @@ const MCP_RELAY_KEYS = new Set([
   'artifactRefs',
   'risks',
   'suggestedSkills',
+]);
+
+// The finish and handoff cores also accept recovery fields that belong to
+// their internal callers (`commandId`, `status`, `note`, `handoffId`). Those
+// are not part of the published contract, and a model that sets them can pick
+// a terminal assignment state outside the enum or choose a primary key, so the
+// gateway whitelist is what keeps the HTTP surface equal to the tool schema.
+const MCP_FINISH_KEYS = new Set([
+  'sessionId',
+  'clientRequestId',
+  'expectedRevision',
+  'outcome',
+  'summary',
+  'nextStep',
+  'acknowledgements',
+]);
+
+const MCP_HANDOFF_KEYS = new Set([
+  'sessionId',
+  'clientRequestId',
+  'expectedRevision',
+  'outcome',
+  'nextSessionFocus',
+  'summary',
+  'currentState',
+  'completedItems',
+  'pendingItems',
+  'decisions',
+  'artifactRefs',
+  'risks',
+  'suggestedSkills',
+  'acknowledgements',
 ]);
 
 const MCP_RESUME_KEYS = new Set([
@@ -1947,6 +2009,7 @@ function validateMcpContextBody(body) {
 }
 
 function validateMcpFinishBody(body) {
+  rejectUnexpectedMcpFields(body, MCP_FINISH_KEYS, 'finish');
   requireString(body, 'sessionId');
   requireString(body, 'clientRequestId');
   if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 1
@@ -3421,6 +3484,12 @@ export async function createCockpitHttpServer({
       const controlMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/conversation-control(?:\/([^/]+)\/(transfer|cancel))?$/);
       if (controlMatch) {
         const projectId = decodeURIComponent(controlMatch[1]);
+        // This console is the one surface that discloses host and conversation
+        // locators in plain text — the very credentials alpha.52 masks from
+        // non-holders. It belongs to the same-origin browser session that shows
+        // it to the user, not to an Agent connection or the legacy bearer
+        // token, and that has to hold for reads as well as for writes.
+        if (authentication.kind !== 'browser') { sendError(response, 'AUTH_REQUIRED'); return; }
         if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(projectId)) {
           sendError(response, 'PROJECT_NOT_FOUND'); return;
         }
@@ -3445,7 +3514,6 @@ export async function createCockpitHttpServer({
           sendJson(response, 200, { ok: true, chains }); return;
         }
         if (request.method !== 'POST' || !controlMatch[2]) { sendError(response, 'NOT_FOUND'); return; }
-        if (authentication.kind !== 'browser') { sendError(response, 'AUTH_REQUIRED'); return; }
         const sessionId = decodeURIComponent(controlMatch[2]);
         const context = readSessionContext(db, sessionId);
         if (!context.ok || context.projectId !== projectId) { sendError(response, 'NOT_FOUND'); return; }
@@ -3792,6 +3860,63 @@ export async function createCockpitHttpServer({
             },
           });
         }
+        return;
+      }
+
+      // The durable lifecycle fence is readable without a write, so the
+      // workbench can explain what is blocked and offer the escape hatch.
+      const projectLifecycleMatch = url.pathname.match(/^\/api\/v1\/projects\/([^/]+)\/workspace-lifecycle$/);
+      if (request.method === 'GET' && projectLifecycleMatch) {
+        const lifecycleProjectId = decodeURIComponent(projectLifecycleMatch[1]);
+        const lifecycleRepository = resolveFenceRepositoryIdentity(db, lifecycleProjectId);
+        if (!lifecycleRepository) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        sendJson(response, 200, {
+          ok: true,
+          projectId: lifecycleProjectId,
+          fence: describeWorkspaceLifecycleFence(db, lifecycleRepository),
+        });
+        return;
+      }
+      if (request.method === 'POST' && projectLifecycleMatch) {
+        const lifecycleProjectId = decodeURIComponent(projectLifecycleMatch[1]);
+        // Abandoning a safety fence is an explicit user decision: only the
+        // same-origin browser session may do it, never an Agent connection.
+        if (authentication.kind !== 'browser') {
+          sendError(response, 'AUTH_REQUIRED');
+          return;
+        }
+        const body = await readJson(request);
+        requireString(body, 'commandId');
+        requireString(body, 'blockedCommandId');
+        if (Object.keys(body).some((key) => !['commandId', 'blockedCommandId', 'userConfirmed'].includes(key))) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        // Resolved from durable facts rather than the dashboard row, because a
+        // project can be off the list while its fence still blocks the repository.
+        const lifecycleRepository = resolveFenceRepositoryIdentity(db, lifecycleProjectId);
+        if (!lifecycleRepository) {
+          sendError(response, 'PROJECT_NOT_FOUND');
+          return;
+        }
+        const result = abandonWorkspaceLifecycle(db, {
+          commandId: body.commandId,
+          repositoryIdentity: lifecycleRepository,
+          blockedCommandId: body.blockedCommandId,
+          userConfirmed: body.userConfirmed,
+        }, { faultInjector });
+        if (result.ok) sendJson(response, 200, result);
+        else sendError(response, result.code, {
+          commandId: body.commandId,
+          extra: {
+            blocked_command_id: result.blockedCommandId ?? body.blockedCommandId,
+            outcome: result.outcome ?? 'unknown',
+            retryable: result.retryable !== false,
+          },
+        });
         return;
       }
 

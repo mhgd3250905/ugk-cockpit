@@ -438,7 +438,12 @@ Write-Status 'START' 'Starting UGK Cockpit background service...'
 
 $startParams = @{
   FilePath = 'node.exe'
-  ArgumentList = @(('"{0}" --data-directory "{1}"' -f $mainEntry, $DataDirectory))
+  # The port must be handed to the service, not only used for this process's
+  # own readiness polling: without --port the service binds the well-known
+  # 41737, the launcher waits on its requested port, times out and then kills a
+  # service that was answering on a different one. src/main.mjs documents the
+  # launchers as the ones that pass an explicit port; launch-cockpit.sh does.
+  ArgumentList = @(('"{0}" --data-directory "{1}" --port {2}' -f $mainEntry, $DataDirectory, $Port))
   WorkingDirectory = $RepoDirectory
   WindowStyle = 'Hidden'
   RedirectStandardOutput = $stdOutLog
