@@ -15,6 +15,13 @@ import { verifyReviewDelivery } from '../src/core/delivery-review.mjs';
 import { readSubmission } from '../src/core/integrations.mjs';
 import { readProjectContext } from '../src/core/projects.mjs';
 
+// Fixture git must observe the same config contract as the product
+// (safeGitEnvironment strips system/global git config): a runner whose ambient
+// core.autocrlf smudges checkouts leaves phantom modifications that only the
+// product's no-config git can see, which showed up as the delivery change count
+// being one too high. This file was missed by that isolation pass.
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 // POSIX 的系统临时目录（/tmp、/var）本身是符号链接；产品路径授权按契约拒绝
 // 穿越链接的路径，夹具必须建立在真实路径下，否则授权在业务断言前就失败。
