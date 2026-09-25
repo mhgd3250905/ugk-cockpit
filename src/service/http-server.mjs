@@ -346,7 +346,7 @@ const PUBLIC_ERRORS = {
     status: 409,
     message: '释放残留的写入锁需要你明确确认。',
     impact: '原 AI 工作会话没有被结束，代码没有变化。',
-    requiredAction: '请先确认原来的 AI 已经停止，再带确认标记重新执行释放。',
+    requiredAction: '释放请求一经拒绝就会终止归档，请用一个新的操作编号重新发起释放；确认标记要带在这次新请求里。',
   },
   RUN_LEASE_MANAGED_SESSION: {
     status: 409,

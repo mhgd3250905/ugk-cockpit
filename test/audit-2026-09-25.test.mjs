@@ -16,7 +16,8 @@ import {
   resolveFenceRepositoryIdentity,
 } from '../src/core/workspace-lifecycle.mjs';
 import { beginCommand, readCommand } from '../src/core/command-journal.mjs';
-import { startWriteRun } from '../src/core/runs.mjs';
+import { releaseOrphanedWriteRun, startWriteRun } from '../src/core/runs.mjs';
+import { readFileSync } from 'node:fs';
 import { worktreeIdFor } from '../src/core/projects.mjs';
 import {
   createDevelopmentWorkspace,
@@ -107,6 +108,12 @@ const reservationRow = (db, repositoryIdentity) => db.prepare(
 ).get(repositoryIdentity);
 
 const commandRow = (db, commandId) => db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
+
+const RUN_LEASE_CONFIRMATION_REQUIRED_TEXT = (() => {
+  const source = readFileSync(new URL('../src/service/http-server.mjs', import.meta.url), 'utf8');
+  const entry = source.split('RUN_LEASE_CONFIRMATION_REQUIRED: {')[1] ?? '';
+  return entry.split('},')[0];
+})();
 
 const CRASH_POINT = 'workspace.reuse.after_git_before_finalize';
 
@@ -605,4 +612,57 @@ test('the fence description also names lock-only and snake_case journal rows', a
   const snake = describeWorkspaceLifecycleFence(f.db, f.repositoryIdentity);
   assert.equal(snake.source, 'journal');
   assert.deepEqual(snake.pendingCommandIds, ['cmd-snake']);
+});
+
+// The published guidance for the orphaned-lease release used to tell the
+// operator to "run the release again with the confirmation marker". That is not
+// possible: the unconfirmed attempt is terminalized in the journal by design (the
+// refusal must be on record), and the marker is part of the frozen request, so
+// replaying the same command id either returns the cached refusal or fails as
+// COMMAND_CONFLICT. Reproduced: `Command cmd-lease-release was already used with
+// a different request.` The guidance now says to use a new operation id, and this
+// pins the path it describes.
+test('the orphaned write lease release guidance matches real behaviour', async (t) => {
+  const f = await fixture(t);
+  const mainObservation = await probeGitWorktree(f.repoDir);
+  const start = startWriteRun(f.db, {
+    commandId: 'cmd-lease-run',
+    runId: 'session-orphan',
+    worktreeId: f.mainWorktreeId,
+    canonicalPath: mainObservation.canonicalPath,
+    repositoryIdentity: f.repositoryIdentity,
+    worktreeIdentity: mainObservation.worktreeIdentity,
+    agentClaim: 'claim',
+    goal: '留下一个孤儿租约',
+    baseline: {
+      head: mainObservation.after.head, branch: mainObservation.after.branch,
+      indexFingerprint: mainObservation.after.indexFingerprint,
+      worktreeFingerprint: mainObservation.after.worktreeFingerprint,
+      repositoryIdentity: f.repositoryIdentity,
+      worktreeIdentity: mainObservation.worktreeIdentity,
+      coherence: mainObservation.coherence, observedAt: mainObservation.observedAt,
+    },
+  });
+  assert.equal(start.ok, true, JSON.stringify(start));
+
+  const refused = releaseOrphanedWriteRun(f.db, {
+    commandId: 'cmd-lease-refused', runId: 'session-orphan',
+    expectedRevision: 1, leaseGeneration: start.leaseGeneration,
+  });
+  assert.equal(refused.code, 'RUN_LEASE_CONFIRMATION_REQUIRED', JSON.stringify(refused));
+  assert.equal(commandRow(f.db, 'cmd-lease-refused').state, 'failed',
+    'the refusal itself stays on the record, by design');
+
+  // Replaying it with the marker is not the way out; a new operation id is.
+  assert.throws(() => releaseOrphanedWriteRun(f.db, {
+    commandId: 'cmd-lease-refused', runId: 'session-orphan',
+    expectedRevision: 1, leaseGeneration: start.leaseGeneration, userConfirmed: true,
+  }), /already used with a different request/);
+  const released = releaseOrphanedWriteRun(f.db, {
+    commandId: 'cmd-lease-release', runId: 'session-orphan',
+    expectedRevision: 1, leaseGeneration: start.leaseGeneration, userConfirmed: true,
+  });
+  assert.equal(released.ok, true, JSON.stringify(released));
+  assert.equal(RUN_LEASE_CONFIRMATION_REQUIRED_TEXT.includes('新的操作编号'), true,
+    'the message the operator is shown must match the step that actually works');
 });
