@@ -223,12 +223,26 @@ function resolveConfigPath(cwd, value) {
 }
 
 async function attributeFileCandidates(cwd, overrides) {
+  // `-z` is not cosmetic: without it git C-style quotes every path whose name
+  // is not plain ASCII (`core.quotePath` defaults to true), so
+  // `测试/.gitattributes` comes back as `"\346\265\213\350\257\225/.gitattributes"`.
+  // That resolves to a file that does not exist, the read below reports ENOENT,
+  // and the candidate is skipped — a repository can hide a `filter=lfs`
+  // attribute rule behind its own directory names, and the same repository then
+  // fails closed once the directory is renamed to ASCII.
   const listed = await git(
     cwd,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.gitattributes'],
-    gitOptions(overrides),
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.gitattributes'],
+    // `raw` because the default trim would strip a leading space that belongs to
+    // the first path's own name.
+    { ...gitOptions(overrides), raw: true },
   );
-  const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+  // No `.trim()` on these entries: `-z` output is a raw path, so a leading or
+  // trailing space belongs to the name. Trimming `" lead/.gitattributes"` to
+  // `"lead/.gitattributes"` resolves to a file that does not exist, the read
+  // below reports ENOENT, and the candidate is skipped — the same fail-open the
+  // `-z` switch exists to close, measured on a directory named ` lead`.
+  const paths = listed.stdout.split('\0').filter(Boolean)
     .map((value) => path.resolve(cwd, value));
 
   // Git reads info/attributes from the common directory (shared by every linked
@@ -420,12 +434,15 @@ function configScopesSync(cwd, overrides) {
 
 function attributeFileCandidatesSync(cwd, overrides) {
   const options = gitSyncOptions(overrides);
+  // Same `-z` requirement as the asynchronous twin: without it git quotes every
+  // non-ASCII path and the quoted name resolves to a file that does not exist.
   const listed = gitSync(
     cwd,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.gitattributes'],
-    options,
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.gitattributes'],
+    { ...options, raw: true },
   );
-  const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+  // Raw `-z` entries, no trimming — see `attributeFileCandidates`.
+  const paths = listed.stdout.split('\0').filter(Boolean)
     .map((value) => path.resolve(cwd, value));
 
   const common = gitSync(cwd, ['rev-parse', '--git-common-dir'], options);

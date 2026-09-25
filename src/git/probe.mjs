@@ -98,6 +98,10 @@ export async function git(cwd, args, {
   maxBuffer = 4 * 1024 * 1024,
   acceptExitCodes = [0],
   config = [],
+  // `-z` 记录里的路径是原样字节：首/尾空格属于文件名本身，而 trim() 会把
+  // `" lead/.gitattributes"` 的首空格吃掉，让调用方解析到一个不存在的路径。
+  // 需要逐字节输出（分隔符记录、路径列表）的调用显式要求 raw。
+  raw = false,
 } = {}) {
   const configArgs = Array.isArray(config)
     ? config
@@ -112,10 +116,10 @@ export async function git(cwd, args, {
       encoding: 'utf8',
       env: safeGitEnvironment(),
     });
-    return { exitCode: 0, stdout: result.stdout.trim() };
+    return { exitCode: 0, stdout: raw ? result.stdout : result.stdout.trim() };
   } catch (error) {
     if (acceptExitCodes.includes(error?.code)) {
-      return { exitCode: error.code, stdout: (error.stdout ?? '').trim() };
+      return { exitCode: error.code, stdout: raw ? (error.stdout ?? '') : (error.stdout ?? '').trim() };
     }
     if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
       const bufErr = new Error('Git command output exceeded maximum safe buffer size');
@@ -137,6 +141,8 @@ export function gitSync(cwd, args, {
   timeoutMs = 5_000,
   maxBuffer = 4 * 1024 * 1024,
   acceptExitCodes = [0],
+  // Same meaning as in `git()`: keep every byte of `-z` records.
+  raw = false,
 } = {}) {
   try {
     const stdout = execFileSync('git', [...SAFE_GIT_PREFIX, ...args], {
@@ -148,13 +154,14 @@ export function gitSync(cwd, args, {
       encoding: 'utf8',
       env: safeGitEnvironment(),
     });
-    return { exitCode: 0, stdout: stdout.trim() };
+    return { exitCode: 0, stdout: raw ? stdout : stdout.trim() };
   } catch (error) {
     // execFileSync reports a non-zero exit through error.status; error.code
     // only carries spawn failures (ENOENT and friends).
     const exitCode = typeof error?.status === 'number' ? error.status : error?.code;
     if (acceptExitCodes.includes(exitCode)) {
-      return { exitCode, stdout: (error.stdout ?? '').toString().trim() };
+      const bytes = (error.stdout ?? '').toString();
+      return { exitCode, stdout: raw ? bytes : bytes.trim() };
     }
     throw error;
   }
