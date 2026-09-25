@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { git, GIT_OBJECT_ID_PATTERN } from './probe.mjs';
-import { assertSafePushTarget, DELIVERY_CONFIG_ERROR_CODES, mirrorResetArguments } from './delivery-ops.mjs';
+import { assertSafePushTarget, checkUnfinishedGitOperations, DELIVERY_CONFIG_ERROR_CODES, mirrorResetArguments } from './delivery-ops.mjs';
 import { findHostileRepositoryConfiguration, repositoryConfigurationError } from './repository-policy.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -36,6 +36,11 @@ export async function hasUncommittedChanges(worktreePath, overrides = {}) {
 }
 
 export async function rejectUnsupportedSubmitFeatures(worktreePath, overrides = {}) {
+  // The same unfinished-operation definition the delivery preflight uses: an
+  // unresolved conflict lives in the index as stage 1/2/3 entries and may leave
+  // no marker file behind, and the `git add --all` below would resolve it by
+  // staging the conflict markers.
+  await checkUnfinishedGitOperations(worktreePath);
   const [stagedEntries, hostile] = await Promise.all([
     git(worktreePath, ['ls-files', '--stage'], options(overrides)),
     findHostileRepositoryConfiguration(worktreePath, overrides),

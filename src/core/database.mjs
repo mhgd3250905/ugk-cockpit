@@ -1170,6 +1170,42 @@ function migrateDatabase(db) {
 // 而不是把整个服务停住等锁。不要为了减少报错而调大这个值。
 export const BUSY_TIMEOUT_MS = 150;
 
+// A folder grant records an absolute path, its canonical path and the principal
+// that accepted it. The picker mints a fresh row for every accepted folder and
+// nothing ever reads a spent one back, so the table only ever grew — on a
+// machine where the operator picks a folder many times a day, that is a
+// permanent, unbounded register of decisions whose privacy value outlives their
+// operational use. Spent and lapsed rows are therefore deleted once they are far
+// beyond any replay window. `claimed` rows are kept: a crashed attempt must stay
+// retryable with its original command id (see src/core/folder-grants.mjs).
+export const FOLDER_GRANT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+export function pruneSpentFolderGrants(db, nowMillis = Date.now()) {
+  const expiredCutoff = nowMillis - FOLDER_GRANT_RETENTION_MS;
+  const cutoffIso = new Date(expiredCutoff).toISOString();
+  let removed = 0;
+  // Guarded per table, and the statement is only prepared once the table is
+  // there (preparing a `DELETE` against a missing table is itself an error): the
+  // grant tables arrive in migration 6, so a hand-built or partially migrated
+  // database may not have them, and a hygiene sweep must never be the reason a
+  // service cannot open its data directory. This round's own first full-suite run
+  // proved it by breaking the phase-0 migration fixtures.
+  const exists = (name) => db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(name);
+  const sql = (table) => `
+    DELETE FROM ${table}
+    WHERE (state = 'consumed' AND created_at <= ?)
+       OR (state = 'active' AND expires_at <= ?)`;
+  if (exists('folder_grants')) {
+    removed += db.prepare(sql('folder_grants')).run(cutoffIso, expiredCutoff).changes;
+  }
+  if (exists('empty_folder_grants')) {
+    removed += db.prepare(sql('empty_folder_grants')).run(cutoffIso, expiredCutoff).changes;
+  }
+  return removed;
+}
+
 export function openCockpitDatabase(filePath, { migrate = true } = {}) {
   mkdirSync(dirname(filePath), { recursive: true });
   const db = new DatabaseSync(filePath, {
@@ -1188,6 +1224,7 @@ export function openCockpitDatabase(filePath, { migrate = true } = {}) {
     db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     if (migrate) {
       migrateDatabase(db);
+      pruneSpentFolderGrants(db);
     }
     return db;
   } catch (error) {

@@ -16,12 +16,57 @@ import {
 import path from 'node:path';
 
 const protocol = 'ugk-cockpit-delivery-index-lock-v1';
-const locked = () => Object.assign(new Error('The Git index is locked by another or unverified owner.'), { code: 'DELIVERY_INDEX_LOCKED' });
+// `ownerState` distinguishes why a lock was refused, because the operator's
+// next step differs completely: waiting is right for a live holder, while an
+// unattributable lock never resolves on its own and a leaked lock of our own can
+// be reclaimed the moment it is readable again. The code stays one code so the
+// existing delivery contracts keep their meaning.
+const refused = (message, ownerState) => Object.assign(
+  new Error(message),
+  { code: 'DELIVERY_INDEX_LOCKED', details: { ownerState } },
+);
+const locked = () => refused('The Git index is locked by another or unverified owner.', 'live-holder');
+// A lock that carries no readable owner record cannot be shown to belong to a
+// running process, but it cannot be shown to belong to a finished one either, so
+// it stays in place: this is git's own `index.lock` namespace and a live `git`
+// write puts an empty file there too. Refusing is right; reporting it as
+// "another operation is running" is not, because that never resolves by waiting.
+const unattributedLock = () => refused(
+  'The Git index lock carries no readable owner record.',
+  'unattributed',
+);
+// Our own record, still byte-identical, that the filesystem refused to delete.
+// Nobody else can reproduce those bytes, so this one is ours to reclaim.
+const stuckOwnLock = () => refused(
+  'The Git index lock this process published could not be deleted.',
+  'own-lock-stuck',
+);
 const identity = (stat) => `${stat.dev}:${stat.ino}`;
 // Link errors that mean "this filesystem cannot hard link", as opposed to the
 // EEXIST that means somebody else already published the lock.
 const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EACCES', 'EXDEV', 'EINVAL', 'EOPNOTSUPP']);
 const TEMP_SWEEP_AFTER_MS = 10 * 60 * 1000;
+// Locks whose release this process could not complete, keyed by path. Bounded so
+// a long-lived service cannot accumulate them; each entry is a path and the
+// exact bytes we published.
+const leakedOwnLocks = new Map();
+const LEAKED_OWN_LOCK_LIMIT = 64;
+
+function recordLeakedOwnLock(lock) {
+  // Delete first so re-recording moves the path to the back of the eviction
+  // order: a path that keeps leaking must not sit at the front and be the first
+  // entry dropped.
+  leakedOwnLocks.delete(lock.lockPath);
+  if (leakedOwnLocks.size >= LEAKED_OWN_LOCK_LIMIT) {
+    const oldest = leakedOwnLocks.keys().next();
+    if (!oldest.done) leakedOwnLocks.delete(oldest.value);
+  }
+  leakedOwnLocks.set(lock.lockPath, { fileIdentity: lock.fileIdentity, bytes: lock.bytes });
+}
+
+function forgetLeakedOwnLock(lockPath) {
+  leakedOwnLocks.delete(lockPath);
+}
 
 function sameFile(lockPath, fileIdentity, bytes) {
   try {
@@ -35,30 +80,76 @@ function reclaimExitedOwner(lockPath) {
   let fd;
   try {
     const stat = lstatSync(lockPath, { bigint: true });
-    if (!stat.isFile() || stat.size > 4096n) return false;
+    if (!stat.isFile() || stat.size > 4096n) return 'unattributed';
     fd = openSync(lockPath, 'r');
     const fileIdentity = identity(fstatSync(fd, { bigint: true }));
     const bytes = readFileSync(fd, 'utf8');
-    const owner = JSON.parse(bytes);
+    let owner;
+    try { owner = JSON.parse(bytes); } catch { return 'unattributed'; }
     if (owner.protocol !== protocol || typeof owner.commandId !== 'string' || !owner.commandId || owner.lockPath !== lockPath
       || owner.fileIdentity !== fileIdentity || typeof owner.owner !== 'string'
-      || !/^[a-f0-9-]{36}$/.test(owner.owner) || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return false;
-    try { process.kill(owner.pid, 0); return false; }
-    catch (error) { if (error.code !== 'ESRCH') return false; }
+      || !/^[a-f0-9-]{36}$/.test(owner.owner) || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return 'unattributed';
+    try { process.kill(owner.pid, 0); return 'held'; }
+    catch (error) { if (error.code !== 'ESRCH') return 'held'; }
     // A reused PID, an inaccessible process, or a replaced lock never proves an exited owner.
     // The delivery service holds its repository lock throughout this operation.
-    if (!sameFile(lockPath, fileIdentity, bytes)) return false;
+    if (!sameFile(lockPath, fileIdentity, bytes)) return 'held';
     closeSync(fd);
     fd = undefined;
-    if (!sameFile(lockPath, fileIdentity, bytes)) return false;
+    if (!sameFile(lockPath, fileIdentity, bytes)) return 'held';
     unlinkSync(lockPath);
-    return true;
-  } catch { return false; }
+    return 'reclaimed';
+  } catch (error) {
+    // The name disappeared under us: nothing is being protected any more, so the
+    // caller may publish.
+    if (error?.code === 'ENOENT') return 'reclaimed';
+    // A record this platform cannot read is *not* proof that nobody owns it.
+    // EBUSY/EPERM here usually means exactly the security software that caused
+    // the leak in the first place, and telling the operator to handle the lock
+    // themselves would invite deleting a live git index.lock. Stay conservative.
+    return 'held';
+  }
   finally { if (fd !== undefined) closeSync(fd); }
 }
 
 function ownerPayload(lockPath, fileIdentity, commandId) {
   return JSON.stringify({ protocol, owner: randomUUID(), pid: process.pid, commandId, lockPath, fileIdentity });
+}
+
+// One place decides what to do with a lock name that is already taken. Returns
+// true when the name is free for the caller to publish; otherwise it refuses
+// with the reason the operator can act on.
+function reclaimContendedLock(lockPath, unlink = unlinkSync) {
+  const leak = leakedOwnLocks.get(lockPath);
+  if (leak) {
+    // The owner record is a random UUID this process generated, so a
+    // byte-identical file with the same device/inode can only be our own leak.
+    // Reclaiming it is not a guess about somebody else's operation.
+    if (!sameFile(lockPath, leak.fileIdentity, leak.bytes)) {
+      forgetLeakedOwnLock(lockPath);
+    } else {
+      // Re-read immediately before deleting, as `reclaimExitedOwner` does: the
+      // window between the two reads is where a foreign lock could otherwise be
+      // mistaken for ours after a delete-and-recreate.
+      if (!sameFile(lockPath, leak.fileIdentity, leak.bytes)) {
+        forgetLeakedOwnLock(lockPath);
+      } else {
+        try {
+          unlink(lockPath);
+        } catch {
+          // Still held (security software or an indexer on Windows). Say so: the
+          // alternative reads as "wait for an operation that already finished".
+          throw stuckOwnLock();
+        }
+        forgetLeakedOwnLock(lockPath);
+        return true;
+      }
+    }
+  }
+  const outcome = reclaimExitedOwner(lockPath);
+  if (outcome === 'reclaimed') return true;
+  if (outcome === 'unattributed') throw unattributedLock();
+  throw locked();
 }
 
 // A private name is written and fsynced first, then hard-linked into place, so
@@ -96,12 +187,18 @@ function publishAtomically(lockPath, commandId, faultInjector) {
 }
 
 // Filesystems without hard links (FAT/exFAT) keep the previous in-place create.
-function acquireInPlace(lockPath, commandId, faultInjector) {
+// Exclusive creation is what makes two publishers choose one winner, and rename
+// cannot replace it here without silently overwriting a lock a live `git` put in
+// git's own namespace a moment earlier. That leaves the create-then-fill window
+// this helper cannot close: a process killed inside it strands a lock no owner
+// record can be read from, which stays unattributable by design and is now
+// reported as such instead of as contention to wait out.
+function acquireInPlace(lockPath, commandId, faultInjector, unlink) {
   let fd;
   try { fd = openSync(lockPath, 'wx'); }
   catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    if (!reclaimExitedOwner(lockPath)) throw locked();
+    reclaimContendedLock(lockPath, unlink);
     try { fd = openSync(lockPath, 'wx'); }
     catch (retryError) { if (retryError.code === 'EEXIST') throw locked(); throw retryError; }
   }
@@ -142,7 +239,10 @@ function sweepStaleLockTemps(lockPath) {
   }
 }
 
-export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector } = {}) {
+// `unlink` is a test seam, matching `releaseDeliveryIndexLock`: the only way to
+// exercise "the filesystem still refuses to delete our own leaked lock" without
+// holding a handle from another process.
+export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector, unlink = unlinkSync } = {}) {
   const lockPath = `${indexPath}.lock`;
   sweepStaleLockTemps(lockPath);
   // A reclaim is allowed once, so a successful reclaim is never answered as a
@@ -158,7 +258,8 @@ export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector }
       published = publishAtomically(lockPath, commandId, faultInjector);
     } catch (error) {
       if (error.code === 'EEXIST') {
-        if (reclaimed || !reclaimExitedOwner(lockPath)) throw locked();
+        if (reclaimed) throw locked();
+        reclaimContendedLock(lockPath, unlink);
         reclaimed = true;
         continue;
       }
@@ -172,7 +273,7 @@ export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector }
         retriedPublish = true;
         continue;
       }
-      if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId, faultInjector);
+      if (LINK_UNSUPPORTED.has(error.code)) return acquireInPlace(lockPath, commandId, faultInjector, unlink);
       throw error;
     }
     // Keep a descriptor on the lock for the operation, as the in-place path does.
@@ -184,20 +285,29 @@ export function acquireDeliveryIndexLock(indexPath, commandId, { faultInjector }
 }
 
 
-export function releaseDeliveryIndexLock(lock) {
+export function releaseDeliveryIndexLock(lock, { unlink = unlinkSync } = {}) {
   // Best effort: the caller's finally already holds the real outcome, and a
   // release error must not mask a saved commit (or its local_saved state).
   // A few immediate retries cover the shortest Windows transient refusals
-  // (AV / indexer); if the unlink still fails, the leaked lock is reclaimed
-  // once the owning service process is gone — the pid liveness check in
-  // reclaimExitedOwner stays the durable recovery path.
+  // (AV / indexer). What must never happen is the caller being the only one who
+  // knows: the failed release is recorded so the next acquire in this process
+  // can reclaim its own bytes (see `reclaimContendedLock`), and a release that
+  // keeps failing is reported as our own stuck lock rather than as somebody
+  // else's operation to wait for. A lock this process did not publish stays
+  // untouched either way.
   try { closeSync(lock.fd); } catch {}
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (!sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) return true;
-    try {
-      unlinkSync(lock.lockPath);
+    if (!sameFile(lock.lockPath, lock.fileIdentity, lock.bytes)) {
+      forgetLeakedOwnLock(lock.lockPath);
       return true;
-    } catch {}
+    }
+    try {
+      unlink(lock.lockPath);
+      forgetLeakedOwnLock(lock.lockPath);
+      return true;
+    } catch {
+      recordLeakedOwnLock(lock);
+    }
   }
   return false;
 }

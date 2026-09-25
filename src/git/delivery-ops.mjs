@@ -482,6 +482,32 @@ export async function checkUnfinishedGitOperations(cwd) {
       throw error;
     }
   }
+  // A marker file is only how git *records* an operation in progress; the
+  // unresolved conflict itself lives in the index as stage 1/2/3 entries, and
+  // several ordinary flows leave those without any marker at all — `git stash
+  // pop` over a moved branch and `git checkout -m` both do. Delivering such a
+  // worktree hashes the `<<<<<<<` markers into the candidate commit, and the
+  // save then rewrites those index entries to stage 0, so the user loses the
+  // conflict state while the marker text stays in history.
+  const unmerged = await runGit(cwd, ['ls-files', '--unmerged', '-z'], { raw: true });
+  const conflictedPaths = [];
+  for (const entry of unmerged.stdout.split('\0')) {
+    const tab = entry.indexOf('\t');
+    if (tab === -1) continue;
+    const stage = Number(entry.slice(entry.lastIndexOf(' ', tab), tab));
+    if (stage >= 1 && stage <= 3) {
+      const conflicted = entry.slice(tab + 1).replace(/\\/g, '/');
+      if (!conflictedPaths.includes(conflicted)) conflictedPaths.push(conflicted);
+    }
+  }
+  if (conflictedPaths.length) {
+    const shown = conflictedPaths.slice(0, 5).join(', ');
+    const error = new Error(`Unresolved merge conflict in ${conflictedPaths.length} path(s): ${shown}`
+      + `${conflictedPaths.length > 5 ? ', …' : ''}. Resolve it before delivery.`);
+    error.code = 'UNFINISHED_GIT_OPERATION';
+    error.details = { conflictedPaths };
+    throw error;
+  }
 }
 
 export async function checkUnsupportedFeatures(cwd) {

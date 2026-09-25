@@ -14,10 +14,11 @@ const EMPTY_BUFFER = Buffer.alloc(0);
 const LINE_SEPARATOR_BYTES = Buffer.from('\\u2028', 'utf8');
 const PARAGRAPH_SEPARATOR_BYTES = Buffer.from('\\u2029', 'utf8');
 
-// Rewrites raw U+2028/U+2029 into their JSON escape text. On the way in this
-// keeps readline's LF-only framing intact; on the way out it keeps one response
-// in one line. Both are semantics-preserving for valid JSON, because these two
-// characters may only ever appear inside a string there.
+// Rewrites raw U+2028/U+2029 into their JSON escape text. Both characters are
+// line terminators for readline as well as string content for JSON, so an
+// unescaped one would split one request into two unparsable fragments (and one
+// response into two). Escaping keeps framing to the newline family while the
+// parsed value stays identical.
 function escapeWireSeparators(input) {
   const parts = [];
   let last = 0;
@@ -32,6 +33,17 @@ function escapeWireSeparators(input) {
   if (parts.length === 0) return input;
   parts.push(input.subarray(last));
   return Buffer.concat(parts);
+}
+
+// Index of the next byte readline would end a line on, or -1. readline splits on
+// `\r`, `\n` and (with crlfDelay: Infinity) `\r\n`; the payload-size guard has to
+// agree with it or its idea of "one line" is wider than the framing itself.
+function nextLineTerminator(bytes, from) {
+  const newline = bytes.indexOf(0x0a, from);
+  const carriage = bytes.indexOf(0x0d, from);
+  if (newline === -1) return carriage;
+  if (carriage === -1) return newline;
+  return Math.min(newline, carriage);
 }
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
@@ -1494,7 +1506,13 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
       let overLimit = false;
       let from = 0;
       for (;;) {
-        const newline = bytes.indexOf(0x0a, from);
+        // readline terminates a line on `\r`, `\n` or `\r\n` (crlfDelay:
+        // Infinity folds the pair), so the guard has to recognise the same set.
+        // Counting only `\n` made the accumulation cumulative instead of
+        // per-line for a `\r`-framed host: 20 MiB of 10 KiB messages (measured)
+        // tripped the limit and closed a bridge that had never seen one message
+        // over it, while the identical byte stream with `\n` framing passed.
+        const newline = nextLineTerminator(bytes, from);
         if (newline === -1) break;
         const lineBytes = pendingLineBytes + (newline - from) + 1;
         pendingLineBytes = 0;
@@ -1636,18 +1654,21 @@ export function createMcpServer({ stdin, stdout, stderr, handlers = {}, onShutdo
     }
   };
 
-  let queue = Promise.resolve();
-
+  // Each line is dispatched on its own. JSON-RPC correlates by id, so responses
+  // may complete out of order, and `writeResponse` emits exactly one write per
+  // response, so frames cannot interleave. Chaining every line behind the
+  // previous handler instead put the host's keepalive `ping` behind whatever the
+  // session was doing: a tool call that reaches the service timeout (30s in
+  // `service-client.mjs`) made the bridge silent on every other request for that
+  // long, which is how a healthy host ends up declaring a live server dead.
   rl.on('line', (line) => {
-    queue = queue
-      .then(() => handleLine(line))
-      .catch((err) => {
-        if (errStream?.write) {
-          try {
-            errStream.write(`[ugk-mcp] Unhandled error: ${err?.message || err}\n`);
-          } catch {}
-        }
-      });
+    Promise.resolve().then(() => handleLine(line)).catch((err) => {
+      if (errStream?.write) {
+        try {
+          errStream.write(`[ugk-mcp] Unhandled error: ${err?.message || err}\n`);
+        } catch {}
+      }
+    });
   });
 
   return {
