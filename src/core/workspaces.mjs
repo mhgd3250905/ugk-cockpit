@@ -28,6 +28,7 @@ import {
   reserveWorkspaceLifecycle,
 } from './workspace-lifecycle.mjs';
 import { EmptyFolderGrantStore } from './folder-grants.mjs';
+import { singleFlight } from './single-flight.mjs';
 import {
   revalidateEmptyDirectory,
 } from './path-guard.mjs';
@@ -225,7 +226,20 @@ function registerAndCompleteWorkspace({
   });
 }
 
-export async function createDevelopmentWorkspace(db, request = {}, options = {}) {
+// A client that lost the response retries with the identical request id, so two
+// in-flight drivers for one `workspace.create` are a supported outcome. Without
+// the gate both drivers run the body: the repository lock names the command as
+// its holder, so the second one *renews* the lock instead of being denied, two
+// `git worktree add` calls run against the same repository at once, and the
+// first driver to finish deletes the lock row the second is still relying on —
+// after which any other operation can take the repository mid-creation. This is
+// the same gate `prepareDelivery`, `submitDelivery` and `mergeApprovedSubmission`
+// already use for the same reason.
+export function createDevelopmentWorkspace(db, request = {}, options = {}) {
+  return singleFlight(db, request, () => createDevelopmentWorkspaceOnce(db, request, options));
+}
+
+async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
   const projectId = request.projectId;
   const expectedBaseHead = request.expectedBaseHead ?? request.expected_base_head;
   const commandId = request.commandId;
