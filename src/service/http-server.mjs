@@ -2498,6 +2498,12 @@ function authenticate(request, apiToken, browserToken, mcpSessions) {
     const candidate = bearer.slice(7);
     const session = mcpSessions.get(candidate);
     if (session && session.expiresAt > Date.now()) {
+      // Re-insert to move this session to the most-recently-used end: eviction
+      // takes the front of the map, so without this the eviction is by age, and
+      // a busy host that mints repeatedly pushes out the long-lived session of
+      // an agent that is mid-task and never mints again.
+      mcpSessions.delete(candidate);
+      mcpSessions.set(candidate, session);
       return {
         kind: 'mcp',
         // Keep the bearer-derived principal for existing folder/grant callers.
