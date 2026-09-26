@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { migrateLegacyFileIdentities } from './identity-migration.mjs';
 
-export const SUPPORTED_SCHEMA_VERSION = 30;
+export const SUPPORTED_SCHEMA_VERSION = 31;
 
 const BOOTSTRAP = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1130,6 +1130,30 @@ END;
       migrateLegacyFileIdentities(db);
     },
   },
+  {
+    version: 31,
+    name: 'identity-rewrite-ledger',
+    sql: `
+-- 第 29 轮审计：v30 的旧指纹改写是「按行收敛」的工作，不是一次性 schema 变更。
+-- 一行可能因为盘符暂时离线、共享断连、git 尚未可用或事后被清除的敌意配置而当场
+-- 判不了；盖章 30 之后它就永久留在旧格式，只能靠人工确认位置。台账按行记录
+-- 「还没判定成功」（retry，后续开库重试）与「已经判定过」（settled，不再重复
+-- stat/git 探测），使改写真正可重复执行直至收敛。
+-- IF NOT EXISTS：与 v20/v25/v27 同理，台账表可能来自一次未盖章的升级；重跑
+-- 迁移不得因此把开库卡死。
+CREATE TABLE IF NOT EXISTS identity_migration_state (
+  canonical_path TEXT PRIMARY KEY,
+  repository_identity TEXT NOT NULL,
+  identity_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('retry', 'settled')),
+  reason TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_failed_at TEXT,
+  last_attempt_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_identity_migration_status ON identity_migration_state(status, canonical_path);
+`,
+  },
 ];
 
 function schemaVersion(db) {
@@ -1188,6 +1212,10 @@ export function openCockpitDatabase(filePath, { migrate = true } = {}) {
     db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     if (migrate) {
       migrateDatabase(db);
+      // 指纹改写按行收敛：每次开库补完上一次判不了的行（仍在 pre-listen 阶段，
+      // 此时还没有事件循环可以被同步 git 探测拖住）。判定成功的行会进台账，
+      // 后续开库直接跳过，所以常驻成本只是每行一次 stat。
+      withImmediateTransaction(db, () => migrateLegacyFileIdentities(db));
     }
     return db;
   } catch (error) {
