@@ -3548,7 +3548,7 @@ export async function createCockpitHttpServer({
           ...result, expiresAt: new Date(result.expiresAt).toISOString(),
           continueMessage: [
             `请在目标项目的聊天中使用工作台授权接手，调用 ugk_work_takeover，参数为 sessionId: "${sessionId}"、transferCode: "${result.transferCode}"，并生成新的 clientRequestId。`,
-            ...workspaceHintLines(readProjectContext(db, context.projectId)?.canonical_path ?? null),
+            ...workspaceHintLines(context.canonicalPath ?? null),
             '不要重新 init，不清理或覆盖代码。成功后先查询 ugk_work_context({})，报告平台返回的会话 ID、revision 和 canContinue，等待用户安排。',
           ].join('\n'),
         } : result);
@@ -4706,7 +4706,7 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
-        const expectedPathHint = readProjectContext(db, context.projectId)?.canonical_path ?? null;
+        const expectedPathHint = context.canonicalPath ?? null;
         const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         if (working.project.id !== context.projectId
           || working.worktreeId !== context.worktreeId) {
@@ -4861,7 +4861,7 @@ export async function createCockpitHttpServer({
         }
         const sessionHintContext = readSessionContext(db, body.sessionId);
         const expectedPathHint = sessionHintContext?.ok
-          ? readProjectContext(db, sessionHintContext.projectId)?.canonical_path ?? null
+          ? sessionHintContext.canonicalPath ?? null
           : null;
         const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         const context = readSessionContext(db, body.sessionId);
