@@ -35,6 +35,12 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'protocol.ftps.allow=never',
   '-c', 'core.sshCommand=ssh',
   '-c', 'ssh.variant=ssh',
+  // `status.showUntrackedFiles` is only how git renders `status`, but the
+  // product reads that output as a completeness decision, and git's own
+  // `worktree remove` safety check consults it too (measured: with `no`,
+  // removing a worktree deletes an untracked file that git would otherwise
+  // have refused to touch). Pin the default so no repository can weaken either.
+  '-c', 'status.showUntrackedFiles=normal',
   '-c', 'filter.lfs.clean=',
   '-c', 'filter.lfs.smudge=',
   '-c', 'filter.lfs.process=',
