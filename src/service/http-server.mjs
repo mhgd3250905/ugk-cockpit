@@ -2356,7 +2356,17 @@ function legacyBridgeBindingMatches(state, binding) {
     && current.acceptedRevision === bound.acceptedRevision;
 }
 
-async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
+export async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
+  // Refuse on the *declared* size before reading a byte: the MCP routes admit
+  // 18 MiB bodies, and buffering first then rejecting meant N concurrent
+  // sockets cost N x 18 MiB of service memory (measured: 24 sockets grew the
+  // process from 76 MB to 301 MB) for requests that were always going to fail.
+  const declared = Number(request?.headers?.['content-length']);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    const error = new Error('Request body is too large.');
+    error.code = 'REQUEST_TOO_LARGE';
+    throw error;
+  }
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
