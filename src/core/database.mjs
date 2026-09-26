@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { migrateLegacyFileIdentities } from './identity-migration.mjs';
+import { migrateLegacyFileIdentities, identityRewriteOwed } from './identity-migration.mjs';
 
 export const SUPPORTED_SCHEMA_VERSION = 31;
 
@@ -1134,18 +1134,18 @@ END;
     version: 31,
     name: 'identity-rewrite-ledger',
     sql: `
--- 第 29 轮审计：v30 的旧指纹改写是「按行收敛」的工作，不是一次性 schema 变更。
--- 一行可能因为盘符暂时离线、共享断连、git 尚未可用或事后被清除的敌意配置而当场
--- 判不了；盖章 30 之后它就永久留在旧格式，只能靠人工确认位置。台账按行记录
--- 「还没判定成功」（retry，后续开库重试）与「已经判定过」（settled，不再重复
--- stat/git 探测），使改写真正可重复执行直至收敛。
+-- 第 29 轮审计：v30 的旧指纹改写是「按行」工作，不是一次性 schema 变更。一行可能
+-- 因为盘符暂时离线、共享断连、git 尚未可用或事后被清除的敌意配置而当场判不了；盖章
+-- 30 之后它就永久留在旧格式，只能靠人工确认位置。台账按行记录「仍欠工作」（owed：
+-- 真实尝试失败，或因预算不足被跳过）与「已判定」（settled，之后不再 stat/git 探测），
+-- 使改写真正可重复执行直至收敛。
 -- IF NOT EXISTS：与 v20/v25/v27 同理，台账表可能来自一次未盖章的升级；重跑
 -- 迁移不得因此把开库卡死。
 CREATE TABLE IF NOT EXISTS identity_migration_state (
   canonical_path TEXT PRIMARY KEY,
   repository_identity TEXT NOT NULL,
   identity_fingerprint TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('retry', 'settled')),
+  status TEXT NOT NULL CHECK (status IN ('owed', 'settled')),
   reason TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   first_failed_at TEXT,
@@ -1212,10 +1212,20 @@ export function openCockpitDatabase(filePath, { migrate = true } = {}) {
     db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     if (migrate) {
       migrateDatabase(db);
-      // 指纹改写按行收敛：每次开库补完上一次判不了的行（仍在 pre-listen 阶段，
-      // 此时还没有事件循环可以被同步 git 探测拖住）。判定成功的行会进台账，
-      // 后续开库直接跳过，所以常驻成本只是每行一次 stat。
-      withImmediateTransaction(db, () => migrateLegacyFileIdentities(db));
+      // 指纹改写按行收敛：只在台账显示仍欠工作时补完上次判不了的行（仍在
+      // pre-listen 阶段，此时没有事件循环会被同步 git 探测拖住）。全部 settled
+      // 时完全不进事务——可选的收敛不得为了「没有的事」去抢写锁：busy_timeout
+      // 只有 150ms，抢不到就是启动失败。
+      try {
+        if (identityRewriteOwed(db)) {
+          withImmediateTransaction(db, () => migrateLegacyFileIdentities(db, { persistFailures: true }));
+        }
+      } catch (error) {
+        // 一次收敛失败（包括台账本身不可读）绝不能让服务起不来：行保持旧格式
+        // （fail-closed），confirm-location 仍是出路，下一次开库继续重试。写
+        // stderr 是因为此刻还没有诊断日志器，静默吞掉会变成新的谎。
+        process.stderr.write(`UGK Cockpit identity reconcile deferred: ${error?.code ?? error?.message}\n`);
+      }
     }
     return db;
   } catch (error) {

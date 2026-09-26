@@ -125,13 +125,16 @@ function reasonCode(error) {
   return code.slice(0, 64);
 }
 
-function upsertLedger(db, row, status, reason) {
-  const timestamp = new Date().toISOString();
+function readLedgerRow(db, canonicalPath) {
+  return db.prepare(`
+    SELECT attempts, reason, first_failed_at FROM ${IDENTITY_LEDGER_TABLE} WHERE canonical_path = ?
+  `).get(canonicalPath);
+}
+
+function writeLedgerRow(db, existing, row, { status, reason, attempts, firstFailedAt }) {
   const identity = row.identityFingerprint ?? row.identity_fingerprint ?? '';
   const repository = row.repositoryIdentity ?? row.repository_identity ?? '';
-  const existing = db.prepare(`
-    SELECT first_failed_at FROM ${IDENTITY_LEDGER_TABLE} WHERE canonical_path = ?
-  `).get(row.canonical_path);
+  const timestamp = new Date().toISOString();
   if (!existing) {
     db.prepare(`
       INSERT INTO ${IDENTITY_LEDGER_TABLE} (
@@ -140,21 +143,54 @@ function upsertLedger(db, row, status, reason) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.canonical_path, repository, identity, status, reason,
-      status === 'retry' ? 1 : 0, status === 'retry' ? timestamp : null, timestamp,
+      attempts, firstFailedAt, timestamp,
     );
     return;
   }
   db.prepare(`
     UPDATE ${IDENTITY_LEDGER_TABLE}
     SET repository_identity = ?, identity_fingerprint = ?, status = ?, reason = ?,
-        attempts = attempts + ?, first_failed_at = ?, last_attempt_at = ?
+        attempts = ?, first_failed_at = ?, last_attempt_at = ?
     WHERE canonical_path = ?
   `).run(
-    repository, identity, status, reason,
-    status === 'retry' ? 1 : 0,
-    status === 'retry' ? (existing.first_failed_at ?? timestamp) : null,
-    timestamp, row.canonical_path,
+    repository, identity, status, reason, attempts, firstFailedAt, timestamp, row.canonical_path,
   );
+}
+
+/**
+ * A row still owed identity work: it either failed a real attempt (reason and
+ * attempt count) or was skipped because this open ran out of budget. Both stay
+ * visible, because an open that judged nothing is exactly the "drive offline /
+ * share dropped" shape -- reporting convergence there would be the same class
+ * of lie this ledger exists to remove.
+ */
+function markOwed(db, row, error) {
+  const existing = readLedgerRow(db, row.canonical_path);
+  if (error) {
+    writeLedgerRow(db, existing, row, {
+      status: 'owed',
+      reason: reasonCode(error),
+      attempts: (existing?.attempts ?? 0) + 1,
+      firstFailedAt: existing?.first_failed_at ?? new Date().toISOString(),
+    });
+    return;
+  }
+  writeLedgerRow(db, existing, row, {
+    status: 'owed',
+    reason: existing?.reason ?? 'deferred',
+    attempts: existing?.attempts ?? 0,
+    firstFailedAt: existing?.first_failed_at ?? null,
+  });
+}
+
+function markSettled(db, row) {
+  const existing = readLedgerRow(db, row.canonical_path);
+  writeLedgerRow(db, existing, row, {
+    status: 'settled',
+    reason: null,
+    attempts: existing?.attempts ?? 0,
+    firstFailedAt: null,
+  });
 }
 
 /**
@@ -165,8 +201,8 @@ export function identityMigrationBacklog(db) {
   if (!hasLedger(db)) return [];
   return db.prepare(`
     SELECT canonical_path, reason, attempts, first_failed_at, last_attempt_at
-    FROM ${IDENTITY_LEDGER_TABLE} WHERE status = 'retry'
-    ORDER BY first_failed_at ASC, canonical_path ASC
+    FROM ${IDENTITY_LEDGER_TABLE} WHERE status = 'owed'
+    ORDER BY (first_failed_at IS NULL), first_failed_at ASC, canonical_path ASC
   `).all().map((row) => ({
     canonicalPath: row.canonical_path,
     reason: row.reason,
@@ -176,7 +212,39 @@ export function identityMigrationBacklog(db) {
   }));
 }
 
-export function migrateLegacyFileIdentities(db, { budgetMs = RECONCILE_BUDGET_MS } = {}) {
+/**
+ * Is any identity work still owed? This keeps an ordinary open from taking the
+ * write lock at all: once every row is settled the pass has nothing to do, and
+ * a busy database must never be able to delay or fail service start for work
+ * that does not exist.
+ */
+export function identityRewriteOwed(db) {
+  if (!hasLedger(db)) return true;
+  // Either a worktree row has no matching settled entry, or the ledger holds an
+  // entry for a path that is no longer registered. Both need the pass, because
+  // the pass is also what prunes the orphan -- without this second half a
+  // deleted worktree would leave its ledger row behind forever.
+  return Boolean(db.prepare(`
+    SELECT 1 AS owed
+    FROM worktrees w
+    LEFT JOIN ${IDENTITY_LEDGER_TABLE} l
+      ON l.canonical_path = w.canonical_path
+      AND l.repository_identity = w.repository_identity
+      AND l.identity_fingerprint = w.identity_fingerprint
+      AND l.status = 'settled'
+    WHERE l.canonical_path IS NULL
+    UNION ALL
+    SELECT 1 AS owed
+    FROM ${IDENTITY_LEDGER_TABLE} l
+    WHERE l.canonical_path NOT IN (SELECT canonical_path FROM worktrees)
+    LIMIT 1
+  `).get());
+}
+
+export function migrateLegacyFileIdentities(db, {
+  budgetMs = RECONCILE_BUDGET_MS,
+  persistFailures = false,
+} = {}) {
   const columnsOf = (table) => new Set(
     db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name),
   );
@@ -184,7 +252,7 @@ export function migrateLegacyFileIdentities(db, { budgetMs = RECONCILE_BUDGET_MS
   // Ancient hand-built fixtures can predate the identity columns entirely;
   // there is nothing in them to rewrite.
   if (!worktreeColumns.has('identity_fingerprint') || !worktreeColumns.has('repository_identity')) {
-    return { worktrees: 0, repositories: 0, deferred: 0 };
+    return { worktrees: 0, repositories: 0, owed: 0, deferred: 0 };
   }
   const snapshotColumns = columnsOf('snapshots');
   const projectColumns = columnsOf('projects');
@@ -194,26 +262,34 @@ export function migrateLegacyFileIdentities(db, { budgetMs = RECONCILE_BUDGET_MS
   const worktreeMap = new Map();
   const repositoryMap = new Map();
   const judged = [];
+  let owed = 0;
   let deferred = 0;
+  let attempted = 0;
   for (const row of db.prepare(
     'SELECT canonical_path, repository_identity, identity_fingerprint FROM worktrees',
   ).all()) {
     if (ledger && settled.has(ledgerKey(row))) continue;
-    // Always attempt at least one row, then stop within budget and let a later
-    // open pick up what is left.
-    if (judged.length > 0 && Date.now() - startedAt >= budgetMs) {
+    // The budget counts *attempts*, not successes: the rows that fail are
+    // usually the slow ones (an unreachable path stalls on its own I/O
+    // timeout), so a guard keyed on successes would leave the only expensive
+    // case unbounded. One row is always attempted so a backlog cannot starve.
+    if (attempted > 0 && Date.now() - startedAt >= budgetMs) {
       deferred += 1;
+      owed += 1;
+      if (ledger && persistFailures) markOwed(db, row, null);
       continue;
     }
+    attempted += 1;
     let found;
     try {
       found = scanRow(row);
     } catch (error) {
       // Unreachable path, missing git, or hostile configuration: the row keeps
-      // its legacy hashes, enters the backlog, and is retried by a later open
-      // instead of being stranded there forever. confirm-location stays the
-      // exit for a genuine identity change.
-      if (ledger) upsertLedger(db, row, 'retry', reasonCode(error));
+      // its legacy hashes, stays owed, and is retried by a later open instead
+      // of being stranded there forever. confirm-location stays the exit for a
+      // genuine identity change.
+      owed += 1;
+      if (ledger && persistFailures) markOwed(db, row, error);
       continue;
     }
     if (found.worktree) worktreeMap.set(found.worktree[0], found.worktree[1]);
@@ -267,15 +343,18 @@ export function migrateLegacyFileIdentities(db, { budgetMs = RECONCILE_BUDGET_MS
   }
   // Bookkeeping happens after the rewrites so a settled row records the hashes
   // it now actually carries; the next open then skips the row outright.
-  for (const entry of judged) {
-    if (ledger) upsertLedger(db, entry, 'settled', null);
-  }
-  if (ledger) {
+  if (ledger && persistFailures) {
+    for (const entry of judged) markSettled(db, entry);
     // Paths that no longer belong to any worktree row must not accumulate.
     db.prepare(`
       DELETE FROM ${IDENTITY_LEDGER_TABLE}
       WHERE canonical_path NOT IN (SELECT canonical_path FROM worktrees)
     `).run();
   }
-  return { worktrees: worktreeMap.size, repositories: repositoryMap.size, deferred };
+  return {
+    worktrees: worktreeMap.size,
+    repositories: repositoryMap.size,
+    owed,
+    deferred,
+  };
 }

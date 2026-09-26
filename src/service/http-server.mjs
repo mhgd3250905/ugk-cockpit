@@ -990,9 +990,9 @@ const PUBLIC_ERRORS = {
   },
   UNSAFE_REMOTE_URL: {
     status: 409,
-    message: '这个仓库的 Git 配置包含会改写远端地址或远端命令的设置，当前版本暂不支持自动处理。',
+    message: '这个仓库的 Git 配置包含不能安全用于自动读写的远端地址。',
     impact: '没有读取、暂存、提交、推送或修改任何文件。',
-    requiredAction: '请先在仓库配置中移除 url.*.insteadOf / remote.*.uploadpack / receivepack 等设置，再重新操作。',
+    requiredAction: '请核对仓库的远端配置：网络共享地址（\\\\主机\\共享）与其它主机的 file: 地址不受支持，请改用本机目录或 https/ssh 地址；如设置过 url.*.insteadOf / remote.*.uploadpack / receivepack 也请先移除。',
   },
   SUBMODULE_UNSUPPORTED: {
     status: 409,
@@ -2356,13 +2356,20 @@ function legacyBridgeBindingMatches(state, binding) {
     && current.acceptedRevision === bound.acceptedRevision;
 }
 
+// Declared size is checked before the first byte is read; the streaming bound
+// below still catches a body that under-reports itself or arrives chunked.
+function declaredSizeExceeds(request, maxBytes) {
+  const declared = Number(request?.headers?.['content-length']);
+  return Number.isFinite(declared) && declared > maxBytes;
+}
+
 export async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
   // Refuse on the *declared* size before reading a byte: the MCP routes admit
   // 18 MiB bodies, and buffering first then rejecting meant N concurrent
-  // sockets cost N x 18 MiB of service memory (measured: 24 sockets grew the
-  // process from 76 MB to 301 MB) for requests that were always going to fail.
-  const declared = Number(request?.headers?.['content-length']);
-  if (Number.isFinite(declared) && declared > maxBytes) {
+  // sockets cost N x 18 MiB of service memory (measured: 24 concurrent
+  // oversize requests grew the service process from 67 MB to 234 MB) for
+  // requests that were always going to fail.
+  if (declaredSizeExceeds(request, maxBytes)) {
     const error = new Error('Request body is too large.');
     error.code = 'REQUEST_TOO_LARGE';
     throw error;
@@ -2401,6 +2408,9 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
   // cap must allow an encoded 5MB image; the decoded buffer is still enforced
   // against maxBytes below before any storage or processing happens.
   const hardLimit = maxBytes * 2 + 128 * 1024;
+  if (declaredSizeExceeds(request, hardLimit)) {
+    throw avatarRequestError('所选头像超过 5MB。', 'IMAGE_TOO_LARGE');
+  }
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
@@ -4511,7 +4521,7 @@ export async function createCockpitHttpServer({
             dispatchCode,
             agent: assignment.agent_id,
             task: assignment.task_id,
-            canonicalPath: observedTarget.project.canonical_path,
+            canonicalPath: observedTarget.observation.canonicalPath ?? null,
           }),
         });
         return;

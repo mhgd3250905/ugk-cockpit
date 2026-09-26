@@ -267,3 +267,12 @@ test('a clean worktree is still removable and an unchanged space still says noth
   assert.equal((await removeGitWorktree(mainPath, { targetPath: clean })).ok, true);
   assert.equal(existsSync(clean), false);
 });
+
+// 复核线程指出：SAFE_GIT_PREFIX 也会重置这个键，只测行为的话，删掉调用点的
+// 显式标志仍然全绿（假覆盖）。这里把参数清单本身钉住，让两处防护各自可测。
+test('the dirty check names its untracked policy in its own argv', async () => {
+  const { UNCOMMITTED_STATUS_ARGS } = await import('../src/git/submit-ops.mjs');
+  assert.deepEqual(UNCOMMITTED_STATUS_ARGS, [
+    'status', '--porcelain=v1', '-z', '--untracked-files=normal',
+  ]);
+});

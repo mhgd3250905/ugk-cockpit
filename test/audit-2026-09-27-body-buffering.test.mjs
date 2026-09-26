@@ -75,3 +75,55 @@ test('legitimate bodies parse exactly as before', async () => {
   const empty = fakeRequest({ contentLength: 0, chunks: [] });
   assert.deepEqual(await readJson(empty, { maxBytes: 1024 }), {}, '空体保持既有语义');
 });
+
+test('an oversize MCP request is refused at the HTTP layer and the socket survives', async (t) => {
+  const { mkdirSync, mkdtempSync, realpathSync, rmSync } = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const http = await import('node:http');
+  const { pathToFileURL } = await import('node:url');
+  const { openCockpitDatabase } = await import(pathToFileURL(
+    path.join(import.meta.dirname, '..', 'src', 'core', 'database.mjs'),
+  ).href);
+  const { createCockpitHttpServer } = await import(pathToFileURL(
+    path.join(import.meta.dirname, '..', 'src', 'service', 'http-server.mjs'),
+  ).href);
+
+  const root = realpathSync(mkdtempSync(path.join(realpathSync(os.tmpdir()), 'ugk-body-http-')));
+  const dbPath = path.join(root, 'cockpit.db');
+  const db = openCockpitDatabase(dbPath);
+  db.close();
+  const token = 'body-buffering-http-test-token-long-enough';
+  const service = await createCockpitHttpServer({ dbPath, token });
+  t.after(async () => {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const oversized = Buffer.alloc(18 * 1024 * 1024 + 64 * 1024, 0x61);
+  const agent = new http.Agent({ keepAlive: true });
+  const post = (body, headers = {}) => new Promise((resolve, reject) => {
+    const request = http.request({
+      host: service.host, port: service.port, path: '/api/v1/mcp/work/context', method: 'POST', agent,
+      headers: {
+        authorization: `Bearer ${token}`, 'content-type': 'application/json',
+        'content-length': String(body.length), ...headers,
+      },
+    }, (response) => {
+      let text = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { text += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, text }));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
+
+  const refused = await post(oversized);
+  assert.equal(refused.status, 413, refused.text);
+  assert.match(refused.text, /REQUEST_TOO_LARGE/);
+  // 同一 keep-alive 连接必须还能服务正常请求：预检不能把连接一起废掉。
+  const small = await post(Buffer.from('{"clientRequestId":"ok"}'));
+  assert.notEqual(small.status, 413, small.text);
+  agent.destroy();
+});

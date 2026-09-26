@@ -1,5 +1,12 @@
 # 本机服务数据一致性与故障恢复
 
+## 待部署：alpha.56（第 29 轮审计，PR #23，截至 2026-09-27 未合并、未部署）
+
+- 本分支把 `SUPPORTED_SCHEMA_VERSION` 由 30 推进到 31（新增 `identity_migration_state` 按行台账，并让旧指纹改写在每次开库继续收敛）。部署即对正式库执行 30 → 31 迁移；服务的 `backupBeforeMigration` 会在迁移前自动生成快照，仍须按本文流程在重启后核对已有项目列表与全部详情，不能仅凭 `/health` 返回 200 判定成功。
+- 部署后新增的只读排查项：`identityMigrationBacklog(db)`（`src/core/identity-migration.mjs`）非空即表示仍有工作副本行的位置身份尚未收敛，条目含失败原因与尝试次数。这类行在其目录重新可见后自行收敛，**不需要也不应**通过重新 init、移除项目或清库来「处理」。
+- 行为变化知悉：把仓库本地 `status.showUntrackedFiles` 设为 `no` 的项目，送审现按真实未跟踪内容判定（此前会被当作没有改动）；`remote.*.url` 指向网络共享地址（`\\host\share`）的仓库在只读预检阶段即返回 `UNSAFE_REMOTE_URL`，不再尝试解析该路径。
+- 截至本次登记，本机正式服务仍运行 alpha.54 / schema 30（本轮未重启、未改数据）。
+
 ## alpha.54 部署验收（2026-09-25）
 
 PR #20（第 27 轮审计修复：生命周期围栏的用户确认出路、stdio U+2028/U+2029 分帧、`work/finish` 与 `work/handoff` 字段白名单、代码位置重绑后的 id 解析、工作说明归属不再猜最新绑定、`conversation-control` 读路径限浏览器、未处理 Promise 拒绝走正常关停、Windows 启动器的 `!` 与 `--port`、构建不再清空在线资源）经复审后合并为 no-ff merge `542f82b`（复审：隔离 worktree 全量 684 项 0 失败 + phase0 97/97 真实退出码；pristine main 基线红实测 12 红 1 绿；stdio carry 与 finish 白名单两处外科手术级自证抽样各自只让自己那条用例转红；远端门禁在两个既有偶发夹具后转绿）。用户授权一条龙部署。部署前以 VACUUM INTO 创建快照 `.data/service/backups/before-alpha54-deploy-2026-09-25T15-35-03.631Z.db`（schema 30、integrity ok、11 条项目记录）。启动器（PowerShell `-File` 直调，`-TimeoutSeconds 180 -NoPause`）构建网页、核验并停止旧 PID 35288（alpha.53），隐藏启动 PID 11780；外壳本次正常退出，无输出管道滞留。`/health` 确认 `0.1.0-alpha.54`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个可见项目及全部详情通过。未重新 init、未覆盖数据库。身份重绑修复为读取路径按位置解析到既有 durable 行，此前会抛 `FOREIGN KEY constraint failed` 或对正确身份回 `WORKTREE_IDENTITY_CHANGED` 的已重绑目录自此直接恢复可用，无需重新添加项目。宿主插件与全局 MCP 登记不受影响。

@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../src/core/database.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
@@ -351,4 +352,122 @@ test('the retry backlog is bounded: converged rows leave it and stale paths are 
     '路径已不属于任何工作副本时，留痕不得继续累积',
   );
   db.close();
+});
+
+test('rows skipped for budget stay owed and remain visible', async (t) => {
+  const cleanup = [];
+  t.after(runCleanupLifo(cleanup));
+  const container = realTemp(cleanup, 'ugk-v30-budget-');
+  const repoA = initGit(path.join(container, 'alpha'));
+  const repoB = initGit(path.join(container, 'beta'));
+  const dbPath = path.join(container, 'data', 'cockpit.db');
+
+  let db = openCockpitDatabase(dbPath);
+  cleanup.push(() => { try { db.close(); } catch { /* 已显式关闭 */ } });
+  const probeA = await probeGitWorktree(repoA);
+  const probeB = await probeGitWorktree(repoB);
+  const legacyA = legacyHashesOf(repoA);
+  const legacyB = legacyHashesOf(repoB);
+  registerProject(db, { commandId: 'reg-budget-a', name: 'Alpha', observation: probeA });
+  registerProject(db, { commandId: 'reg-budget-b', name: 'Beta', observation: probeB });
+  stampLegacyIdentities(db, { canonicalPath: probeA.canonicalPath, worktreeHash: legacyA.directory, repositoryHash: legacyA.common });
+  db.prepare('UPDATE worktrees SET identity_fingerprint = ?, repository_identity = ? WHERE canonical_path = ?')
+    .run(legacyB.directory, legacyB.common, probeB.canonicalPath);
+  db.close();
+
+  renameWithRetry(repoA, path.join(container, 'alpha.offline'));
+  renameWithRetry(repoB, path.join(container, 'beta.offline'));
+  db = openCockpitDatabase(dbPath);
+  const { identityMigrationBacklog, identityRewriteOwed, migrateLegacyFileIdentities } =
+    await import('../src/core/identity-migration.mjs');
+  const first = identityMigrationBacklog(db);
+  assert.deepEqual(first.map((entry) => entry.canonicalPath).sort(),
+    [probeA.canonicalPath, probeB.canonicalPath].sort(), '两条失败行都要留痕');
+  const attemptsBefore = Object.fromEntries(first.map((entry) => [entry.canonicalPath, entry.attempts]));
+  assert.equal(identityRewriteOwed(db), true, '仍欠工作时必须判定为 owed');
+
+  // 预算为 0：仍要尝试一行（否则永不前进），其余行必须留在台账里而不是被当作已收敛。
+  const pass = migrateLegacyFileIdentities(db, { budgetMs: 0, persistFailures: true });
+  assert.equal(pass.deferred >= 1, true, JSON.stringify(pass));
+  assert.equal(pass.owed >= 1, true, JSON.stringify(pass));
+  const after = Object.fromEntries(identityMigrationBacklog(db).map((entry) => [entry.canonicalPath, entry]));
+  assert.equal(Object.keys(after).length, 2, '被跳过的行不得从台账里消失');
+  for (const canonicalPath of [probeA.canonicalPath, probeB.canonicalPath]) {
+    assert.ok(after[canonicalPath], `${canonicalPath} 仍在台账`);
+    // 尝试次数只在真实尝试后增长：预算跳过不得伪造进度。
+    assert.ok(after[canonicalPath].attempts >= attemptsBefore[canonicalPath], JSON.stringify(after[canonicalPath]));
+  }
+  assert.ok(
+    Object.values(after).some((entry) => entry.reason === 'ENOENT' || entry.reason === 'EPERM'),
+    `失败原因必须保留，不能被 deferred 覆盖: ${JSON.stringify(Object.values(after).map((entry) => entry.reason))}`,
+  );
+  db.close();
+});
+
+test('a converged stock has nothing owed, so an open needs no write transaction', async (t) => {
+  const cleanup = [];
+  t.after(runCleanupLifo(cleanup));
+  const container = realTemp(cleanup, 'ugk-v30-converged-');
+  const repo = initGit(path.join(container, 'repository'));
+  const dbPath = path.join(container, 'data', 'cockpit.db');
+  const { identityRewriteOwed } = await import('../src/core/identity-migration.mjs');
+
+  let db = openCockpitDatabase(dbPath);
+  cleanup.push(() => { try { db.close(); } catch { /* 已显式关闭 */ } });
+  const probe = await probeGitWorktree(repo);
+  registerProject(db, { commandId: 'reg-converged', name: 'Converged', observation: probe });
+  assert.equal(identityRewriteOwed(db), true, '未判定过的行仍然是欠的，哪怕格式已经正确');
+  db.close();
+  // 第一次开库完成判定并写台账之后，才算「什么都不欠」。
+  db = openCockpitDatabase(dbPath);
+  assert.equal(identityRewriteOwed(db), false, '全部 settled 后不该再欠任何工作');
+  db.close();
+
+  // 另一个连接持写事务时，开库仍必须成功，而且不能靠「抢锁失败被吞掉」来成功：
+  // 断言没有产生收敛告警，才证明这条路径根本没去抢写锁。
+  const holder = new DatabaseSync(dbPath);
+  cleanup.push(() => { try { holder.close(); } catch { /* 已关闭 */ } });
+  holder.exec('BEGIN IMMEDIATE');
+  const written = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => { written.push(String(chunk)); return true; };
+  let opened;
+  try {
+    opened = openCockpitDatabase(dbPath);
+  } finally {
+    process.stderr.write = originalWrite;
+    holder.exec('ROLLBACK');
+  }
+  cleanup.push(() => { try { opened.close(); } catch { /* 已关闭 */ } });
+  assert.equal(Number(opened.prepare('PRAGMA user_version').get().user_version), SUPPORTED_SCHEMA_VERSION);
+  assert.deepEqual(
+    written.filter((line) => line.includes('identity reconcile deferred')),
+    [],
+    `已收敛的开库不应尝试收敛（更不应靠吞掉抢锁失败来成功）: ${JSON.stringify(written)}`,
+  );
+});
+
+test('a broken ledger table cannot prevent the service from opening', async (t) => {
+  const cleanup = [];
+  t.after(runCleanupLifo(cleanup));
+  const container = realTemp(cleanup, 'ugk-v30-broken-ledger-');
+  const repo = initGit(path.join(container, 'repository'));
+  const dbPath = path.join(container, 'data', 'cockpit.db');
+
+  let db = openCockpitDatabase(dbPath);
+  cleanup.push(() => { try { db.close(); } catch { /* 已显式关闭 */ } });
+  const probe = await probeGitWorktree(repo);
+  registerProject(db, { commandId: 'reg-broken', name: 'Broken', observation: probe });
+  db.exec('DROP TABLE identity_migration_state');
+  db.exec('CREATE TABLE identity_migration_state (canonical_path TEXT PRIMARY KEY) STRICT');
+  db.close();
+
+  db = openCockpitDatabase(dbPath);
+  cleanup.push(() => { try { db.close(); } catch { /* 已显式关闭 */ } });
+  assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), SUPPORTED_SCHEMA_VERSION);
+  assert.deepEqual(
+    await identities(db, probe.canonicalPath),
+    { w: probe.worktreeIdentity, r: probe.repositoryIdentity },
+    '台账坏了也不能改动已收敛的身份值',
+  );
 });

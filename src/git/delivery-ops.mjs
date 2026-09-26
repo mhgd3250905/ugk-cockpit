@@ -123,30 +123,54 @@ export function isLocalPath(rawUrl, cwd = null) {
 // push into a write against a machine path no one authorized. Nothing in the
 // product needs this shape, and no caller can vet a host it never saw, so the
 // single gate every remote URL passes through refuses it.
+//
+// The spelling is not the point -- on Windows `\\host\share`, `//host/share`
+// and `file://host/share` all name the same object, and git resolves each of
+// them to the UNC before touching it (measured: `//…invalid/share/….git` still
+// stalled a preflight ~11.7s while `validateRemoteUrlSecurity` accepted it).
+// So judge the path git would use, plus a non-loopback `file://` authority.
 function isNetworkSharePath(value) {
   return typeof value === 'string' && value.startsWith('\\\\');
 }
 
-function assertNotNetworkShare(url) {
+function localPathForGit(url, cwd) {
+  if (url.startsWith('file://')) {
+    try {
+      return fileURLToPath(url);
+    } catch {
+      return null;
+    }
+  }
+  if (!isLocalPath(url, cwd)) return null;
+  return path.resolve(cwd ?? process.cwd(), url);
+}
+
+function unsafeRemoteUrl(message) {
+  return Object.assign(new Error(message), { code: 'UNSAFE_REMOTE_URL' });
+}
+
+function assertNotNetworkShare(url, cwd) {
+  // Public wording is curated in the error maps (http-server PUBLIC_ERRORS and
+  // delivery-messages); this text stays internal and never echoes the URL.
   if (isNetworkSharePath(url)) {
-    throw Object.assign(new Error('网络共享地址不能作为送审远端；请改用本机目录或 https/ssh 地址。'), {
-      code: 'UNSAFE_REMOTE_URL',
-    });
+    throw unsafeRemoteUrl('Remote URL is a network share path.');
   }
   if (url.startsWith('file://')) {
-    let resolved = null;
+    let host = '';
     try {
-      resolved = fileURLToPath(url);
+      host = new URL(url).hostname;
     } catch {
-      throw Object.assign(new Error('Remote URL is not a usable file: URL.'), { code: 'UNSAFE_REMOTE_URL' });
+      host = '';
     }
-    if (isNetworkSharePath(resolved)) {
-      throw Object.assign(new Error('网络共享地址不能作为送审远端；请改用本机目录或 https/ssh 地址。'), {
-        code: 'UNSAFE_REMOTE_URL',
-      });
+    // fileURLToPath only accepts a loopback authority; a named host is a
+    // redirect to somebody else's machine whatever the spelling.
+    if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]') {
+      throw unsafeRemoteUrl('file: remote URL names a foreign host.');
     }
   }
-  return url;
+  if (isNetworkSharePath(localPathForGit(url, cwd))) {
+    throw unsafeRemoteUrl('Remote URL resolves to a network share path.');
+  }
 }
 
 // A push contacts every pushurl (or every url when no pushurl is set), and
@@ -217,7 +241,7 @@ export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
       && !/^(git@)?[a-zA-Z0-9.-]+:[^/\\]/.test(trimmed))) {
     throw Object.assign(new Error('Unsupported remote transport'), { code: 'UNSAFE_REMOTE_URL' });
   }
-  assertNotNetworkShare(trimmed);
+  assertNotNetworkShare(trimmed, cwd);
 
   // Reject ext helper, remote-testgit, or custom protocol helper syntax
   if (/^[a-zA-Z0-9_-]+::/i.test(trimmed) || /^ext::/i.test(trimmed) || trimmed.includes('::')) {
