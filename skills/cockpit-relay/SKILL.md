@@ -95,7 +95,7 @@ Codex/ZCode 的平台与宿主会话 ID 由每次 MCP 请求元数据传入；�
 ## 不变量与失败处理
 
 - `clientRequestId` 必须非空且唯一。传输结果不确定时，使用相同的 ID 重发完全相同的 payload；不要换 ID 或修改 revision。
-- 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 新请求仅包含 `continueCode` 与 `clientRequestId`，不得追加旧过期确认字段或 `currentTask`、`currentState`；`ugk_work_takeover` 只允许 `sessionId`、`clientRequestId`、`transferCode`，授权只来自用户在工作台生成的指令；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
+- 请求中严禁携带 `path`、`projectId` 或 `worktreeId`；`ugk_work_resume` 新请求只包含 `continueCode`、`clientRequestId`，以及宿主不提供工作目录时按接力消息「项目目录」行传入的 `declaredWorkspace`，不得追加旧过期确认字段或 `currentTask`、`currentState`；`ugk_work_takeover` 只允许 `sessionId`、`clientRequestId`、`transferCode`，授权只来自用户在工作台生成的指令；`ugk_work_relay` 不得携带 `reason`、`nextTask` 等未定义字段；MCP 会绑定当前工作目录并负责权限、CAS revision 与状态流转。
 - MCP 报错或缺少成功标志时，按具体返回原因处理：待确认按当前聊天确认流程，结果未知按原样重试，已被替代则保留现有归属。只有工具不可用或不支持新参数时，才提示安装/启用或重新连接新版 `ugk-cockpit` 本地 MCP，不把所有错误都归结为需要重连。缺少必要字段不得声称接力准备或恢复成功，也不要因为 context 不可用就重新 init。
 - 诊断信息只使用服务返回的固定 `code`/`reason`/`diagnosticId`/`impact`/`required_action`；不要把 token、connection handle、请求体、路径或异常原文写入接力消息。
 - 恢复成功前不要修改代码；不得清理或重置工作区已有改动。
