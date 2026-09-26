@@ -29,6 +29,11 @@ const git = (cwd, args) => {
 };
 
 // Windows 上刚退出的 git 子进程会短暂占住目录句柄，删除要有限重试。
+// 阻塞式短睡眠：不能用 while(Date.now()) 忙等，那在共享 CPU 的 CI 上会拖满整秒。
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function removeWithRetry(target, attempts = 40) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -38,8 +43,7 @@ function removeWithRetry(target, attempts = 40) {
     } catch (error) {
       lastError = error;
       if (error?.code !== 'EPERM' && error?.code !== 'EBUSY' && error?.code !== 'ENOTEMPTY') throw error;
-      const waitUntil = Date.now() + 100;
-      while (Date.now() < waitUntil) { /* bounded spin, no timer handle */ }
+      sleepMs(100);
     }
   }
   // 仍被占用：改名让开后尽力删除，残留交给系统临时目录清理策略。

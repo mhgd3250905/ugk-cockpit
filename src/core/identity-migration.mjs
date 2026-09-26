@@ -158,17 +158,24 @@ function writeLedgerRow(db, existing, row, { status, reason, attempts, firstFail
 }
 
 /**
- * A row still owed identity work: it either failed a real attempt (reason and
- * attempt count) or was skipped because this open ran out of budget. Both stay
- * visible, because an open that judged nothing is exactly the "drive offline /
- * share dropped" shape -- reporting convergence there would be the same class
- * of lie this ledger exists to remove.
+ * A row still owed identity work, recorded as `retry`: it either failed a real
+ * attempt (reason and attempt count) or was skipped because this open ran out
+ * of budget. Both stay visible, because an open that judged nothing is exactly
+ * the "drive offline / share dropped" shape -- reporting convergence there
+ * would be the same class of lie this ledger exists to remove.
+ *
+ * The stored word is deliberately `retry`, not `owed`: an earlier revision of
+ * this round's migration created the table with CHECK (status IN ('retry',
+ * 'settled')), and `CREATE TABLE IF NOT EXISTS` cannot reshape a table some
+ * database already carries. Renaming the enum in place would make every write
+ * fail its CHECK, roll the pass back and leave the backlog silently empty --
+ * the exact lie described above.
  */
 function markOwed(db, row, error) {
   const existing = readLedgerRow(db, row.canonical_path);
   if (error) {
     writeLedgerRow(db, existing, row, {
-      status: 'owed',
+      status: 'retry',
       reason: reasonCode(error),
       attempts: (existing?.attempts ?? 0) + 1,
       firstFailedAt: existing?.first_failed_at ?? new Date().toISOString(),
@@ -176,7 +183,7 @@ function markOwed(db, row, error) {
     return;
   }
   writeLedgerRow(db, existing, row, {
-    status: 'owed',
+    status: 'retry',
     reason: existing?.reason ?? 'deferred',
     attempts: existing?.attempts ?? 0,
     firstFailedAt: existing?.first_failed_at ?? null,
@@ -201,7 +208,7 @@ export function identityMigrationBacklog(db) {
   if (!hasLedger(db)) return [];
   return db.prepare(`
     SELECT canonical_path, reason, attempts, first_failed_at, last_attempt_at
-    FROM ${IDENTITY_LEDGER_TABLE} WHERE status = 'owed'
+    FROM ${IDENTITY_LEDGER_TABLE} WHERE status = 'retry'
     ORDER BY (first_failed_at IS NULL), first_failed_at ASC, canonical_path ASC
   `).all().map((row) => ({
     canonicalPath: row.canonical_path,

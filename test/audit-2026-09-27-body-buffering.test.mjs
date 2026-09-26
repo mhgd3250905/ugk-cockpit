@@ -100,30 +100,64 @@ test('an oversize MCP request is refused at the HTTP layer and the socket surviv
     rmSync(root, { recursive: true, force: true });
   });
 
-  const oversized = Buffer.alloc(18 * 1024 * 1024 + 64 * 1024, 0x61);
   const agent = new http.Agent({ keepAlive: true });
-  const post = (body, headers = {}) => new Promise((resolve, reject) => {
+  const post = ({ body, declaredLength, end = true }) => new Promise((resolve, reject) => {
     const request = http.request({
       host: service.host, port: service.port, path: '/api/v1/mcp/work/context', method: 'POST', agent,
       headers: {
         authorization: `Bearer ${token}`, 'content-type': 'application/json',
-        'content-length': String(body.length), ...headers,
+        'content-length': String(declaredLength),
       },
     }, (response) => {
       let text = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => { text += chunk; });
-      response.on('end', () => resolve({ status: response.statusCode, text }));
+      response.on('end', () => resolve({ status: response.statusCode, text, socket: request.socket }));
     });
     request.on('error', reject);
-    request.end(body);
+    request.write(body);
+    if (end) request.end();
   });
 
-  const refused = await post(oversized);
+  // 关键判据：声明 20 MiB 而只发出 16 字节且**不结束请求**。只有「读第一个字节
+  // 之前就按声明体积拒绝」才可能在这里给出响应；先缓冲的实现会一直等正文，
+  // 于是这条断言超时失败（而不是靠随后再发一个大 body 蒙过去）。
+  // 关键判据：声明 20 MiB 而只发出 16 字节且**不结束请求**。只有「读第一个字节
+  // 之前就按声明体积拒绝」才可能在这里给出响应；先缓冲的实现会一直等正文（实测还
+  // 会把随后的关停一起拖住），所以这里限时等待并在收尾时主动销毁那条请求。
+  let early = null;
+  let earlyRequest;
+  try {
+    early = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), 8000);
+      const done = (value) => { clearTimeout(timer); resolve(value); };
+      earlyRequest = http.request({
+        host: service.host, port: service.port, path: '/api/v1/mcp/work/context', method: 'POST', agent,
+        headers: {
+          authorization: `Bearer ${token}`, 'content-type': 'application/json',
+          'content-length': String(20 * 1024 * 1024),
+        },
+      }, (response) => {
+        let text = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { text += chunk; });
+        response.on('end', () => done({ status: response.statusCode, text }));
+      });
+      earlyRequest.on('error', () => done(null));
+      earlyRequest.write(Buffer.from('{"clientRequestId"'));
+    });
+  } finally {
+    earlyRequest?.destroy();
+  }
+  assert.ok(early, '服务没有在不接收请求体的情况下给出答复：仍在先缓冲后判定');
+  assert.equal(early.status, 413, early.text);
+  assert.match(early.text, /REQUEST_TOO_LARGE/);
+
+  const refused = await post({ body: Buffer.alloc(18 * 1024 * 1024 + 64 * 1024, 0x61), declaredLength: 18 * 1024 * 1024 + 64 * 1024 });
   assert.equal(refused.status, 413, refused.text);
   assert.match(refused.text, /REQUEST_TOO_LARGE/);
-  // 同一 keep-alive 连接必须还能服务正常请求：预检不能把连接一起废掉。
-  const small = await post(Buffer.from('{"clientRequestId":"ok"}'));
+  // 预检不得把服务本身一起废掉：随后一条正常请求必须仍被服务。
+  const small = await post({ body: Buffer.from('{"clientRequestId":"ok"}'), declaredLength: 24 });
   assert.notEqual(small.status, 413, small.text);
   agent.destroy();
 });

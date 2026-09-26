@@ -16,6 +16,11 @@ import { probeGitWorktree } from '../src/git/probe.mjs';
 import { registerProject, refreshProject } from '../src/core/projects.mjs';
 import { statIdentityPair } from '../src/core/identity-migration.mjs';
 
+// 阻塞式短睡眠：不能用 while(Date.now()) 忙等，那在共享 CPU 的 CI 上会拖满整秒。
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function runCleanupLifo(cleanup) {
   return async () => {
     let firstError = null;
@@ -59,8 +64,7 @@ function renameWithRetry(from, to, attempts = 20) {
     } catch (error) {
       lastError = error;
       if (error?.code !== 'EPERM' && error?.code !== 'EBUSY' && error?.code !== 'ENOTEMPTY') throw error;
-      const waitUntil = Date.now() + 50;
-      while (Date.now() < waitUntil) { /* bounded spin, no timer handle */ }
+      sleepMs(50);
     }
   }
   throw lastError;

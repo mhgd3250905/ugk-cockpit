@@ -128,7 +128,11 @@ export function isLocalPath(rawUrl, cwd = null) {
 // and `file://host/share` all name the same object, and git resolves each of
 // them to the UNC before touching it (measured: `//…invalid/share/….git` still
 // stalled a preflight ~11.7s while `validateRemoteUrlSecurity` accepted it).
-// So judge the path git would use, plus a non-loopback `file://` authority.
+// So judge the path git would use, and refuse any `file://` that keeps a named
+// host: the URL parser erases `localhost` into an empty authority (so it stays
+// the local form), while a named host or IP literal survives and means
+// somebody else's machine (measured: `fileURLToPath('file://host/share/x')`
+// happily returns `\\host\share\x`).
 function isNetworkSharePath(value) {
   return typeof value === 'string' && value.startsWith('\\\\');
 }
@@ -162,9 +166,9 @@ function assertNotNetworkShare(url, cwd) {
     } catch {
       host = '';
     }
-    // fileURLToPath only accepts a loopback authority; a named host is a
-    // redirect to somebody else's machine whatever the spelling.
-    if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]') {
+    // Any named authority is somebody else's machine, and the product's only
+    // supported local form is file:///path.
+    if (host) {
       throw unsafeRemoteUrl('file: remote URL names a foreign host.');
     }
   }

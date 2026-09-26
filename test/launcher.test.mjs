@@ -802,7 +802,8 @@ function realTmpRoot() {
   return process.platform === 'win32' ? os.tmpdir() : realpathSync(os.tmpdir());
 }
 
-// verify-service-data 只读 projects 表的 id 与 removed_at 形状。
+// verify-service-data 只读 projects 表的 id 与 removed_at 形状，另外会读位置身份
+// 留痕台账；该表不存在时按「不欠任何工作」处理，所以这个最小夹具仍然有效。
 function writeEmptyCockpitDb(dataDir) {
   mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, 'cockpit.db'));

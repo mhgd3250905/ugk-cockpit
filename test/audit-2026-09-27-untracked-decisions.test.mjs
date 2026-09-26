@@ -36,6 +36,11 @@ const git = (cwd, args) => {
   }
 };
 
+// 阻塞式短睡眠：不能用 while(Date.now()) 忙等，那在共享 CPU 的 CI 上会拖满整秒。
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function snapshot(observation) {
   return {
     head: observation.after.head,
@@ -60,8 +65,7 @@ function removeWithRetry(target, attempts = 40) {
     } catch (error) {
       lastError = error;
       if (error?.code !== 'EPERM' && error?.code !== 'EBUSY' && error?.code !== 'ENOTEMPTY') throw error;
-      const waitUntil = Date.now() + 100;
-      while (Date.now() < waitUntil) { /* bounded spin, no timer handle */ }
+      sleepMs(100);
     }
   }
   // 仍被系统占用（杀软索引、刚退出的子进程）：先改名让开，再尽力删除。

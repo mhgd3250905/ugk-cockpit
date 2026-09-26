@@ -1136,16 +1136,19 @@ END;
     sql: `
 -- 第 29 轮审计：v30 的旧指纹改写是「按行」工作，不是一次性 schema 变更。一行可能
 -- 因为盘符暂时离线、共享断连、git 尚未可用或事后被清除的敌意配置而当场判不了；盖章
--- 30 之后它就永久留在旧格式，只能靠人工确认位置。台账按行记录「仍欠工作」（owed：
+-- 30 之后它就永久留在旧格式，只能靠人工确认位置。台账按行记录「仍欠工作」（retry：
 -- 真实尝试失败，或因预算不足被跳过）与「已判定」（settled，之后不再 stat/git 探测），
--- 使改写真正可重复执行直至收敛。
+-- 使改写真正可重复执行直至收敛。状态字面刻意沿用 retry 而非语义更贴切的 owed：
+-- 本轮早先的提交已用 CHECK (status IN ('retry','settled')) 建过这张表，而
+-- IF NOT EXISTS 不会重塑已存在的表，就地改名会让后续写入撞 CHECK、整趟回滚、
+-- 台账永远为空（正是本表要消灭的那类谎）。
 -- IF NOT EXISTS：与 v20/v25/v27 同理，台账表可能来自一次未盖章的升级；重跑
 -- 迁移不得因此把开库卡死。
 CREATE TABLE IF NOT EXISTS identity_migration_state (
   canonical_path TEXT PRIMARY KEY,
   repository_identity TEXT NOT NULL,
   identity_fingerprint TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('owed', 'settled')),
+  status TEXT NOT NULL CHECK (status IN ('retry', 'settled')),
   reason TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
   first_failed_at TEXT,

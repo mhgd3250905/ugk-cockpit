@@ -27,6 +27,11 @@ const git = (cwd, args) => {
 }
 
 // Windows 上刚退出的 git 子进程会短暂占住目录句柄，删除要有限重试。
+// 阻塞式短睡眠：不能用 while(Date.now()) 忙等，那在共享 CPU 的 CI 上会拖满整秒。
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function removeWithRetry(target, attempts = 40) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -36,8 +41,7 @@ function removeWithRetry(target, attempts = 40) {
     } catch (error) {
       lastError = error;
       if (error?.code !== 'EPERM' && error?.code !== 'EBUSY' && error?.code !== 'ENOTEMPTY') throw error;
-      const waitUntil = Date.now() + 100;
-      while (Date.now() < waitUntil) { /* bounded spin, no timer handle */ }
+      sleepMs(100);
     }
   }
   // 仍被占用：改名让开后尽力删除，残留交给系统临时目录清理策略。
@@ -93,10 +97,13 @@ test('the same share is refused in every spelling git would resolve', () => {
   // 复核线程实测：只判字面 \ 前缀会被 //host/share 绕过（git 在 Windows 上
   // 把它解析成同一个 UNC），file://otherhost/... 同理。
   const variants = [
-    '\\ugk-audit-not-a-host.invalid\share\repository.git',
-    '//ugk-audit-not-a-host.invalid/share/repository.git',
+    '\\\\ugk-audit-not-a-host.invalid\\share\\repository.git',
     'file://ugk-audit-not-a-host.invalid/share/repository.git',
   ];
+  if (process.platform === 'win32') {
+    // 只有 Windows 把 //host/share 解析成同一个 UNC；POSIX 上它是一个普通路径。
+    variants.push('//ugk-audit-not-a-host.invalid/share/repository.git');
+  }
   for (const url of variants) {
     assert.throws(
       () => validateRemoteUrlSecurity(url, { cwd: null }),
@@ -106,7 +113,7 @@ test('the same share is refused in every spelling git would resolve', () => {
   }
 });
 
-test('the read-only inspection refuses a forward-slash share without touching it', async (t) => {
+test('the read-only inspection refuses a forward-slash share without touching it', { skip: process.platform !== 'win32' }, async (t) => {
   const { repo } = tempRepository(t, 'ugk-unc-slash-');
   git(repo, ['remote', 'add', 'origin', '//ugk-audit-not-a-host.invalid/share/repository.git']);
   let caught = null;
@@ -123,6 +130,8 @@ test('legitimate remote shapes keep being accepted', () => {
   for (const url of [
     'C:/ugk-audit/backup/repository.git',
     'file:///C:/ugk-audit/backup/repository.git',
+    // WHATWG 会把 file://localhost/ 归一成空 authority，它等价于 file:///；
+    // 具名的非本机主机（含 IP 写法）仍在拒绝之列——那道更严，不构成绕过。
     'file://localhost/C:/ugk-audit/backup/repository.git',
     'https://github.com/example/repository.git',
     'ssh://git@github.com/example/repository.git',
