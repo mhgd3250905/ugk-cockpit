@@ -2394,7 +2394,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                 key={focusedLaneKey || 'main'}
                 context={selectedContext}
                 closed={selectedLineState?.status === 'closed'}
-                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} />}
+                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} onConfirmLocation={() => confirmProjectLocationFlow(project)} />}
                 label={focusedLaneKey ? (timelineLanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选工作线') : '项目总览'}
                 overview={focusedLaneKey ? null : {
                   lineCount: timelineLanes.filter((lane) => ['development_space', 'delivery_source'].includes(lane.role)).length,
@@ -2594,7 +2594,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   );
 }
 
-function ConversationControlPanel({ projectId, worktreeId, conversationState }) {
+function ConversationControlPanel({ projectId, worktreeId, conversationState, onConfirmLocation }) {
   const [chains, setChains] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -2629,7 +2629,7 @@ function ConversationControlPanel({ projectId, worktreeId, conversationState }) 
       {!worktreeId && <p>这条工作线尚未记录可操作的会话。</p>}
       {chains && !chains.some((chain) => chain.worktreeId === worktreeId) && <p>这条工作线暂无工作会话。</p>}
       {chains?.filter((chain) => chain.worktreeId === worktreeId && (['active', 'awaiting_resume', 'standby'].includes(chain.status) || chain.transfer)).map((chain) => (
-        <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} />
+        <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} onConfirmLocation={onConfirmLocation} />
       ))}
       {chains?.some((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer) && <details className="conversation-history">
         <summary>历史已结束会话</summary>
@@ -2647,7 +2647,7 @@ function ConversationControlError({ error }) {
   </div>;
 }
 
-function ConversationControlChain({ chain, path, onRefresh, sessionState }) {
+function ConversationControlChain({ chain, path, onRefresh, sessionState, onConfirmLocation }) {
   const [dialog, setDialog] = useState(null);
   const [targetHost, setTargetHost] = useState('');
   const [targetConversationId, setTargetConversationId] = useState('');
@@ -2741,6 +2741,7 @@ function ConversationControlChain({ chain, path, onRefresh, sessionState }) {
     <div className="conversation-control-actions">
       {actionable && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('transfer'); }}>授权其他聊天接手</Button>}
       {waiting && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('cancel'); }}>取消转交并恢复原聊天</Button>}
+      {waiting && onConfirmLocation && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); onConfirmLocation(); }} title="接手被“代码位置身份变化”拒绝时使用：重新选择同一文件夹完成确认；历史记录全部保留。">确认新代码位置</Button>}
       {pendingRequest.current && !busy && <Button size="sm" variant="soft" onClick={() => submit(true)}>以原请求核对 / 重试</Button>}
     </div>
     {issued && <div className="conversation-transfer-result">
