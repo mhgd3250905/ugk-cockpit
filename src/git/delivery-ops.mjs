@@ -116,6 +116,39 @@ export function isLocalPath(rawUrl, cwd = null) {
   return existsSync(cwd ? path.resolve(cwd, rawUrl) : rawUrl);
 }
 
+// A UNC is a filesystem path *and* a network name: the local transport resolves
+// it over SMB with the current user's Windows credentials, so a repository-local
+// `remote.*.url` can (a) make the read-only inspection block on, and
+// authenticate to, a host the repository author chose, and (b) turn a delivery
+// push into a write against a machine path no one authorized. Nothing in the
+// product needs this shape, and no caller can vet a host it never saw, so the
+// single gate every remote URL passes through refuses it.
+function isNetworkSharePath(value) {
+  return typeof value === 'string' && value.startsWith('\\\\');
+}
+
+function assertNotNetworkShare(url) {
+  if (isNetworkSharePath(url)) {
+    throw Object.assign(new Error('网络共享地址不能作为送审远端；请改用本机目录或 https/ssh 地址。'), {
+      code: 'UNSAFE_REMOTE_URL',
+    });
+  }
+  if (url.startsWith('file://')) {
+    let resolved = null;
+    try {
+      resolved = fileURLToPath(url);
+    } catch {
+      throw Object.assign(new Error('Remote URL is not a usable file: URL.'), { code: 'UNSAFE_REMOTE_URL' });
+    }
+    if (isNetworkSharePath(resolved)) {
+      throw Object.assign(new Error('网络共享地址不能作为送审远端；请改用本机目录或 https/ssh 地址。'), {
+        code: 'UNSAFE_REMOTE_URL',
+      });
+    }
+  }
+  return url;
+}
+
 // A push contacts every pushurl (or every url when no pushurl is set), and
 // resolves any pushInsteadOf rewrite first. `git remote get-url --push --all`
 // enumerates exactly those destinations; plain get-url prints only the first
@@ -184,6 +217,7 @@ export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
       && !/^(git@)?[a-zA-Z0-9.-]+:[^/\\]/.test(trimmed))) {
     throw Object.assign(new Error('Unsupported remote transport'), { code: 'UNSAFE_REMOTE_URL' });
   }
+  assertNotNetworkShare(trimmed);
 
   // Reject ext helper, remote-testgit, or custom protocol helper syntax
   if (/^[a-zA-Z0-9_-]+::/i.test(trimmed) || /^ext::/i.test(trimmed) || trimmed.includes('::')) {
