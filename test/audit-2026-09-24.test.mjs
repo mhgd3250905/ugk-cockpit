@@ -411,7 +411,7 @@ test('a merge aborts before any write if its repository lock expires', async (t)
   assert.equal(fastForwarded, 0);
 });
 
-test('the Windows credential helper is a shape git will actually execute', async (t) => {
+test('the Windows credential helper is a shape git will actually execute', { skip: process.platform !== 'win32' && 'validates the Windows Git Credential Manager shape' }, async (t) => {
   const argv = await remoteAuthArguments(['push', 'origin', 'main'], 'win32');
   if (argv.length === 0) {
     t.skip('Git Credential Manager is not installed at the resolved location');
