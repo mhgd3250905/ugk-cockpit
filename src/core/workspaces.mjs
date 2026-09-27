@@ -7,6 +7,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
 import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import {
@@ -35,6 +36,7 @@ import { probeGitWorktree } from '../git/probe.mjs';
 import { assertRepositoryAllowedForProbe } from '../git/repository-policy.mjs';
 import {
   checkBranchExists,
+  countIgnoredWorktreeEntries,
   createGitWorktree,
   generateStableBranchName,
   isStableWorkspaceBranch,
@@ -225,7 +227,17 @@ function registerAndCompleteWorkspace({
   });
 }
 
-export async function createDevelopmentWorkspace(db, request = {}, options = {}) {
+export function createDevelopmentWorkspace(db, request = {}, options = {}) {
+  // A lost-response retry arrives with the same command id. Without a gate both
+  // drivers run: the journal replays the second one, `acquireRepositoryLock`
+  // *renews* the holder-matching lock instead of denying it, and whichever
+  // driver finishes first deletes the single repository_locks row the other is
+  // still working under — leaving Git running in the repository with no
+  // exclusivity. merge/delivery already wrap themselves the same way.
+  return singleFlight(db, request, () => createDevelopmentWorkspaceOnce(db, request, options));
+}
+
+async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
   const projectId = request.projectId;
   const expectedBaseHead = request.expectedBaseHead ?? request.expected_base_head;
   const commandId = request.commandId;
@@ -1447,6 +1459,21 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     if (!workspaceValidation.ok) return failOrUnknown({ ok: false, ...workspaceValidation, spaceId: space.spaceId });
     if (workspaceObservation.after.hasChanges) {
       return failOrUnknown({ ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
+    }
+    // git-IGNORED content is not "changes" to either git's own worktree-remove
+    // check or the probe above, yet `worktree remove` deletes it with the
+    // directory and Git cannot bring it back. Ask before that happens.
+    const ignored = await (options.countIgnoredWorktreeEntries ?? countIgnoredWorktreeEntries)(
+      space.canonicalPath,
+      { timeoutMs: options.timeoutMs ?? 5_000, maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024 },
+    );
+    if (ignored.count > 0 && request.userConfirmedIgnoredRemoval !== true) {
+      return failOrUnknown({
+        ok: false,
+        code: 'WORKSPACE_IGNORED_CONTENT_CONFIRMATION_REQUIRED',
+        spaceId: space.spaceId,
+        ignoredCount: ignored.count,
+      });
     }
 
     const preEffect = revalidateWorkspaceLifecycle(db, reservation, options);

@@ -27,6 +27,8 @@ schema 29 为项目增加可空 `removed_at`；迁移 28 的操作执行者身�
 
 ## 未登记工作链的旧运行记录恢复（alpha.42 源码，尚未部署）
 
+（2026-09-28 第 30 轮括注：标题的「尚未部署」已过期。`POST /api/v1/runs/release-lease` 路由与释放协议在 main 上存在（`src/service/http-server.mjs`），本机正式服务此后已按 `docs/LOCAL_SERVICE_RECOVERY.md` 的部署验收升级到更高版本；下面的历史叙述保留不改写。）
+
 alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`，旧运行记录的开始、结束和释放接口因此不可达。alpha.42 将请求授权范围取为注入根与已持久授予的项目、工作副本路径的并集，仍拒绝未授权目录。只有服务加载该修复后，下面的恢复入口才可用；本轮没有重启正式服务。
 
 `POST /api/v1/runs/release-lease` 只允许用户明确确认释放没有 assignment 的旧运行记录。聊天绑定与转交记录通过外键关联 assignment，因此受管理工作会话在事务内返回 `RUN_LEASE_MANAGED_SESSION`，不修改运行、租约、工作链或待转交状态；这些会话继续使用下文的工作台转交协议。接口校验授权代码位置、revision 与 lease generation，结果及用户确认进入命令日志，普通 scoped MCP 不能调用；目前没有工作台按钮。
@@ -41,7 +43,7 @@ alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`�
 
 schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_at`，新操作记录执行进程的启动代际。在正式服务单实例约束下，恢复逻辑区分当前执行者与旧进程记录；迁移前的 NULL 记录继续采用保守判据。该字段不替代服务实例锁，不改变聊天身份或平台转交协议，也不代表已解决所有平台的 PID 复用问题。独立夹具验证了 schema 27 历史预留行保留、重复打开及真实进程终止后的恢复；正式数据库尚未执行本轮迁移。（此句为其实现时点记录：本机服务已于 2026-09-12 加载 schema 29，见上文与[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)；本段所述 28/29 迁移是否已在正式库执行以该文档的最新条目为准。）
 
-原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
+原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。（2026-09-28 第 30 轮括注：本句与本文他处「出路只有用户在工作台确认后一次性结算」矛盾，且已被代码推翻——`abandonWorkspaceLifecycle`（`src/core/workspace-lifecycle.mjs`）与 `GET/POST /api/v1/projects/:id/workspace-lifecycle` 提供用户确认结算的入口；此处保留原文不改写。）此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
 
 浏览器在发送删除或复用请求前保存原始请求号、参数和目标空间。页面刷新后仍展示“恢复并核对”入口；服务重建后重新建立浏览器凭据，继续提交原参数。连接中断及后端明确标记的未知结果保留恢复材料，只有确认成功或确认失败才能清除。浏览器不能可靠保存材料时，不发送新的空间操作。
 
@@ -75,7 +77,7 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 
 `ugk_work_takeover` 仅消费 `{ sessionId, clientRequestId, transferCode }`；模型不能以“用户已确认”、旧 confirmationRequestId 或旧两步参数签发异常接手权限。过期 resume 的新请求必须到工作台授权；以前已经成功的幂等回执保留原事实，当前能力另按数据库计算，不恢复旧权限。有效普通 Relay 接收保持正常流程。
 
-`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端只收到通用 `INVALID_REQUEST`（该回执不带指引），恢复入口即本条所述的工作台转交面板。
+`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`（2026-09-28 括注：本句少列一个字段。当前 schema 与 HTTP 边界接受的是 `{ continueCode, clientRequestId, declaredWorkspace }`——第三个字段是 alpha.51「接入指令即归属」给全局登记宿主用的工作目录回退，见本文开头与 `src/mcp/stdio-protocol.mjs` 的 resume 定义；退役的只是 `confirmationRequestId`/`expectedRevision`，本处不再重复复述字段清单，以免再次过期）：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端只收到通用 `INVALID_REQUEST`（该回执不带指引），恢复入口即本条所述的工作台转交面板。
 
 签发回执重放时，只在当前授权仍有效时重新提供同一码；已消费、取消、过期或替代只返回当前处理状态，不展示可继续使用的空码或旧码。结果未知时保留原参数与原幂等键重试，不自动创建新授权。消费授权、冻结检查、CAS、新 owner、撤销旧 owner、C 接手节点与回执原子提交。
 

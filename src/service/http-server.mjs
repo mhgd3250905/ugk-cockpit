@@ -762,6 +762,15 @@ const PUBLIC_ERRORS = {
     impact: '这些文件保持原样；Cockpit 没有切换分支或删除目录。',
     requiredAction: '请先处理这些改动，再重新开始或删除空间。',
   },
+  // `git worktree remove` deletes ignored content with the directory and Git
+  // cannot restore it, while neither git's own check nor the dirty probe lists
+  // it. The refusal is journaled, so the escape has to name a new command id.
+  WORKSPACE_IGNORED_CONTENT_CONFIRMATION_REQUIRED: {
+    status: 409,
+    message: '这个开发空间里还有被 Git 忽略的文件，例如依赖、构建产物或本地数据。',
+    impact: '删除本地副本会连这些文件一起从电脑上移除，Git 里没有它们的备份；本次没有删除任何文件。',
+    requiredAction: '请先确认这些文件不再需要。确定可以一起删除时，请在工作台重新发起这次删除；由脚本或其他入口调用时请换一个操作编号重新发起并带上确认标记。',
+  },
   WORKSPACE_IDENTITY_MISMATCH: {
     status: 409,
     message: '这个开发空间已经不是登记时的那份代码。',
@@ -3835,8 +3844,13 @@ export async function createCockpitHttpServer({
         }
         const allowedKeys = action === 'reuse'
           ? new Set(['commandId', 'expectedRevision', 'expectedBaseHead'])
-          : new Set(['commandId', 'expectedRevision']);
+          : new Set(['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval']);
         if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        if (body.userConfirmedIgnoredRemoval !== undefined
+          && typeof body.userConfirmedIgnoredRemoval !== 'boolean') {
           sendError(response, 'INVALID_REQUEST');
           return;
         }
@@ -3861,6 +3875,8 @@ export async function createCockpitHttpServer({
               projectId,
               spaceId,
               expectedRevision: body.expectedRevision,
+              ...(body.userConfirmedIgnoredRemoval === true
+                ? { userConfirmedIgnoredRemoval: true } : {}),
             }, { probe, faultInjector });
         if (result.ok) {
           sendJson(response, 200, result);
@@ -4580,14 +4596,17 @@ export async function createCockpitHttpServer({
           sendError(response, context.code);
           return;
         }
+        // An adopt code belongs to /work/init. Refuse before acceptAssignment:
+        // consuming the dispatch here left an accepted assignment with a session
+        // but no run or lease, behind a refusal that says nothing was changed.
+        if (context.scope?.mode === 'adopt') {
+          sendError(response, 'INVALID_REQUEST', { extra: { reason: 'dispatch_code_needs_work_init' } });
+          return;
+        }
         const { observation } = await observeRegisteredProject(context.projectId, context);
         const accepted = acceptAssignment(db, body);
         if (!accepted.ok) {
           sendError(response, accepted.code);
-          return;
-        }
-        if (accepted.scope?.mode === 'adopt') {
-          sendError(response, 'INVALID_REQUEST');
           return;
         }
         const latestHandoff = readLatestHandoff(db, accepted.projectId);

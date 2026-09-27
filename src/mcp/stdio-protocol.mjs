@@ -35,7 +35,12 @@ function escapeWireSeparators(input) {
 }
 
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
+// Every tool whose service route can answer HTTP 200 with ok:false must be
+// listed here: without it the bridge hands the host a plain result and the
+// failure reads as success. The delivery pair answers 200 on push failures.
 const STRUCTURED_TOOL_NAMES = new Set([
+  'ugk_work_submit_preflight',
+  'ugk_work_submit',
   'ugk_integration_begin',
   'ugk_integration_review',
   'ugk_integration_merge',

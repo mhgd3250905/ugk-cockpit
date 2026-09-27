@@ -186,6 +186,29 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
   }
 }
 
+// `git worktree remove` refuses to delete a worktree holding modified or
+// untracked files, but git-IGNORED content is invisible to that check and to
+// `status --untracked-files=normal`: it is deleted with the directory and is
+// not recoverable from Git. Measured on git 2.50: with only `ignored/` content
+// present the unmodified `worktree remove` exits 0 and the file is gone, while
+// the same file untracked makes git refuse (exit 128). Removing a workspace
+// therefore has to ask the user about this class of content separately.
+//
+// `--untracked-files=normal` keeps the output bounded: an ignored dependency
+// tree collapses into one directory record instead of one per file.
+const IGNORED_STATUS_ARGS = [
+  'status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=matching',
+];
+
+export async function countIgnoredWorktreeEntries(targetPath, {
+  timeoutMs = 5_000,
+  maxBuffer = 4 * 1024 * 1024,
+} = {}) {
+  const result = await git(targetPath, IGNORED_STATUS_ARGS, { timeoutMs, maxBuffer });
+  const entries = result.stdout.split('\0').filter((entry) => entry.startsWith('!!'));
+  return { count: entries.length, entries: entries.slice(0, 20) };
+}
+
 export async function removeGitWorktree(repoPath, {
   targetPath,
   timeoutMs = 15_000,

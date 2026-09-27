@@ -1506,6 +1506,10 @@ function App() {
         : {
             commandId,
             expectedRevision: action.space.revision,
+            // This modal is the user's confirmation, and the dialog text now
+            // names what else goes with the folder: git-ignored content is
+            // deleted by `worktree remove` and cannot be restored from Git.
+            userConfirmedIgnoredRemoval: true,
           };
 
       record = createWorkspaceActionRecord({
@@ -4038,7 +4042,7 @@ function SpaceActionModal({ action, busy, onClose, onConfirm }) {
           <DialogDescription>
             {isReuse
               ? '会为这个空间开始一条新的工作线，基于主项目当前可见的本地版本。'
-              : '会移除这个空间的本地工作副本，释放它占用的电脑空间。'}
+              : '会移除这个空间的本地工作副本，释放它占用的电脑空间；文件夹里被 Git 忽略的内容（依赖、构建产物、本地数据）也会一起删除，而且无法从 Git 恢复。'}
           </DialogDescription>
         </DialogHeader>
 
