@@ -45,10 +45,11 @@ if (files.length === 0) {
 
 const empties = files.filter((file) => {
   const source = readFileSync(file, 'utf8');
-  // A declaration counts only in statement position: the earlier substring
-  // matcher was satisfied by a comment or a string that merely said `test(`.
+  // A declaration counts in statement position (indentation allowed, because a
+  // comment or a JSDoc line has to start with a marker first): the earlier
+  // substring matcher was satisfied by a comment that merely said `test(`.
   // test(), test.serial(), describe.only() and it.skip() all count.
-  return !/^(?:export\s+|await\s+)?(?:test|describe|it)(?:\.\w+)*\s*\(/m.test(source);
+  return !/^\s*(?:export\s+|await\s+)?(?:test|describe|it)(?:\.\w+)*\s*\(/m.test(source);
 });
 if (empties.length > 0) {
   console.error(`test suite gate: files declaring no test()/describe()/it():\n  ${empties.join('\n  ')}`);

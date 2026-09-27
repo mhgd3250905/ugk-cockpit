@@ -1460,9 +1460,10 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     if (workspaceObservation.after.hasChanges) {
       return failOrUnknown({ ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
     }
-    // git-IGNORED content is not "changes" to either git's own worktree-remove
-    // check or the probe above, yet `worktree remove` deletes it with the
-    // directory and Git cannot bring it back. Ask before that happens.
+    // The dirty gate above reads `status --untracked-files=normal`, which never
+    // lists git-IGNORED content, and the product's own `worktree remove` deletes
+    // that content with the directory (measured: exit 0, file gone). Git cannot
+    // bring it back, so the removal asks first.
     // The probe must fail like the one above: an escaping throw would leave the
     // lifecycle reservation held open with no journaled outcome.
     let ignored;

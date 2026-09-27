@@ -120,7 +120,7 @@ test('删除含被忽略文件的工作副本必须先取得用户确认，且�
   assert.equal(existsSync(f.spacePath), true, 'the workspace directory must survive too');
 
   // Confirming with a NEW command id (the refusal is journaled under the old
-  // one) removes it, and says how much content went with it.
+  // one) removes it; the refusal that came first carried ignored_count.
   const removed = await removeDevelopmentWorkspace(f.db, {
     commandId: 'cmd-remove-ignored-confirmed',
     projectId: 'proj-1',
