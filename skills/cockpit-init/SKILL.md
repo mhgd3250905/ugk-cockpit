@@ -26,7 +26,7 @@ description: 通过 UGK Cockpit MCP 把空项目、已有开发或平台派发�
 
 旧消息若只提供 `dispatchCode` 而没有 `initCode`，说明它来自兼容流程，请用户在 Cockpit 重新生成 init 指令；不要把旧流程悄悄当作新流程执行。
 
-`ugk_work_init` 的输入只包含上面的四个字段；不要自行传 `mcpWorkingDirectory`、路径或项目标识，stdio client 会绑定当前工作目录。
+`ugk_work_init` 的输入只包含上面的四个字段，外加一个例外：宿主桥接进程报「没有可识别的工作目录」时，把接入指令里「项目目录」那一行的绝对路径原样作为 `declaredWorkspace` 传入。除此之外不要自行传 `mcpWorkingDirectory`、路径或项目标识，stdio client 会绑定当前工作目录。
 
 ## 不变量与失败处理
 

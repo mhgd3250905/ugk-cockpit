@@ -1,10 +1,12 @@
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { identityMigrationBacklog } from '../src/core/identity-migration.mjs';
 
 // Use the browser session of the actual listener, never a token from another file view.
 export async function verifyServiceData(directory, url) {
   const db = new DatabaseSync(path.join(directory, 'cockpit.db'), { readOnly: true });
   let projects;
+  let owedIdentities = [];
   try {
     // Match the dashboard's visible-project scope: removed and user-archived
     // projects are intentionally absent from the active list; counting them
@@ -15,8 +17,16 @@ export async function verifyServiceData(directory, url) {
       .map((column) => `${column} IS NULL`)
       .join(' AND ');
     projects = db.prepare(`SELECT id FROM projects${visibility ? ` WHERE ${visibility}` : ''}`).all();
+    // 启动核对不能只看列表数量：位置身份尚未收敛的工作副本会在下一次探测时要求
+    // 人工确认，必须在这里就说出来，而不是等用户在工作台撞上。
+    owedIdentities = identityMigrationBacklog(db);
   } finally {
     db.close();
+  }
+  for (const entry of owedIdentities) {
+    console.log(`[WARN] 位置身份尚未收敛：${entry.canonicalPath}（原因 ${entry.reason ?? 'unknown'}`
+      + `${entry.attempts ? `，已尝试 ${entry.attempts} 次` : ''}）。`
+      + '目录重新可见后会在下一次开库自动收敛；不要重新 init、移除项目或清库。');
   }
   const shell = await fetch(url, { signal: AbortSignal.timeout(5000) });
   const cookie = shell.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');

@@ -116,6 +116,67 @@ export function isLocalPath(rawUrl, cwd = null) {
   return existsSync(cwd ? path.resolve(cwd, rawUrl) : rawUrl);
 }
 
+// A UNC is a filesystem path *and* a network name: the local transport resolves
+// it over SMB with the current user's Windows credentials, so a repository-local
+// `remote.*.url` can (a) make the read-only inspection block on, and
+// authenticate to, a host the repository author chose, and (b) turn a delivery
+// push into a write against a machine path no one authorized. Nothing in the
+// product needs this shape, and no caller can vet a host it never saw, so the
+// single gate every remote URL passes through refuses it.
+//
+// The spelling is not the point -- on Windows `\\host\share`, `//host/share`
+// and `file://host/share` all name the same object, and git resolves each of
+// them to the UNC before touching it (measured: `//…invalid/share/….git` still
+// stalled a preflight ~11.7s while `validateRemoteUrlSecurity` accepted it).
+// So judge the path git would use, and refuse any `file://` that keeps a named
+// host: the URL parser erases `localhost` into an empty authority (so it stays
+// the local form), while a named host or IP literal survives and means
+// somebody else's machine (measured: `fileURLToPath('file://host/share/x')`
+// happily returns `\\host\share\x`).
+function isNetworkSharePath(value) {
+  return typeof value === 'string' && value.startsWith('\\\\');
+}
+
+function localPathForGit(url, cwd) {
+  if (url.startsWith('file://')) {
+    try {
+      return fileURLToPath(url);
+    } catch {
+      return null;
+    }
+  }
+  if (!isLocalPath(url, cwd)) return null;
+  return path.resolve(cwd ?? process.cwd(), url);
+}
+
+function unsafeRemoteUrl(message) {
+  return Object.assign(new Error(message), { code: 'UNSAFE_REMOTE_URL' });
+}
+
+function assertNotNetworkShare(url, cwd) {
+  // Public wording is curated in the error maps (http-server PUBLIC_ERRORS and
+  // delivery-messages); this text stays internal and never echoes the URL.
+  if (isNetworkSharePath(url)) {
+    throw unsafeRemoteUrl('Remote URL is a network share path.');
+  }
+  if (url.startsWith('file://')) {
+    let host = '';
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      host = '';
+    }
+    // Any named authority is somebody else's machine, and the product's only
+    // supported local form is file:///path.
+    if (host) {
+      throw unsafeRemoteUrl('file: remote URL names a foreign host.');
+    }
+  }
+  if (isNetworkSharePath(localPathForGit(url, cwd))) {
+    throw unsafeRemoteUrl('Remote URL resolves to a network share path.');
+  }
+}
+
 // A push contacts every pushurl (or every url when no pushurl is set), and
 // resolves any pushInsteadOf rewrite first. `git remote get-url --push --all`
 // enumerates exactly those destinations; plain get-url prints only the first
@@ -184,6 +245,7 @@ export function validateRemoteUrlSecurity(url, { cwd = null } = {}) {
       && !/^(git@)?[a-zA-Z0-9.-]+:[^/\\]/.test(trimmed))) {
     throw Object.assign(new Error('Unsupported remote transport'), { code: 'UNSAFE_REMOTE_URL' });
   }
+  assertNotNetworkShare(trimmed, cwd);
 
   // Reject ext helper, remote-testgit, or custom protocol helper syntax
   if (/^[a-zA-Z0-9_-]+::/i.test(trimmed) || /^ext::/i.test(trimmed) || trimmed.includes('::')) {

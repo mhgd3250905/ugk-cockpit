@@ -26,6 +26,10 @@ npm run setup:zcode
 
 ## 当前版本
 
+`0.1.0-alpha.57` — 审计修复（PR #24，第 29 轮）：仓库本地的**显示**设置 `status.showUntrackedFiles` 不再能改变 Cockpit 的存取决定。此前送审判脏走不带 `-u` 的 `git status`，而工作副本探测走带 `--untracked-files=normal` 的同一条命令——把该键设为 `no`，未跟踪文件就从判脏通道里消失（实测同一夹具、同样的未跟踪文件：默认配置下送审返回已保存已送达且文件确实进入远端树；仅改这个显示设置后返回 `SOURCE_CHANGED_AFTER_SAVE` 却声称 `localSaved: true`，工作副本尚无提交时直接返回 `NO_CHANGES_TO_SUBMIT`）。git 自身 `worktree remove` 的「含未跟踪文件就拒绝」安全网读同一个键，实测设置后未跟踪文件被连带删除。修法按第一性原理：判脏与探测同口径固定 `--untracked-files`，并把该键的默认值固定进 git 前置参数（方向是更保守，不新增误删）；alpha.53 台账的遗留建议由此落地。schema 30 的旧指纹改写现按行留痕、在后续每次开库继续收敛（新增 schema 31 台账 `identity_migration_state`）：一次瞬时不可达（盘符抖动、共享断连、git 尚未可用、敌意配置事后清除）不再把工作副本永久留在旧格式、逼用户人工确认位置，已判定为「无法重算」的行也不再每次开库重复 git 探测。网络共享地址不再被接受为送审远端（`\\host\share\repo.git`、`//host/share/repo.git` 与 `file://host/share` 三种写法一并拒绝，非 loopback 的 `file://` 主机同样拒绝）——只读预检此前会按仓库本地配置去解析并 `stat` 该主机名（实测两种写法各阻塞约 11.8 秒；Windows 上这一步还会以当前用户凭据向对方发起 SMB 认证）。MCP 工具路由的请求体现按声明体积在读取第一个字节前拒绝（此前 18 MiB 宽的上限是先搬进内存再判超：实测 24 路并发让服务进程 RSS 从 67 MB 涨到 234 MB，修复后同批次为 92 MB）。`$cockpit-init` 不再禁止接入指令与 schema 都要求的 `declaredWorkspace`（全局登记宿主的接入曾被这行文案完全挡住）。工作台转交/接入/接手消息里的「项目目录」现取自会话所在的工作副本，而不是永远取主项目目录——绑定在开发空间上的会话照旧提示去接手必然 `RELAY_BINDING_MISMATCH`，现由回归用例钉住。本轮分支树 Windows 全量 713 项 / 706 通过 / 0 失败 / 7 平台跳过、Phase 0 97/97、隔离 outDir 的网页构建通过；完整数字、已证伪与未证实项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+
+以下为 alpha.56 的记录：
+
 `0.1.0-alpha.56` — 审计修复（PR #23，合并提交 `39aa3c5`）：Git 敌意配置门不再打开仓库自己点名到仓库之外的属性来源（此前 `core.attributesFile` 可让每次项目观察都去整份读取任意路径文件、按内容决定放行或拒绝，并把任何读失败误报为「使用了不受支持的 filter」；现仅读仓库自身范围内、且不超过 256KB 的普通文件，越界与超限各按真实原因拒绝，公开错误码不变）；`.git/objects/info/alternates` 里指向不存在或不可达位置的条目不再让项目观察以原始 `ENOENT` 崩溃或无限期挂住请求，改按探测超时预算解析并跳过定位不到的条目；**项目归档**现在对它的主代码位置同样生效（此前只有开发空间被检查，归档后的项目仍可在被归档的文件夹上取得写租约且在工作台不可见）；`/api/v1/mcp/work/begin` 在 Git 探测之后、取写租约之前补上聊天归属复判，与 `work/progress`、`work/finish`、`work/handoff` 一致（实测此前在探测窗口内被接手的旧聊天仍能拿到写租约），并闭合阶段记录里挂作「未证实」的该项；「证明不了归属就返回 null」收回 `readUnambiguousConversationBinding` 自身，不再只靠调用方复查。本轮分支树 Windows 全量与 Phase 0 数字见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
 以下为 alpha.54 的记录：

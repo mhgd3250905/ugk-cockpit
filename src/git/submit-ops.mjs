@@ -30,8 +30,18 @@ export function choosePushRemote(remotes) {
   throw error;
 }
 
+// Exported so a test can pin the flag itself: SAFE_GIT_PREFIX also resets the
+// key, so behaviour alone would stay green with this argument list edited.
+export const UNCOMMITTED_STATUS_ARGS = ['status', '--porcelain=v1', '-z', '--untracked-files=normal'];
+
 export async function hasUncommittedChanges(worktreePath, overrides = {}) {
-  const result = await git(worktreePath, ['status', '--porcelain=v1', '-z'], options(overrides));
+  // `--untracked-files` must be explicit: `status.showUntrackedFiles` is a
+  // repository-local *display* setting, and with it set to `no` an untracked
+  // file disappears from this output, which used to make the submission flow
+  // believe there was nothing to save (while probeGitWorktree, which pins the
+  // flag, still saw the file). The same content must not produce two different
+  // answers depending on how the repository chooses to render `git status`.
+  const result = await git(worktreePath, UNCOMMITTED_STATUS_ARGS, options(overrides));
   return result.stdout.length > 0;
 }
 
