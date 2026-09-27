@@ -1206,7 +1206,11 @@ function App() {
     const projectId = current.seed.id;
     const requestId = current.requestId;
     if (!isCurrentDetailRequest(requestId, projectId)) return;
-    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=30&offset=0`);
+    // Same page sizing as the timer poll: a fixed 30-item page would collapse
+    // the window the user accumulated, and the merge decision cannot rescue
+    // rows a smaller-than-visible page never carried (round-30 review).
+    const limit = calculateRefreshLimit(current.data?.timeline?.items?.length ?? 30);
+    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=${limit}&offset=0`);
     if (!isCurrentDetailRequest(requestId, projectId)) return;
     setProjectDetail((previous) => {
       if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) return previous;

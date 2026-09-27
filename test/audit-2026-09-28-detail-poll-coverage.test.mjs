@@ -61,3 +61,13 @@ test('main.jsx uses the merge decision instead of the freeze branch', () => {
   assert.ok((mainSource.match(/applyPolledProjectDetail\(/g) || []).length >= 2,
     'the action refresh path must keep the same merge decision as the timer poll');
 });
+
+test('the action refresh asks for the window-sized page, like the timer', () => {
+  const start = mainSource.indexOf('async function refreshOpenProjectDetail');
+  const end = mainSource.indexOf('async function refreshManualRecords');
+  assert.ok(start > -1 && end > start, 'guard anchors drifted — locate the function before asserting');
+  const fn = mainSource.slice(start, end);
+  assert.match(fn, /calculateRefreshLimit\(/,
+    'a fixed 30-item page cannot cover a 31..100 window; the merge decision would freeze what the merge could have replaced');
+  assert.doesNotMatch(fn, /\?limit=30&offset=0/);
+});
