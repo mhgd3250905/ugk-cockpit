@@ -1,7 +1,7 @@
 // Gate self-check: `node --test` reports a file that runs zero tests as a pass,
 // and a glob that matches nothing exits 0. Both turn a deleted or emptied test
 // directory into a green gate, so the runner refuses them before the suite starts.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -16,25 +16,29 @@ if (!target) {
 // land here from any directory.
 const targetDir = path.resolve(fileURLToPath(new URL('..', import.meta.url)), target);
 
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage']);
+// Measured against Node 24.15's own discovery (`node --test` with no paths):
+// it descends into `dist`/`coverage`, skips dot-directories such as `.data`,
+// skips node_modules, and does not follow a directory link. Matching that here
+// keeps the gate from red-failing on files the runner never executes, and from
+// missing ones it does.
+const SKIP_DIRS = new Set(['node_modules']);
 
 const files = [];
 try {
   (function walk(dir) {
-    for (const entry of readdirSync(dir).sort()) {
-      const full = path.join(dir, entry);
-      if (statSync(full).isDirectory()) {
-        // Same discovery surface as `node --test` with no path arguments: it
-        // walks the whole package, so the gate has to as well.
-        if (SKIP_DIRS.has(entry)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
         walk(full);
-      } else if (entry.endsWith('.test.mjs')) {
+      } else if (entry.isFile() && entry.name.endsWith('.test.mjs')) {
         files.push(full);
       }
     }
   })(targetDir);
 } catch (error) {
-  console.error(`test suite gate: cannot read ${targetDir}: ${error.message}`);
+  console.error(`test suite gate: cannot read the test tree: ${error.message}`);
   process.exit(1);
 }
 

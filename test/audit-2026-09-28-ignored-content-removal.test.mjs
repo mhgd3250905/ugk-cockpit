@@ -17,8 +17,10 @@ import { probeGitWorktree, safeGitEnvironment, SAFE_GIT_PREFIX } from '../src/gi
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import {
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
+  WorkspaceActionRecoveryDataError,
   createWorkspaceActionRecord,
   readWorkspaceActionRecords,
+  removeWorkspaceActionRecord,
   upsertWorkspaceActionRecord,
   workspaceActionRequestBody,
 } from '../web/src/workspace-action-recovery.mjs';
@@ -332,13 +334,98 @@ test('删除动作的请求体带确认标记，而持久化记录保持旧形�
   });
   assert.deepEqual(workspaceActionRequestBody(reuse), reuse.request);
 
-  // Reverse boundaries: the allow-list still refuses invented keys, and a record
-  // written by the previous bundle stays readable and replayable.
+  // A record written by the intermediate bundle carried the flag inside the
+  // body; rejecting that key would throw for the WHOLE store and make the
+  // pending record disappear with no other discard affordance. It is tolerated
+  // on read and dropped from the canonical shape.
+  const intermediate = readWorkspaceActionRecords({
+    getItem: () => JSON.stringify({
+      version: 1,
+      records: [createWorkspaceActionRecord({
+        kind: 'remove',
+        projectId: 'proj-1',
+        spaceId: 'space-5',
+        request: {
+          commandId: 'cmd-intermediate',
+          expectedRevision: 4,
+          userConfirmedIgnoredRemoval: true,
+        },
+      }), createWorkspaceActionRecord({
+        kind: 'remove',
+        projectId: 'proj-1',
+        spaceId: 'space-6',
+        request: { commandId: 'cmd-still-pending', expectedRevision: 1 },
+      })],
+    }),
+    setItem: () => {},
+  });
+  assert.equal(intermediate.length, 2, 'one flagged record must not poison the whole store');
+  assert.deepEqual(intermediate[0].request, { commandId: 'cmd-intermediate', expectedRevision: 4 });
+  assert.equal(workspaceActionRequestBody(intermediate[0]).userConfirmedIgnoredRemoval, true,
+    'the second, still-pending record must remain readable and replayable');
+  assert.equal(workspaceActionRequestBody(intermediate[1]).userConfirmedIgnoredRemoval, true);
+
+  // A store written by an intermediate bundle carried the confirmation inside
+  // the record. That must not lock the workbench out: `readRawStrict` throws for
+  // the WHOLE store when one record is unacceptable, and the only recovery
+  // affordance reads that same store. The key is tolerated on read and dropped
+  // from the canonical shape; the send-side builder re-derives it.
+  const flagged = createWorkspaceActionRecord({
+    kind: 'remove',
+    projectId: 'proj-1',
+    spaceId: 'space-flagged',
+    request: { commandId: 'cmd-intermediate', expectedRevision: 4 },
+  });
+  const other = createWorkspaceActionRecord({
+    kind: 'remove',
+    projectId: 'proj-1',
+    spaceId: 'space-other',
+    request: { commandId: 'cmd-other', expectedRevision: 1 },
+  });
+  const intermediateValues = new Map([[
+    WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
+    JSON.stringify({
+      version: 1,
+      records: [{ ...flagged, request: { ...flagged.request, userConfirmedIgnoredRemoval: true } }, other],
+    }),
+  ]]);
+  const intermediateStorage = {
+    getItem: (key) => intermediateValues.get(key) ?? null,
+    setItem: (key, value) => { intermediateValues.set(key, value); },
+    removeItem: (key) => { intermediateValues.delete(key); },
+  };
+  const tolerated = readWorkspaceActionRecords(intermediateStorage);
+  assert.equal(tolerated.length, 2, '一条带额外键的记录不得让整份存储读不出来');
+  assert.deepEqual(tolerated[0].request, { commandId: 'cmd-intermediate', expectedRevision: 4 },
+    '读入时丢掉该键，规范形状与首发记录一致');
+  assert.equal(workspaceActionRequestBody(tolerated[0]).userConfirmedIgnoredRemoval, true,
+    '确认标记在发送口重新派生，重放不会永远落在 409 上');
+  assert.equal(upsertWorkspaceActionRecord(tolerated[1], intermediateStorage).length, 2,
+    '同一份存储必须还能写入新操作');
+  assert.equal(removeWorkspaceActionRecord(tolerated[0], intermediateStorage).length, 1,
+    '待核对记录必须能被清掉，不能只剩手工清 localStorage 一条出路');
+
+  // Reverse boundaries: a forged key is still refused, and a non-boolean
+  // confirmation is refused rather than coerced.
   assert.throws(() => createWorkspaceActionRecord({
     kind: 'remove',
     projectId: 'proj-1',
     spaceId: 'space-3',
-    request: { commandId: 'cmd-x', expectedRevision: 1, userConfirmedIgnoredRemoval: true },
+    request: { commandId: 'cmd-x', expectedRevision: 1, force: true },
+  }), TypeError);
+  // The body builder is total in the safe direction only: an unknown kind or an
+  // unnormalizable request throws instead of passing raw stored keys through.
+  assert.throws(() => workspaceActionRequestBody({
+    kind: 'force-remove',
+    request: { commandId: 'cmd-z', expectedRevision: 1 },
+  }), { name: 'WorkspaceActionRecoveryDataError' });
+  assert.throws(() => workspaceActionRequestBody({ kind: 'remove', request: { commandId: 'cmd-w' } }),
+    { name: 'WorkspaceActionRecoveryDataError' });
+  assert.throws(() => createWorkspaceActionRecord({
+    kind: 'remove',
+    projectId: 'proj-1',
+    spaceId: 'space-7',
+    request: { commandId: 'cmd-y', expectedRevision: 1, userConfirmedIgnoredRemoval: 'yes' },
   }), TypeError);
   const legacy = readWorkspaceActionRecords({
     getItem: () => JSON.stringify({
