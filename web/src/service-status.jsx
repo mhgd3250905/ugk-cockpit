@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button } from '@appica/ui-react/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from '@appica/ui-react/dialog';
+import { describeServiceBanner } from './service-status-state.mjs';
 import './service-status.css';
 
 function duration(seconds) {
@@ -16,21 +17,33 @@ export function ServiceStatus({ api }) {
   const [busy, setBusy] = useState(false);
   const [requested, setRequested] = useState(false);
   const [error, setError] = useState('');
+  const requestedRef = useRef(false);
+  requestedRef.current = requested;
+  // 「已请求关闭」不再是终态：关停可能停在在飞请求上。轮询继续跑，
+  // 确认停过之后又恢复应答 = 新一轮服务，请求态归零而不是谎报「仍在响应」。
+  const stoppedOnceRef = useRef(false);
   useEffect(() => {
-    if (!api || requested) return;
+    if (!api) return;
     let alive = true;
     let timer;
     async function poll() {
       try {
         const result = await api('/api/v1/service/status');
         if (!result?.ok || !result.version || !Number.isFinite(result.uptimeSeconds)) throw new Error('服务信息未确认');
-        if (alive) { setInfo(result); setOffline(false); }
-      } catch { if (alive) setOffline(true); }
+        if (alive) {
+          setInfo(result);
+          setOffline(false);
+          if (stoppedOnceRef.current) {
+            stoppedOnceRef.current = false;
+            setRequested(false);
+          }
+        }
+      } catch { if (alive) { setOffline(true); if (requestedRef.current) stoppedOnceRef.current = true; } }
       finally { if (alive) timer = setTimeout(poll, 15000); }
     }
     poll();
     return () => { alive = false; clearTimeout(timer); };
-  }, [api, requested]);
+  }, [api]);
   async function shutdown() {
     if (busy) return;
     setBusy(true); setError('');
@@ -41,12 +54,20 @@ export function ServiceStatus({ api }) {
     } catch (cause) { setError(cause.message || '关闭结果尚未确认，请检查服务状态。'); }
     finally { setBusy(false); }
   }
+  const banner = describeServiceBanner({ requested, offline, status: info?.status });
   return <>
-    <div className={`service-status-strip${offline || requested ? ' is-offline' : ''}`} aria-label="本地服务运行信息">
+    <div className={`service-status-strip${banner.stopped || offline && !requested ? ' is-offline' : ''}`} aria-label="本地服务运行信息">
       <span className="service-status-indicator" aria-hidden="true" />
-      <span role="status">{requested ? '已请求关闭服务' : offline ? '服务未连接' : info ? '服务运行中' : '正在连接服务'}</span>
+      <span role="status">{banner.text}</span>
       {info && !requested && <><span className="service-status-version">v{info.version}</span><span className="service-status-port">端口 {port}</span><span className="service-status-uptime" title={`启动于 ${new Date(info.startedAt).toLocaleString('zh-CN')}`}>已运行 {duration(info.uptimeSeconds)}</span></>}
-      {requested ? <span className="service-status-restart">再次使用时打开 Cockpit 启动器</span> : <button type="button" className="service-shutdown-button" disabled={!info || offline || busy} onClick={() => { setError(''); setOpen(true); }}>关闭服务</button>}
+      {banner.offerRetry && banner.detail && <span className="service-status-detail" title={banner.detail}>{banner.detail}</span>}
+      {banner.stopped
+        ? <span className="service-status-restart">再次使用时打开 Cockpit 启动器</span>
+        : banner.offerRetry
+          ? <button type="button" className="service-shutdown-button" disabled={busy} onClick={() => { setError(''); setOpen(true); }}>重新发起关闭</button>
+          : requested
+            ? <span className="service-status-restart">再次使用时打开 Cockpit 启动器</span>
+            : <button type="button" className="service-shutdown-button" disabled={!info || offline || busy} onClick={() => { setError(''); setOpen(true); }}>关闭服务</button>}
     </div>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}>
       <DialogContent className="ugk-dialog" closeButton closeLabel="关闭确认窗口">
