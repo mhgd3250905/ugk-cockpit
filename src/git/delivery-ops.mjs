@@ -192,7 +192,7 @@ export async function assertSafePushTarget(worktreePath, remote, overrides = {})
   // or applied by git itself during transport, after URL validation would have
   // already succeeded.
   const hostile = await findHostileRepositoryConfiguration(worktreePath, overrides);
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES, reason: hostile.reason });
   const resolved = await runGit(
     worktreePath,
     ['remote', 'get-url', '--push', '--all', remote],
@@ -556,7 +556,7 @@ export async function checkUnsupportedFeatures(cwd) {
     error.code = 'SUBMODULE_UNSUPPORTED';
     throw error;
   }
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES, reason: hostile.reason });
 }
 
 export function validateDeliveryFiles(files, changes, sourcePath) {

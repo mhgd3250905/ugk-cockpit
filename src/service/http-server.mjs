@@ -420,6 +420,12 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 已停止读取，没有修改代码或已有记录。',
     requiredAction: '请在技术详情中检查 Git alternates 配置，确认后再重试。',
   },
+  GIT_ALTERNATE_UNRESOLVED: {
+    status: 409,
+    message: '这份代码的 Git 指向了一个定位不到的对象目录。',
+    impact: 'Cockpit 已停止读取，没有修改代码或已有记录。',
+    requiredAction: '请恢复该磁盘或网络位置，或清理 .git/objects/info/alternates 里不再存在的条目，然后重试。',
+  },
   FOLDER_GRANT_EXPIRED: {
     status: 409,
     message: '这次文件夹选择已经过期。',
@@ -4651,6 +4657,12 @@ export async function createCockpitHttpServer({
           return;
         }
         const { observation } = await observeRegisteredProject(context.projectId, context);
+        // The observation yields to the event loop, and this is the last moment
+        // before the first durable write: a conversation displaced while Git was
+        // being probed must not take the write lease. progress, finish and
+        // handoff already re-assert here; startWriteRun itself never consults
+        // the conversation binding.
+        assertConversationWrite(key, body.sessionId, ['active', 'accepted']);
         // Resolve the assignment CAS before taking the lease: startWriteRun is
         // the first durable step, so a rejection discovered afterwards would
         // leave this session holding a write lease over an assignment that was

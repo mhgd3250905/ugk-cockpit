@@ -207,7 +207,9 @@ test('attributes adopted through the common directory are detected from a linked
     true,
     'fixture 必须真的让链接副本采用该属性',
   );
-  assert.deepEqual(await findHostileRepositoryConfiguration(linked), { kind: 'attributes' });
+  // `reason: 'driver'` names what was found; the other reasons the same gate
+  // now reports are outside-repository / oversized / not-a-file / unreadable.
+  assert.deepEqual(await findHostileRepositoryConfiguration(linked), { kind: 'attributes', reason: 'driver' });
 });
 
 test('a driver hidden in an included config file is detected', async (t) => {

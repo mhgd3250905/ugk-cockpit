@@ -34,7 +34,14 @@ export function readUnambiguousConversationBinding(db, key, worktreeId) {
     SELECT session_id FROM conversation_bindings
     WHERE conversation_key = ? AND worktree_id = ? AND revoked = 0
   `).all(key, worktreeId);
-  if (live.length <= 1) return readConversationBinding(db, key, worktreeId);
+  // A revoked row is the history of who worked here, which is what
+  // `readConversationBinding` is for, but it is not evidence of who works here
+  // now: the transfer that revoked it named a different chat. The live set is
+  // also what must be re-read, because asking for "the newest row for this key"
+  // instead would let a later revoked row for some other session hide a binding
+  // this helper can still prove.
+  if (!live.length) return null;
+  if (live.length === 1) return readConversationBinding(db, key, worktreeId, live[0].session_id);
   const leased = db.prepare(`
     SELECT write_leases.run_id AS run_id
     FROM write_leases

@@ -5,7 +5,11 @@
 - 本分支把 `SUPPORTED_SCHEMA_VERSION` 由 30 推进到 31（新增 `identity_migration_state` 按行台账，并让旧指纹改写在每次开库继续收敛）。部署即对正式库执行 30 → 31 迁移；服务的 `backupBeforeMigration` 会在迁移前自动生成快照，仍须按本文流程在重启后核对已有项目列表与全部详情，不能仅凭 `/health` 返回 200 判定成功。
 - 部署后新增的只读排查项：`identityMigrationBacklog(db)`（`src/core/identity-migration.mjs`）非空即表示仍有工作副本行的位置身份尚未收敛，条目含失败原因与尝试次数。这类行在其目录重新可见后自行收敛，**不需要也不应**通过重新 init、移除项目或清库来「处理」。
 - 行为变化知悉：把仓库本地 `status.showUntrackedFiles` 设为 `no` 的项目，送审现按真实未跟踪内容判定（此前会被当作没有改动）；`remote.*.url` 指向网络共享地址（`\\host\share`）的仓库在只读预检阶段即返回 `UNSAFE_REMOTE_URL`，不再尝试解析该路径。
-- 截至本次登记，本机正式服务仍运行 alpha.54 / schema 30（本轮未重启、未改数据）。
+- 截至本次登记，本机正式服务仍运行 alpha.56 / schema 30（本轮未重启、未改数据）。
+
+## alpha.56 部署验收（2026-09-27）
+
+PR #23（第 28 轮审计修复：属性来源读取边界、对象目录解析预算、归档主位置准入、`work/begin` 探测后复判聊天归属、归属助手收回 revoked 行、同步 git 通道补 config；版本锚点 alpha.56——alpha.55 由待合并的 PR #21 占用）经复审后合并为 no-ff merge `39aa3c5`（复审：隔离 worktree 全量 701 项 0 失败 + phase0 97/97 真实退出码；pristine main 基线红实测 15 红 20 绿与声明分布吻合；原语级实测证实越界属性源不被打开即拒绝）。用户授权一条龙部署。部署前以 VACUUM INTO 创建快照 `.data/service/backups/before-alpha56-deploy-2026-09-27T17-20-29.422Z.db`（schema 30、integrity ok、11 条项目记录）。启动器（PowerShell `-File` 直调，`-TimeoutSeconds 180 -NoPause`）构建网页、核验并停止旧 PID 11780（alpha.54），隐藏启动 PID 21240，外壳正常退出。`/health` 确认 `0.1.0-alpha.56`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个可见项目及全部详情通过。未重新 init、未覆盖数据库。行为变化知悉：仓库把 `core.attributesFile` 指向自身之外时此前按内容无害即放行，现一律拒绝（`GIT_FILTER_UNSUPPORTED` + 具体原因）；`.git/objects/info/alternates` 悬空条目被跳过，定位不到之外的失败按 `GIT_ALTERNATE_UNRESOLVED` 拒绝。宿主插件与全局 MCP 登记不受影响。
 
 ## alpha.54 部署验收（2026-09-25）
 

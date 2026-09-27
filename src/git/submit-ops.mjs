@@ -55,7 +55,7 @@ export async function rejectUnsupportedSubmitFeatures(worktreePath, overrides = 
     error.code = 'SUBMODULE_UNSUPPORTED';
     throw error;
   }
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES, reason: hostile.reason });
 }
 
 export async function stageAllChanges(worktreePath, overrides = {}) {
