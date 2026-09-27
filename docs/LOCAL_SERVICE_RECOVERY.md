@@ -1,11 +1,8 @@
 # 本机服务数据一致性与故障恢复
 
-## 待部署：alpha.57（第 29 轮审计，PR #24，截至 2026-09-27 未合并、未部署）
+## alpha.57 部署验收（2026-09-27）
 
-- 本分支把 `SUPPORTED_SCHEMA_VERSION` 由 30 推进到 31（新增 `identity_migration_state` 按行台账，并让旧指纹改写在每次开库继续收敛）。部署即对正式库执行 30 → 31 迁移；服务的 `backupBeforeMigration` 会在迁移前自动生成快照，仍须按本文流程在重启后核对已有项目列表与全部详情，不能仅凭 `/health` 返回 200 判定成功。
-- 部署后新增的只读排查项：`identityMigrationBacklog(db)`（`src/core/identity-migration.mjs`）非空即表示仍有工作副本行的位置身份尚未收敛，条目含失败原因与尝试次数。这类行在其目录重新可见后自行收敛，**不需要也不应**通过重新 init、移除项目或清库来「处理」。
-- 行为变化知悉：把仓库本地 `status.showUntrackedFiles` 设为 `no` 的项目，送审现按真实未跟踪内容判定（此前会被当作没有改动）；`remote.*.url` 指向网络共享地址（`\\host\share`）的仓库在只读预检阶段即返回 `UNSAFE_REMOTE_URL`，不再尝试解析该路径。
-- 截至本次登记，本机正式服务仍运行 alpha.56 / schema 30（本轮未重启、未改数据）。
+PR #24（第 29 轮审计修复：仓库本地显示开关不再改变存取决定与删除原语安全网、身份改写按行台账收敛（新增 schema 31 `identity_migration_state`）、网络共享远端地址在唯一 URL 闸门拒绝、MCP 请求体按声明体积在读取前拒绝、`$cockpit-init` 文案放开 `declaredWorkspace`、转交/接入/接手/重发提示取会话自己的工作副本；版本锚点 alpha.57——alpha.55 由仍 OPEN 的 PR #21 占用、alpha.56 已由先合入的 PR #23 占用）经独立复审后合并为 no-ff merge `14817de`（复审：独立克隆在 b404372 全量 713/706/0 失败/7 跳过、集成 head 5451341 全量 730/723/0 失败/7 跳过、phase0 97/97，均真实退出码；远端 `test-windows` 于同一 head 转绿；PR 描述的冲突面与验证表由复审方实测回填）。用户授权一条龙部署。部署前以 VACUUM INTO 创建快照 `.data/service/backups/before-alpha57-deploy-2026-09-27T18-29-21.593Z.db`（schema 30、integrity ok、11 条项目记录）。启动器（PowerShell `-File` 直调，`-TimeoutSeconds 180 -NoPause`）构建网页、核验并停止旧服务（alpha.56），隐藏启动新服务；外壳因输出管道滞留由验收会话终止（alpha.53 同款先例），终止后复测服务健康不受影响。`/health` 确认 `0.1.0-alpha.57`；正式库完成 schema 30 → 31 迁移，user_version 31、integrity ok、外键 0；`verify-service-data` 核对 10 个可见项目及全部详情通过。`identity_migration_state` 台账 16 行 settled、4 行 retry（均为已删除或失联的旧工作副本路径：`E:\AII-Worktree`、`E:\AII\REVIEWS\review-ugk-android`、`E:\AII\REVIEWS\review-ugk-cockpit`、`E:\AII\REVIEWS\review-ugk-cockpit-audit`），按设计留痕待收敛，不需要也不应通过重新 init、移除项目或清库「处理」。行为变化知悉：把仓库本地 `status.showUntrackedFiles` 设为 `no` 的项目送审现按真实未跟踪内容判定；`remote.*.url` 指向网络共享地址的仓库在只读预检阶段即返回 `UNSAFE_REMOTE_URL`。未重新 init、未覆盖数据库。宿主插件与全局 MCP 登记不受影响。
 
 ## alpha.56 部署验收（2026-09-27）
 
