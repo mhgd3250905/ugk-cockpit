@@ -54,6 +54,7 @@ import {
   markWorkspaceActionUnknown,
   readWorkspaceActionRecordsWithStatus,
   removeWorkspaceActionRecord,
+  workspaceActionRequestBody,
   upsertWorkspaceActionRecord,
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
@@ -1414,7 +1415,9 @@ function App() {
     try {
       await api(workspaceActionPath(record), {
         method: 'POST',
-        body: JSON.stringify(record.request),
+        // Derived from the durable record, so the first attempt and the
+        // “恢复并核对” replay always send exactly the same request body.
+        body: JSON.stringify(workspaceActionRequestBody(record)),
       });
     } catch (error) {
       const outcome = classifyWorkspaceActionError(error);
@@ -1506,10 +1509,6 @@ function App() {
         : {
             commandId,
             expectedRevision: action.space.revision,
-            // This modal is the user's confirmation, and the dialog text now
-            // names what else goes with the folder: git-ignored content is
-            // deleted by `worktree remove` and cannot be restored from Git.
-            userConfirmedIgnoredRemoval: true,
           };
 
       record = createWorkspaceActionRecord({

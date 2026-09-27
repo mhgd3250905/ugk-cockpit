@@ -65,21 +65,25 @@ function normalizeRequest(kind, request) {
     };
   }
 
-  // The removal confirmation must survive the durable record: recovery resends
-  // exactly this body, and dropping the flag would make "恢复并核对" land on the
-  // ignored-content refusal forever.
-  if (Object.keys(request).some((key) => !['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'].includes(key))) {
-    return null;
-  }
-  if (request.userConfirmedIgnoredRemoval !== undefined
-    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
+  // The durable record keeps the pre-existing shape on purpose: a tab still
+  // running the previous bundle must be able to read it. The confirmation that
+  // removing ignored content requires is added by workspaceActionRequestBody at
+  // send time, which is the single POST site for both the first attempt and the
+  // “恢复并核对” replay, so both send exactly the same body.
+  if (Object.keys(request).some((key) => !['commandId', 'expectedRevision'].includes(key))) {
     return null;
   }
   return {
     commandId: request.commandId,
     expectedRevision: request.expectedRevision,
-    ...(request.userConfirmedIgnoredRemoval === true ? { userConfirmedIgnoredRemoval: true } : {}),
   };
+}
+
+export function workspaceActionRequestBody(record) {
+  const request = normalizeRequest(record?.kind, record?.request);
+  if (!request) return record?.request;
+  if (record.kind !== 'remove') return request;
+  return { ...request, userConfirmedIgnoredRemoval: true };
 }
 
 function normalizeLastError(error) {

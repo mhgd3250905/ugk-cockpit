@@ -20,6 +20,7 @@ import {
   createWorkspaceActionRecord,
   readWorkspaceActionRecords,
   upsertWorkspaceActionRecord,
+  workspaceActionRequestBody,
 } from '../web/src/workspace-action-recovery.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -221,6 +222,7 @@ test('HTTP 边界：确认标记被接受，未确认的删除返回 409 与可�
     assert.ok(refusal.message && refusal.impact && refusal.required_action,
       JSON.stringify(refusal));
     assert.match(refusal.required_action, /重新发起/, JSON.stringify(refusal));
+  assert.equal(refusal.ignored_count, 1, JSON.stringify(refusal));
     assert.equal(existsSync(onlyCopy), true, 'the HTTP refusal must not have deleted anything');
 
     // A new command id carries the confirmation (the refusal is journaled under
@@ -238,17 +240,14 @@ test('HTTP 边界：确认标记被接受，未确认的删除返回 409 与可�
   }
 });
 
-test('工作台文案必须说明被忽略的文件也会一起删除，并带上确认标记', () => {
+test('工作台文案必须披露被忽略内容，删除请求体统一由恢复记录派生', () => {
   const mainJsx = readFileSync(path.join(repoRoot, 'web', 'src', 'main.jsx'), 'utf8');
   assert.match(mainJsx, /被 Git 忽略的内容（依赖、构建产物、本地数据）也会一起删除/,
     'the remove dialog has to disclose what else is deleted');
-  const NL = String.fromCharCode(10);
-  const branchStart = mainJsx.indexOf(': {' + NL + '            commandId,' + NL
-    + '            expectedRevision: action.space.revision,');
-  assert.ok(branchStart >= 0, 'the confirmed remove request block was not found');
-  const removeBranch = mainJsx.slice(branchStart, mainJsx.indexOf('record = createWorkspaceActionRecord'));
-  assert.match(removeBranch, /userConfirmedIgnoredRemoval: true/,
-    'the confirmed dialog action must send the confirmation flag');
+  assert.match(mainJsx, /body: JSON\.stringify\(workspaceActionRequestBody\(record\)\)/,
+    'both the first attempt and the recovery replay must derive the body from the record');
+  assert.doesNotMatch(mainJsx, /body: JSON\.stringify\(record\.request\)/,
+    'posting the raw record body would drop the removal confirmation on replay');
 });
 
 // The ignored-content probe is a new git call on the deletion path. If it throws
@@ -261,9 +260,9 @@ test('被忽略内容探测失败时按预检拒绝收束，不把异常抛出�
   const onlyCopy = path.join(f.spacePath, 'local-data', 'only-copy.md');
   writeFileSync(onlyCopy, '只存在于这台机器上的资料' + String.fromCharCode(10));
 
-  const failing = Object.assign(new Error('status probe timed out'), {
-    code: 'GIT_STATUS_TIMEOUT',
-  });
+  // A real git failure surfaces either a numeric exit code or ETIMEDOUT; neither
+  // is a public error code, so the gate has to settle as the mapped probe failure.
+  const failing = Object.assign(new Error('status probe failed'), { code: 128 });
   const result = await removeDevelopmentWorkspace(f.db, {
     commandId: 'cmd-remove-probe-fails',
     projectId: 'proj-1',
@@ -274,7 +273,7 @@ test('被忽略内容探测失败时按预检拒绝收束，不把异常抛出�
     countIgnoredWorktreeEntries: async () => { throw failing; },
   });
   assert.equal(result.ok, false, JSON.stringify(result));
-  assert.equal(result.code, 'GIT_STATUS_TIMEOUT', JSON.stringify(result));
+  assert.equal(result.code, 'WORKSPACE_PROBE_FAILED', JSON.stringify(result));
   assert.equal(result.outcome, 'confirmed_failure', JSON.stringify(result));
   assert.equal(existsSync(onlyCopy), true, 'a failed probe must not delete anything');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM repository_locks').get().n, 0,
@@ -289,68 +288,79 @@ test('被忽略内容探测失败时按预检拒绝收束，不把异常抛出�
     spaceId: f.spaceId,
     expectedRevision: f.space.revision,
   }, { probe: probeGitWorktree });
-  assert.equal(replay.code, 'GIT_STATUS_TIMEOUT', JSON.stringify(replay));
+  assert.equal(replay.code, 'WORKSPACE_PROBE_FAILED', JSON.stringify(replay));
 });
-// The workbench mints a durable recovery record from the exact body it is about
-// to send. That module keeps its own allow-list, so a new request field that is
-// not accepted there throws before the first POST — breaking every removal, not
-// only the ones with ignored content.
-test('工作台恢复记录必须接受并原样重放带确认标记的删除请求', () => {
+// The workbench mints a durable recovery record and the same record is what the
+// “恢复并核对” button replays. The removal confirmation therefore has to be part of
+// the body built from that record — and it must not change the stored shape, or a
+// tab still running the previous bundle can no longer read its own pending record.
+test('删除动作的请求体带确认标记，而持久化记录保持旧形状', () => {
   const values = new Map();
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => { values.set(key, value); },
     removeItem: (key) => { values.delete(key); },
   };
-  const request = {
-    commandId: 'cmd-ui-remove-confirmed',
-    expectedRevision: 3,
-    userConfirmedIgnoredRemoval: true,
-  };
   const record = createWorkspaceActionRecord({
     kind: 'remove',
     projectId: 'proj-1',
     spaceId: 'space-1',
     spaceName: '空间一',
-    request,
+    request: { commandId: 'cmd-ui-remove-confirmed', expectedRevision: 3 },
     now: '2026-09-28T10:00:00.000Z',
   });
-  assert.deepEqual(record.request, request, 'the record must carry the confirmation');
-  const persisted = upsertWorkspaceActionRecord(record, storage);
-  assert.equal(persisted.length, 1);
+  assert.deepEqual(record.request, { commandId: 'cmd-ui-remove-confirmed', expectedRevision: 3 },
+    '被持久化的记录体不得因新键而改变形状');
+  assert.deepEqual(workspaceActionRequestBody(record), {
+    commandId: 'cmd-ui-remove-confirmed',
+    expectedRevision: 3,
+    userConfirmedIgnoredRemoval: true,
+  });
+
+  upsertWorkspaceActionRecord(record, storage);
   const reloaded = readWorkspaceActionRecords(storage);
-  assert.deepEqual(reloaded[0].request, request,
-    '“恢复并核对”重发的必须是被持久化的同一份请求体，否则永远落在 409 上');
+  assert.equal(reloaded.length, 1);
+  assert.deepEqual(workspaceActionRequestBody(reloaded[0]), workspaceActionRequestBody(record),
+    '“恢复并核对”重发的请求体必须与首次发送逐字节相同');
+
+  // Reuse keeps its own body and must not gain a removal confirmation.
+  const reuse = createWorkspaceActionRecord({
+    kind: 'reuse',
+    projectId: 'proj-1',
+    spaceId: 'space-2',
+    request: { commandId: 'cmd-ui-reuse', expectedRevision: 1, expectedBaseHead: 'a'.repeat(40) },
+  });
+  assert.deepEqual(workspaceActionRequestBody(reuse), reuse.request);
 
   // Reverse boundaries: the allow-list still refuses invented keys, and a record
-  // written before this change stays readable.
+  // written by the previous bundle stays readable and replayable.
   assert.throws(() => createWorkspaceActionRecord({
     kind: 'remove',
     projectId: 'proj-1',
-    spaceId: 'space-2',
-    request: { commandId: 'cmd-x', expectedRevision: 1, force: true },
+    spaceId: 'space-3',
+    request: { commandId: 'cmd-x', expectedRevision: 1, userConfirmedIgnoredRemoval: true },
   }), TypeError);
-  const legacyStorage = {
+  const legacy = readWorkspaceActionRecords({
     getItem: () => JSON.stringify({
       version: 1,
       records: [{
-      version: 1,
-      id: 'workspace-action:remove:proj-1:space-3',
-      kind: 'remove',
-      projectId: 'proj-1',
-      spaceId: 'space-3',
-      spaceName: '旧记录',
-      commandId: 'cmd-legacy',
-      request: { commandId: 'cmd-legacy', expectedRevision: 2 },
-      state: 'pending',
-      lastError: null,
-      createdAt: '2026-09-27T10:00:00.000Z',
+        version: 1,
+        id: 'workspace-action:remove:proj-1:space-4',
+        kind: 'remove',
+        projectId: 'proj-1',
+        spaceId: 'space-4',
+        spaceName: '旧记录',
+        commandId: 'cmd-legacy',
+        request: { commandId: 'cmd-legacy', expectedRevision: 2 },
+        state: 'pending',
+        lastError: null,
+        createdAt: '2026-09-27T10:00:00.000Z',
         updatedAt: '2026-09-27T10:00:00.000Z',
       }],
     }),
     setItem: () => {},
-  };
-  const legacy = readWorkspaceActionRecords(legacyStorage);
-  assert.equal(legacy.length, 1, 'a record without the new key must still load');
-  assert.deepEqual(legacy[0].request, { commandId: 'cmd-legacy', expectedRevision: 2 });
+  });
+  assert.equal(legacy.length, 1, 'a record written before this change must still load');
+  assert.equal(workspaceActionRequestBody(legacy[0]).userConfirmedIgnoredRemoval, true,
+    'the pending removal still gets the confirmation it was originally granted');
 });

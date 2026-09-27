@@ -1473,9 +1473,12 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
         space.canonicalPath,
       );
     } catch (error) {
+      // Same settled shape as the dirty probe above: git failures surface as a
+      // raw exit code (128) or ETIMEDOUT, and an unmapped code would collapse
+      // the public response to REQUEST_FAILED and stay journaled that way.
       return failOrUnknown({
         ok: false,
-        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        code: 'WORKSPACE_PROBE_FAILED',
         spaceId: space.spaceId,
         message: error.message,
       });

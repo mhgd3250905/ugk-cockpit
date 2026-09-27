@@ -3893,8 +3893,9 @@ export async function createCockpitHttpServer({
             extra: {
               space_id: spaceId,
               outcome,
-              // How much ignored content the confirmation covers, when the core
-              // counted it; the operator decides with this number in hand.
+              // How much ignored content the confirmation covers. The workbench
+              // confirms in its dialog, so this reaches script/ops callers that
+              // have to decide what the number means.
               ...(typeof result.ignoredCount === 'number' ? { ignored_count: result.ignoredCount } : {}),
               state: command?.state ?? 'received',
               retryable: !confirmedFailure,
