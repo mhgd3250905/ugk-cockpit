@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 // a managed workspace must therefore fail closed before touching Git.
 async function assertWorkspaceRepositoryAllowed(repoPath, overrides = {}) {
   const hostile = await findHostileRepositoryConfiguration(repoPath, overrides);
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES, reason: hostile.reason });
 }
 
 export function generateStableBranchName(opaqueOrProjectId, maybeCommandId) {

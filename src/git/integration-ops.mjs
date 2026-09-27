@@ -25,7 +25,7 @@ export async function fastForwardMain(worktreePath, sourceCommit, overrides = {}
   // A fast-forward updates the working tree, so repository-local smudge filters
   // would run here before any remote is contacted. Fail closed first.
   const hostile = await findHostileRepositoryConfiguration(worktreePath, overrides);
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages: DELIVERY_CONFIG_ERROR_CODES, reason: hostile.reason });
   await git(
     worktreePath,
     ['-c', `core.hooksPath=${EMPTY_HOOKS_PATH}`, 'merge', '--ff-only', sourceCommit],
