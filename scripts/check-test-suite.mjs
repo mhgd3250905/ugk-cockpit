@@ -16,13 +16,21 @@ if (!target) {
 // land here from any directory.
 const targetDir = path.resolve(fileURLToPath(new URL('..', import.meta.url)), target);
 
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage']);
+
 const files = [];
 try {
   (function walk(dir) {
     for (const entry of readdirSync(dir).sort()) {
       const full = path.join(dir, entry);
-      if (statSync(full).isDirectory()) walk(full);
-      else if (entry.endsWith('.test.mjs')) files.push(full);
+      if (statSync(full).isDirectory()) {
+        // Same discovery surface as `node --test` with no path arguments: it
+        // walks the whole package, so the gate has to as well.
+        if (SKIP_DIRS.has(entry)) continue;
+        walk(full);
+      } else if (entry.endsWith('.test.mjs')) {
+        files.push(full);
+      }
     }
   })(targetDir);
 } catch (error) {
@@ -37,9 +45,10 @@ if (files.length === 0) {
 
 const empties = files.filter((file) => {
   const source = readFileSync(file, 'utf8');
-  // test(), test.serial(), describe.only(), it.skip() all count as declaring a
-  // case; what must not pass is a file that declares none at all.
-  return !/(^|[^.\w])(test|describe|it)(?:\.\w+)*\s*\(/m.test(source);
+  // A declaration counts only in statement position: the earlier substring
+  // matcher was satisfied by a comment or a string that merely said `test(`.
+  // test(), test.serial(), describe.only() and it.skip() all count.
+  return !/^(?:export\s+|await\s+)?(?:test|describe|it)(?:\.\w+)*\s*\(/m.test(source);
 });
 if (empties.length > 0) {
   console.error(`test suite gate: files declaring no test()/describe()/it():\n  ${empties.join('\n  ')}`);

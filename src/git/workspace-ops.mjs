@@ -205,8 +205,8 @@ export async function countIgnoredWorktreeEntries(targetPath, {
   maxBuffer = 4 * 1024 * 1024,
 } = {}) {
   const result = await git(targetPath, IGNORED_STATUS_ARGS, { timeoutMs, maxBuffer });
-  const entries = result.stdout.split('\0').filter((entry) => entry.startsWith('!!'));
-  return { count: entries.length, entries: entries.slice(0, 20) };
+  // Only `!!` records name ignored content; the count is what the caller needs.
+  return { count: result.stdout.split('\0').filter((entry) => entry.startsWith('!!')).length };
 }
 
 export async function removeGitWorktree(repoPath, {

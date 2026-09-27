@@ -65,12 +65,20 @@ function normalizeRequest(kind, request) {
     };
   }
 
-  if (Object.keys(request).some((key) => !['commandId', 'expectedRevision'].includes(key))) {
+  // The removal confirmation must survive the durable record: recovery resends
+  // exactly this body, and dropping the flag would make "恢复并核对" land on the
+  // ignored-content refusal forever.
+  if (Object.keys(request).some((key) => !['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'].includes(key))) {
+    return null;
+  }
+  if (request.userConfirmedIgnoredRemoval !== undefined
+    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
     return null;
   }
   return {
     commandId: request.commandId,
     expectedRevision: request.expectedRevision,
+    ...(request.userConfirmedIgnoredRemoval === true ? { userConfirmedIgnoredRemoval: true } : {}),
   };
 }
 

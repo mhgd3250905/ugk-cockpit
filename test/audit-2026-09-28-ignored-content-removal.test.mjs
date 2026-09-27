@@ -15,6 +15,12 @@ import {
 } from '../src/core/workspaces.mjs';
 import { probeGitWorktree, safeGitEnvironment, SAFE_GIT_PREFIX } from '../src/git/probe.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
+import {
+  WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
+  createWorkspaceActionRecord,
+  readWorkspaceActionRecords,
+  upsertWorkspaceActionRecord,
+} from '../web/src/workspace-action-recovery.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -284,4 +290,67 @@ test('被忽略内容探测失败时按预检拒绝收束，不把异常抛出�
     expectedRevision: f.space.revision,
   }, { probe: probeGitWorktree });
   assert.equal(replay.code, 'GIT_STATUS_TIMEOUT', JSON.stringify(replay));
+});
+// The workbench mints a durable recovery record from the exact body it is about
+// to send. That module keeps its own allow-list, so a new request field that is
+// not accepted there throws before the first POST — breaking every removal, not
+// only the ones with ignored content.
+test('工作台恢复记录必须接受并原样重放带确认标记的删除请求', () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+  };
+  const request = {
+    commandId: 'cmd-ui-remove-confirmed',
+    expectedRevision: 3,
+    userConfirmedIgnoredRemoval: true,
+  };
+  const record = createWorkspaceActionRecord({
+    kind: 'remove',
+    projectId: 'proj-1',
+    spaceId: 'space-1',
+    spaceName: '空间一',
+    request,
+    now: '2026-09-28T10:00:00.000Z',
+  });
+  assert.deepEqual(record.request, request, 'the record must carry the confirmation');
+  const persisted = upsertWorkspaceActionRecord(record, storage);
+  assert.equal(persisted.length, 1);
+  const reloaded = readWorkspaceActionRecords(storage);
+  assert.deepEqual(reloaded[0].request, request,
+    '“恢复并核对”重发的必须是被持久化的同一份请求体，否则永远落在 409 上');
+
+  // Reverse boundaries: the allow-list still refuses invented keys, and a record
+  // written before this change stays readable.
+  assert.throws(() => createWorkspaceActionRecord({
+    kind: 'remove',
+    projectId: 'proj-1',
+    spaceId: 'space-2',
+    request: { commandId: 'cmd-x', expectedRevision: 1, force: true },
+  }), TypeError);
+  const legacyStorage = {
+    getItem: () => JSON.stringify({
+      version: 1,
+      records: [{
+      version: 1,
+      id: 'workspace-action:remove:proj-1:space-3',
+      kind: 'remove',
+      projectId: 'proj-1',
+      spaceId: 'space-3',
+      spaceName: '旧记录',
+      commandId: 'cmd-legacy',
+      request: { commandId: 'cmd-legacy', expectedRevision: 2 },
+      state: 'pending',
+      lastError: null,
+      createdAt: '2026-09-27T10:00:00.000Z',
+        updatedAt: '2026-09-27T10:00:00.000Z',
+      }],
+    }),
+    setItem: () => {},
+  };
+  const legacy = readWorkspaceActionRecords(legacyStorage);
+  assert.equal(legacy.length, 1, 'a record without the new key must still load');
+  assert.deepEqual(legacy[0].request, { commandId: 'cmd-legacy', expectedRevision: 2 });
 });

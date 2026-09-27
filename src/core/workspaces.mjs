@@ -1467,9 +1467,9 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     // lifecycle reservation held open with no journaled outcome.
     let ignored;
     try {
+      // Its own budget, not the removal effect's 15s: this is a read-only probe.
       ignored = await (options.countIgnoredWorktreeEntries ?? countIgnoredWorktreeEntries)(
         space.canonicalPath,
-        { timeoutMs: options.timeoutMs ?? 5_000, maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024 },
       );
     } catch (error) {
       return failOrUnknown({
