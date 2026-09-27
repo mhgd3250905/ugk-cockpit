@@ -46,6 +46,8 @@ import {
 } from './avatar-color.mjs';
 import { copyNoteText } from './copy-note-text.mjs';
 import { completeAssignmentCopy } from './assignment-copy-flow.mjs';
+import { applyPolledProjectDetail } from './project-detail-poll.mjs';
+import { describeSpaceCreateBlock } from './space-create-notice.mjs';
 import {
   classifyWorkspaceActionError,
   createWorkspaceActionRecord,
@@ -862,11 +864,9 @@ function App() {
             || prev.seed.id !== activeDetailProjectId
             || prev.loadingMore
           ) return prev;
-          const visibleCount = prev.data?.timeline?.items?.length ?? 0;
-          if (visibleCount > limit) return prev;
           return {
             ...prev,
-            data,
+            data: applyPolledProjectDetail(prev.data, data),
             loading: false,
             error: null,
           };
@@ -1229,7 +1229,12 @@ function App() {
     const project = current?.data?.project;
     const projectId = project?.id;
     const requestId = current?.requestId;
-    if (!projectId || !project?.git?.head || !isCurrentDetailRequest(requestId, projectId)) return;
+    if (!projectId || !isCurrentDetailRequest(requestId, projectId)) return;
+    const blocked = describeSpaceCreateBlock(project);
+    if (blocked) {
+      setProjectDetail((previous) => previous ? { ...previous, actionNotice: blocked } : previous);
+      return;
+    }
     setBusy(true);
     try {
       const selected = await api('/api/v1/folders/select-empty', { method: 'POST', body: '{}' });

@@ -246,7 +246,19 @@ export function readProjectTimeline(db, projectId, { limit = 30, offset = 0 } = 
       ORDER BY s2.observed_at DESC, s2.id DESC LIMIT 1
     )
     LEFT JOIN runs r ON r.id = a.session_id
-    WHERE a.project_id = ? AND (a.status != 'pending' OR a.session_id IS NOT NULL OR pe.id IS NOT NULL)
+    -- Only rows that actually happened become 'init' nodes. A never-accepted
+    -- invitation is cancelled by closing its work line; under the old
+    -- status != 'pending' branch that cancelled row entered the history as
+    -- a fabricated adoption node. Evidence that something happened is a
+    -- bound session, an adopted progress event, or a baseline snapshot keyed
+    -- by the assignment itself (legacy shape the join above already supports).
+    WHERE a.project_id = ?
+      AND (a.session_id IS NOT NULL
+        OR pe.id IS NOT NULL
+        OR EXISTS (
+          SELECT 1 FROM snapshots s3
+          WHERE s3.phase = 'baseline' AND s3.run_id = a.id
+        ))
   `).all(projectId);
 
   const initSessionIds = new Set(assignmentRows.map((r) => r.session_id).filter(Boolean));
@@ -801,7 +813,7 @@ export function readProjectDetail(db, projectId, options = {}) {
       expiresAt: db.prepare(`
         SELECT expires_at FROM dispatch_grants
         WHERE assignment_id = ? AND state = 'active'
-        ORDER BY created_at DESC LIMIT 1
+        ORDER BY created_at DESC, id DESC LIMIT 1
       `).get(activeAssignment.id)?.expires_at ?? null,
     } : null,
     waitingAgent: isWaiting ? {

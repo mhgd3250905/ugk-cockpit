@@ -1903,6 +1903,19 @@ const MCP_CONTEXT_BINDING_KEYS = new Set([
   'acceptedRevision',
 ]);
 
+// ugk_work_accept publishes exactly these two keys with additionalProperties:false,
+// and the stdio gate validateAcceptArgs enforces the same set. The HTTP surface must
+// not be wider than the tool schema: before this whitelist, a direct caller could
+// self-mint `sessionId` — measured, a 200,009-character value was accepted with 200
+// and persisted into assignments.session_id, dispatch_grants.accepted_session_id and
+// commands.run_id, after which every export that sanitizes through
+// SAFE_SESSION_ID_PATTERN (≤128) reports the session as null: a session the platform
+// can no longer address. `commandId` was likewise caller-chosen for the command row.
+const MCP_ACCEPT_KEYS = new Set([
+  'dispatchCode',
+  'clientRequestId',
+]);
+
 function rejectUnexpectedMcpFields(body, allowedKeys, operation) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     const error = new Error(`Invalid ${operation} request.`);
@@ -4573,6 +4586,7 @@ export async function createCockpitHttpServer({
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/accept') {
         const body = await readMcpBody(request);
+        rejectUnexpectedMcpFields(body, MCP_ACCEPT_KEYS, 'accept');
         requireString(body, 'dispatchCode');
         requireString(body, 'clientRequestId');
         const context = readDispatchContext(db, body);
