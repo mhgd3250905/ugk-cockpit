@@ -1,5 +1,9 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.56 部署验收（2026-09-27）
+
+PR #23（第 28 轮审计修复：属性来源读取边界、对象目录解析预算、归档主位置准入、`work/begin` 探测后复判聊天归属、归属助手收回 revoked 行、同步 git 通道补 config；版本锚点 alpha.56——alpha.55 由待合并的 PR #21 占用）经复审后合并为 no-ff merge `39aa3c5`（复审：隔离 worktree 全量 701 项 0 失败 + phase0 97/97 真实退出码；pristine main 基线红实测 15 红 20 绿与声明分布吻合；原语级实测证实越界属性源不被打开即拒绝）。用户授权一条龙部署。部署前以 VACUUM INTO 创建快照 `.data/service/backups/before-alpha56-deploy-2026-09-27T17-20-29.422Z.db`（schema 30、integrity ok、11 条项目记录）。启动器（PowerShell `-File` 直调，`-TimeoutSeconds 180 -NoPause`）构建网页、核验并停止旧 PID 11780（alpha.54），隐藏启动 PID 21240，外壳正常退出。`/health` 确认 `0.1.0-alpha.56`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个可见项目及全部详情通过。未重新 init、未覆盖数据库。行为变化知悉：仓库把 `core.attributesFile` 指向自身之外时此前按内容无害即放行，现一律拒绝（`GIT_FILTER_UNSUPPORTED` + 具体原因）；`.git/objects/info/alternates` 悬空条目被跳过，定位不到之外的失败按 `GIT_ALTERNATE_UNRESOLVED` 拒绝。宿主插件与全局 MCP 登记不受影响。
+
 ## alpha.54 部署验收（2026-09-25）
 
 PR #20（第 27 轮审计修复：生命周期围栏的用户确认出路、stdio U+2028/U+2029 分帧、`work/finish` 与 `work/handoff` 字段白名单、代码位置重绑后的 id 解析、工作说明归属不再猜最新绑定、`conversation-control` 读路径限浏览器、未处理 Promise 拒绝走正常关停、Windows 启动器的 `!` 与 `--port`、构建不再清空在线资源）经复审后合并为 no-ff merge `542f82b`（复审：隔离 worktree 全量 684 项 0 失败 + phase0 97/97 真实退出码；pristine main 基线红实测 12 红 1 绿；stdio carry 与 finish 白名单两处外科手术级自证抽样各自只让自己那条用例转红；远端门禁在两个既有偶发夹具后转绿）。用户授权一条龙部署。部署前以 VACUUM INTO 创建快照 `.data/service/backups/before-alpha54-deploy-2026-09-25T15-35-03.631Z.db`（schema 30、integrity ok、11 条项目记录）。启动器（PowerShell `-File` 直调，`-TimeoutSeconds 180 -NoPause`）构建网页、核验并停止旧 PID 35288（alpha.53），隐藏启动 PID 11780；外壳本次正常退出，无输出管道滞留。`/health` 确认 `0.1.0-alpha.54`；schema 保持 30（本轮无迁移）、integrity ok、外键 0；`verify-service-data` 核对 10 个可见项目及全部详情通过。未重新 init、未覆盖数据库。身份重绑修复为读取路径按位置解析到既有 durable 行，此前会抛 `FOREIGN KEY constraint failed` 或对正确身份回 `WORKTREE_IDENTITY_CHANGED` 的已重绑目录自此直接恢复可用，无需重新添加项目。宿主插件与全局 MCP 登记不受影响。

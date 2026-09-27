@@ -26,7 +26,7 @@ npm run setup:zcode
 
 ## 当前版本
 
-`0.1.0-alpha.56` — 审计修复（PR 待合并）：Git 敌意配置门不再打开仓库自己点名到仓库之外的属性来源（此前 `core.attributesFile` 可让每次项目观察都去整份读取任意路径文件、按内容决定放行或拒绝，并把任何读失败误报为「使用了不受支持的 filter」；现仅读仓库自身范围内、且不超过 256KB 的普通文件，越界与超限各按真实原因拒绝，公开错误码不变）；`.git/objects/info/alternates` 里指向不存在或不可达位置的条目不再让项目观察以原始 `ENOENT` 崩溃或无限期挂住请求，改按探测超时预算解析并跳过定位不到的条目；**项目归档**现在对它的主代码位置同样生效（此前只有开发空间被检查，归档后的项目仍可在被归档的文件夹上取得写租约且在工作台不可见）；`/api/v1/mcp/work/begin` 在 Git 探测之后、取写租约之前补上聊天归属复判，与 `work/progress`、`work/finish`、`work/handoff` 一致（实测此前在探测窗口内被接手的旧聊天仍能拿到写租约），并闭合阶段记录里挂作「未证实」的该项；「证明不了归属就返回 null」收回 `readUnambiguousConversationBinding` 自身，不再只靠调用方复查。本轮分支树 Windows 全量与 Phase 0 数字见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+`0.1.0-alpha.56` — 审计修复（PR #23，合并提交 `39aa3c5`）：Git 敌意配置门不再打开仓库自己点名到仓库之外的属性来源（此前 `core.attributesFile` 可让每次项目观察都去整份读取任意路径文件、按内容决定放行或拒绝，并把任何读失败误报为「使用了不受支持的 filter」；现仅读仓库自身范围内、且不超过 256KB 的普通文件，越界与超限各按真实原因拒绝，公开错误码不变）；`.git/objects/info/alternates` 里指向不存在或不可达位置的条目不再让项目观察以原始 `ENOENT` 崩溃或无限期挂住请求，改按探测超时预算解析并跳过定位不到的条目；**项目归档**现在对它的主代码位置同样生效（此前只有开发空间被检查，归档后的项目仍可在被归档的文件夹上取得写租约且在工作台不可见）；`/api/v1/mcp/work/begin` 在 Git 探测之后、取写租约之前补上聊天归属复判，与 `work/progress`、`work/finish`、`work/handoff` 一致（实测此前在探测窗口内被接手的旧聊天仍能拿到写租约），并闭合阶段记录里挂作「未证实」的该项；「证明不了归属就返回 null」收回 `readUnambiguousConversationBinding` 自身，不再只靠调用方复查。本轮分支树 Windows 全量与 Phase 0 数字见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
 以下为 alpha.54 的记录：
 
