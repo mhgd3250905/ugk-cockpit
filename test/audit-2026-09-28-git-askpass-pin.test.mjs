@@ -200,6 +200,27 @@ test('an inherited SSH_ASKPASS cannot execute during a product ls-remote',
     assert.ok(outcome.threw, 'the refused auth challenge must still fail closed');
   });
 
+test('the delivery-side environment builder shares the single hardened constructor', async (t) => {
+  // Round-30 independent review: delivery-ops kept a second copy of the env
+  // builder that silently did not strip SSH_ASKPASS — the delivery chain's
+  // only defense was one -c token plus git's resolution order. The builder
+  // now delegates to probe's constructor, and no extraEnv can re-inject it.
+  const delivery = await import('../src/git/delivery-ops.mjs');
+  const previous = process.env.SSH_ASKPASS;
+  process.env.SSH_ASKPASS = 'E:\\definitely-not-a-real-askpass.bat';
+  try {
+    const fromBase = delivery.safeGitEnvironment();
+    assert.ok(!('SSH_ASKPASS' in fromBase), 'delivery env must not inherit SSH_ASKPASS');
+    const viaExtra = delivery.safeGitEnvironment({ SSH_ASKPASS: 'E:\\via-extra-env.bat' });
+    assert.ok(!('SSH_ASKPASS' in viaExtra), 'extraEnv must not re-introduce SSH_ASKPASS');
+    assert.equal(fromBase.GIT_TERMINAL_PROMPT, '0');
+    assert.equal(fromBase.GIT_CONFIG_NOSYSTEM, '1');
+  } finally {
+    if (previous === undefined) delete process.env.SSH_ASKPASS;
+    else process.env.SSH_ASKPASS = previous;
+  }
+});
+
 test('GIT_ASKPASS remains stripped (neighbouring channel already closed)', async (t) => {
   const cleanup = [];
   t.after(cleanupLifo(cleanup));

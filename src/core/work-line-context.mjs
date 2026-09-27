@@ -189,13 +189,15 @@ function readLatestSession(db, lane, assignments, runsById, reuseBoundaryAt = nu
   // session, never recorded an adopted event, and has no baseline keyed by the
   // assignment itself never happened. Reporting one as currentAgent would guess
   // attribution the platform cannot prove (AGENTS.md: unattributed, never guess).
+  const adoptedProbe = db.prepare(`
+    SELECT 1 FROM progress_events WHERE assignment_id = ? AND status = 'adopted' LIMIT 1
+  `);
+  const baselineProbe = db.prepare(`
+    SELECT 1 FROM snapshots WHERE phase = 'baseline' AND run_id = ? LIMIT 1
+  `);
   const actuallyHappened = (assignment) => Boolean(assignment.session_id)
-    || db.prepare(`
-      SELECT 1 FROM progress_events WHERE assignment_id = ? AND status = 'adopted' LIMIT 1
-    `).get(assignment.id)
-    || db.prepare(`
-      SELECT 1 FROM snapshots WHERE phase = 'baseline' AND run_id = ? LIMIT 1
-    `).get(assignment.id);
+    || adoptedProbe.get(assignment.id)
+    || baselineProbe.get(assignment.id);
   for (const assignment of assignments.filter((row) => row.worktree_id === lane.worktreeId)) {
     if (!actuallyHappened(assignment)) continue;
     const run = assignment.session_id

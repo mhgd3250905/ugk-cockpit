@@ -56,4 +56,8 @@ test('main.jsx uses the merge decision instead of the freeze branch', () => {
   assert.match(mainSource, /applyPolledProjectDetail\(/);
   assert.doesNotMatch(mainSource, /visibleCount > limit/,
     'the old guard discarded the whole poll response once more than 100 items were displayed');
+  // Both detail-refresh paths share the decision: a page cannot silently
+  // truncate the window the user accumulated (independent review, round 30).
+  assert.ok((mainSource.match(/applyPolledProjectDetail\(/g) || []).length >= 2,
+    'the action refresh path must keep the same merge decision as the timer poll');
 });

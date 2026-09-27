@@ -1212,7 +1212,7 @@ function App() {
       if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) return previous;
       return {
         ...previous,
-        data,
+        data: applyPolledProjectDetail(previous.data, data),
         loading: false,
         error: null,
         actionNotice,
