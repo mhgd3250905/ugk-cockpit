@@ -186,13 +186,13 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
   }
 }
 
-// `git worktree remove` refuses to delete a worktree holding modified or
-// untracked files, but git-IGNORED content is invisible to that check and to
-// `status --untracked-files=normal`: it is deleted with the directory and is
-// not recoverable from Git. Measured on git 2.50: with only `ignored/` content
-// present the unmodified `worktree remove` exits 0 and the file is gone, while
-// the same file untracked makes git refuse (exit 128). Removing a workspace
-// therefore has to ask the user about this class of content separately.
+// The product's dirty gate reads `status --porcelain=v1 -z --untracked-files=normal`,
+// which never lists git-IGNORED paths, and `git worktree remove` (no `--force`)
+// deletes them with the directory anyway. Measured on git 2.50.0.windows.2: with
+// only `ignored/only-copy.md` present the dirty口径 is empty, `worktree remove`
+// exits 0 and the file is gone; making the same file merely untracked makes git
+// refuse (exit 128) and keep it. So ignored content needs its own gate: it is
+// user data that Git cannot bring back.
 //
 // `--untracked-files=normal` keeps the output bounded: an ignored dependency
 // tree collapses into one directory record instead of one per file.

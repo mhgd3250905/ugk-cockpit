@@ -1463,10 +1463,22 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     // git-IGNORED content is not "changes" to either git's own worktree-remove
     // check or the probe above, yet `worktree remove` deletes it with the
     // directory and Git cannot bring it back. Ask before that happens.
-    const ignored = await (options.countIgnoredWorktreeEntries ?? countIgnoredWorktreeEntries)(
-      space.canonicalPath,
-      { timeoutMs: options.timeoutMs ?? 5_000, maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024 },
-    );
+    // The probe must fail like the one above: an escaping throw would leave the
+    // lifecycle reservation held open with no journaled outcome.
+    let ignored;
+    try {
+      ignored = await (options.countIgnoredWorktreeEntries ?? countIgnoredWorktreeEntries)(
+        space.canonicalPath,
+        { timeoutMs: options.timeoutMs ?? 5_000, maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024 },
+      );
+    } catch (error) {
+      return failOrUnknown({
+        ok: false,
+        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        spaceId: space.spaceId,
+        message: error.message,
+      });
+    }
     if (ignored.count > 0 && request.userConfirmedIgnoredRemoval !== true) {
       return failOrUnknown({
         ok: false,

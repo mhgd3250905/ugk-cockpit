@@ -182,6 +182,32 @@ test('HTTP 边界：确认标记被接受，未确认的删除返回 409 与可�
     const unknownKey = await post({ commandId: 'cmd-http-unknown', expectedRevision: 1, bogus: 1 });
     assert.equal(unknownKey.status, 400, await unknownKey.clone().text());
 
+    // The confirmation is a boolean by contract; a non-boolean must not be
+    // silently coerced into "not confirmed" downstream.
+    const badFlag = await post({
+      commandId: 'cmd-http-bad-flag',
+      expectedRevision: f.space.revision,
+      userConfirmedIgnoredRemoval: 'yes',
+    });
+    assert.equal(badFlag.status, 400, await badFlag.clone().text());
+    assert.equal(existsSync(onlyCopy), true, 'a rejected body must not delete anything');
+
+    // The flag must not leak into the reuse branch of the same route.
+    const reuseWithFlag = await fetch(
+      `http://${service.host}:${service.port}/api/v1/projects/proj-1/spaces/${f.spaceId}/reuse`,
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          commandId: 'cmd-http-reuse-flag',
+          expectedRevision: f.space.revision,
+          expectedBaseHead: f.space.baseCommit,
+          userConfirmedIgnoredRemoval: true,
+        }),
+      },
+    );
+    assert.equal(reuseWithFlag.status, 400, await reuseWithFlag.clone().text());
+
     const unconfirmed = await post({ commandId: 'cmd-http-unconfirmed', expectedRevision: f.space.revision });
     assert.equal(unconfirmed.status, 409, await unconfirmed.clone().text());
     const refusal = await unconfirmed.json();
@@ -210,9 +236,52 @@ test('工作台文案必须说明被忽略的文件也会一起删除，并带�
   const mainJsx = readFileSync(path.join(repoRoot, 'web', 'src', 'main.jsx'), 'utf8');
   assert.match(mainJsx, /被 Git 忽略的内容（依赖、构建产物、本地数据）也会一起删除/,
     'the remove dialog has to disclose what else is deleted');
-  const removeBranch = mainJsx.slice(
-    mainJsx.indexOf(': {\n            commandId,\n            expectedRevision: action.space.revision,'),
-  mainJsx.indexOf('record = createWorkspaceActionRecord'));
+  const NL = String.fromCharCode(10);
+  const branchStart = mainJsx.indexOf(': {' + NL + '            commandId,' + NL
+    + '            expectedRevision: action.space.revision,');
+  assert.ok(branchStart >= 0, 'the confirmed remove request block was not found');
+  const removeBranch = mainJsx.slice(branchStart, mainJsx.indexOf('record = createWorkspaceActionRecord'));
   assert.match(removeBranch, /userConfirmedIgnoredRemoval: true/,
     'the confirmed dialog action must send the confirmation flag');
+});
+
+// The ignored-content probe is a new git call on the deletion path. If it throws
+// (locked folder, offline drive, hostile config discovered late) the removal must
+// settle like any other pre-effect refusal: a journaled failure, the reservation
+// released, and nothing deleted.
+test('被忽略内容探测失败时按预检拒绝收束，不把异常抛出删除流程', async (t) => {
+  const f = await workspaceFixture(t, 'local-data' + String.fromCharCode(10));
+  mkdirSync(path.join(f.spacePath, 'local-data'), { recursive: true });
+  const onlyCopy = path.join(f.spacePath, 'local-data', 'only-copy.md');
+  writeFileSync(onlyCopy, '只存在于这台机器上的资料' + String.fromCharCode(10));
+
+  const failing = Object.assign(new Error('status probe timed out'), {
+    code: 'GIT_STATUS_TIMEOUT',
+  });
+  const result = await removeDevelopmentWorkspace(f.db, {
+    commandId: 'cmd-remove-probe-fails',
+    projectId: 'proj-1',
+    spaceId: f.spaceId,
+    expectedRevision: f.space.revision,
+  }, {
+    probe: probeGitWorktree,
+    countIgnoredWorktreeEntries: async () => { throw failing; },
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.code, 'GIT_STATUS_TIMEOUT', JSON.stringify(result));
+  assert.equal(result.outcome, 'confirmed_failure', JSON.stringify(result));
+  assert.equal(existsSync(onlyCopy), true, 'a failed probe must not delete anything');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM repository_locks').get().n, 0,
+    'the repository lock must not be stranded by the failed probe');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM workspace_lifecycle_reservations').get().n, 0,
+    'the lifecycle reservation must be settled, not left held open');
+
+  // The same command id replays the journaled refusal instead of retrying git.
+  const replay = await removeDevelopmentWorkspace(f.db, {
+    commandId: 'cmd-remove-probe-fails',
+    projectId: 'proj-1',
+    spaceId: f.spaceId,
+    expectedRevision: f.space.revision,
+  }, { probe: probeGitWorktree });
+  assert.equal(replay.code, 'GIT_STATUS_TIMEOUT', JSON.stringify(replay));
 });

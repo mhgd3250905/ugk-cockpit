@@ -2,6 +2,7 @@
 // and a glob that matches nothing exits 0. Both turn a deleted or emptied test
 // directory into a green gate, so the runner refuses them before the suite starts.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const target = process.argv[2];
@@ -9,6 +10,11 @@ if (!target) {
   console.error('usage: node scripts/check-test-suite.mjs <test-directory>');
   process.exit(2);
 }
+// Resolve against this repository, not the caller's working directory: node
+// treats a script whose `test` command starts with `node --test` as the test
+// runner and fires `pretest` even for a bare `node --test <file>`, which can
+// land here from any directory.
+const targetDir = path.resolve(fileURLToPath(new URL('..', import.meta.url)), target);
 
 const files = [];
 try {
@@ -18,14 +24,14 @@ try {
       if (statSync(full).isDirectory()) walk(full);
       else if (entry.endsWith('.test.mjs')) files.push(full);
     }
-  })(target);
+  })(targetDir);
 } catch (error) {
-  console.error(`test suite gate: cannot read ${target}: ${error.message}`);
+  console.error(`test suite gate: cannot read ${targetDir}: ${error.message}`);
   process.exit(1);
 }
 
 if (files.length === 0) {
-  console.error(`test suite gate: no *.test.mjs found under ${target}`);
+  console.error(`test suite gate: no *.test.mjs found under ${targetDir}`);
   process.exit(1);
 }
 
