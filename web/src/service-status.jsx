@@ -50,6 +50,10 @@ export function ServiceStatus({ api }) {
     try {
       const result = await api('/api/v1/service/shutdown', { method: 'POST', body: JSON.stringify({ userConfirmed: true }) });
       if (!result?.ok || result.status !== 'stopping') throw new Error('关闭结果尚未确认，请检查服务状态。');
+      // 确认回执就是 stopping 的唯一来源：监听随即关闭，之后的轮询只会连不上。
+      // 不把它写进快照的话，横幅会拿着点击前的 'running' 谎报「仍在响应」。
+      setInfo((current) => ({ ...(current ?? {}), ...result }));
+      setOffline(false);
       setRequested(true); setOpen(false);
     } catch (cause) { setError(cause.message || '关闭结果尚未确认，请检查服务状态。'); }
     finally { setBusy(false); }
@@ -60,7 +64,7 @@ export function ServiceStatus({ api }) {
       <span className="service-status-indicator" aria-hidden="true" />
       <span role="status">{banner.text}</span>
       {info && !requested && <><span className="service-status-version">v{info.version}</span><span className="service-status-port">端口 {port}</span><span className="service-status-uptime" title={`启动于 ${new Date(info.startedAt).toLocaleString('zh-CN')}`}>已运行 {duration(info.uptimeSeconds)}</span></>}
-      {banner.offerRetry && banner.detail && <span className="service-status-detail" title={banner.detail}>{banner.detail}</span>}
+      {banner.offerRetry && banner.detail && <span className="service-status-detail">{banner.detail}</span>}
       {banner.stopped
         ? <span className="service-status-restart">再次使用时打开 Cockpit 启动器</span>
         : banner.offerRetry
