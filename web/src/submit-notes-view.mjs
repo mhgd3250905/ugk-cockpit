@@ -71,6 +71,18 @@ export function requireNoteStatusReceipt(result, noteId) {
   });
 }
 
+// The host channel (refreshOpenProjectDetail) renders { message, detail?, error? }.
+// The business receipt has none of those — it must be translated here, not passed
+// through (passing res.note straight through produced an empty success bar).
+export function noteStatusNotice(res) {
+  const status = res?.note?.status;
+  const label = ['pending', 'handled', 'archived'].includes(status) ? noteStatusLabel(status) : null;
+  return {
+    message: label ? `工作说明${label}` : '工作说明已更新',
+    detail: '状态只代表平台记账，不代表代码已合并。',
+  };
+}
+
 export function noteActionError(error, targetStatus) {
   const retryable = !error.code || ['SERVICE_UNAVAILABLE', 'REQUEST_FAILED'].includes(error.code);
   return {
@@ -208,7 +220,10 @@ export function SubmitNotesInbox({ projectId, api, onNoteStatusChange }) {
         await fetchNotesRef.current?.(true);
         if (isMountedRef.current && onNoteStatusChange) {
           // The write is confirmed even if the separate timeline refresh fails.
-          Promise.resolve(onNoteStatusChange(res.note)).catch(() => {});
+          // onNoteStatusChange is the detail NOTICE channel ({ message, detail?,
+          // error? }) — passing the raw business note (which has neither message
+          // nor error) rendered an empty green bar.
+          Promise.resolve(onNoteStatusChange(noteStatusNotice(res))).catch(() => {});
         }
       }
     } catch (err) {

@@ -10,7 +10,7 @@ import { authorizeExistingPath, revalidateAuthorizedPath } from '../core/path-gu
 import { createDeliveryCache, assertDeliveryCache, discardDeliveryCache } from '../core/delivery-cache.mjs';
 import { remoteAuthArguments } from './remote-auth.mjs';
 import { acquireDeliveryIndexLock, assertDeliveryIndexLock, releaseDeliveryIndexLock } from './delivery-index-lock.mjs';
-import { assertSafeRemoteName, SAFE_GIT_PREFIX } from './probe.mjs';
+import { assertSafeRemoteName, SAFE_GIT_PREFIX, safeGitEnvironment as hardenedGitEnvironment } from './probe.mjs';
 import {
   findHostileRepositoryConfiguration,
   repositoryConfigurationError,
@@ -34,14 +34,13 @@ export const DELIVERY_CONFIG_ERROR_CODES = REPOSITORY_CONFIG_ERROR_CODES;
 export { SAFE_GIT_PREFIX };
 
 export function safeGitEnvironment(extraEnv = {}) {
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),
-  );
-  environment.GIT_CONFIG_NOSYSTEM = '1';
-  environment.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  environment.GIT_TERMINAL_PROMPT = '0';
-  environment.GIT_OPTIONAL_LOCKS = '0';
-  environment.GCM_INTERACTIVE = 'Never';
+  // One constructor for the whole product: the delivery chain (fetch/push/
+  // ls-remote) must not drift from probe's hardened base — probe strips the
+  // inherited SSH_ASKPASS fallback of git's askpass resolution chain, and a
+  // second copy here silently kept it (independent review, round 30). The
+  // strip is re-applied after the merge so no caller can re-introduce it
+  // through extraEnv either.
+  const environment = hardenedGitEnvironment();
   for (const [key, value] of Object.entries(extraEnv)) {
     if (value === undefined || value === null) {
       delete environment[key];
@@ -49,6 +48,7 @@ export function safeGitEnvironment(extraEnv = {}) {
       environment[key] = String(value);
     }
   }
+  delete environment.SSH_ASKPASS;
   return environment;
 }
 
