@@ -57,8 +57,8 @@ const LFS_RULE = '*.bin filter=lfs diff=lfs merge=lfs -text\n';
 test('an attribute rule is found under an ASCII path', async (t) => {
   const { root, repo } = await repositoryWithAttributes('sub', LFS_RULE);
   cleanup(t, root);
-  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes' });
-  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes' });
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes', reason: 'driver' });
+  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes', reason: 'driver' });
   await assert.rejects(() => assertRepositoryAllowed(repo), (error) => {
     assert.equal(error.code, 'GIT_FILTER_UNSUPPORTED');
     return true;
@@ -76,14 +76,14 @@ test('the same rule is found under a non-ASCII path', async (t) => {
     'git stopped resolving the attribute file, so the fixture no longer proves anything',
   );
 
-  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes' });
-  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes' });
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes', reason: 'driver' });
+  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes', reason: 'driver' });
 });
 
 test('a rule under a path with spaces and apostrophes is still found', async (t) => {
   const { root, repo } = await repositoryWithAttributes("a 'b' 目录", LFS_RULE);
   cleanup(t, root);
-  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes' });
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes', reason: 'driver' });
 });
 
 test('a benign attribute file under a non-ASCII path stays allowed', async (t) => {
@@ -105,8 +105,8 @@ test('a rule under a path whose name starts with a space is still found', async 
     /filter: lfs/u,
     'git stopped resolving the attribute file, so the fixture no longer proves anything',
   );
-  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes' });
-  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes' });
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes', reason: 'driver' });
+  assert.deepEqual(findHostileRepositoryConfigurationSync(repo), { kind: 'attributes', reason: 'driver' });
 });
 
 test('a nested and a deep attribute path are both examined', async (t) => {
@@ -121,5 +121,5 @@ test('a nested and a deep attribute path are both examined', async (t) => {
   await git(repo, ['add', '--', '.']);
   cleanup(t, root);
 
-  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes' });
+  assert.deepEqual(await findHostileRepositoryConfiguration(repo), { kind: 'attributes', reason: 'driver' });
 });
