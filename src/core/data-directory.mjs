@@ -25,5 +25,15 @@ export function resolveDataDirectory({
   } else {
     base = env.XDG_DATA_HOME || path.join(homedir(), '.local', 'share');
   }
+  // `--data-directory` is already required to be absolute; the environment has
+  // to meet the same bar. A relative `LOCALAPPDATA`/`XDG_DATA_HOME` resolves
+  // against the current working directory, so the service silently opens a
+  // *different* — usually empty — database every time the launcher runs it from
+  // elsewhere. An empty project list next to real records on disk is the exact
+  // failure AGENTS.md forbids reading as "the data is gone".
+  if (!path.isAbsolute(base)) {
+    const name = platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_DATA_HOME';
+    throw new Error(`${name} must be an absolute path (got '${base}'). Pass --data-directory with an absolute path.`);
+  }
   return path.join(base, 'UGK Cockpit');
 }

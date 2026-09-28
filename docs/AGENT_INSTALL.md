@@ -32,7 +32,7 @@ npm run setup:codex -- --start-only
 npm run setup:zcode -- --start-only
 ```
 
-以上命令在 Windows PowerShell 与 macOS/Linux 终端中相同。
+以上命令在 Windows PowerShell 与 macOS/Linux 终端中相同。这句只描述命令写法，不改变上面的支持范围：自动安装入口目前按 Windows 与 macOS 验收，Linux 上安装器可执行但添加项目所需的原生文件夹选择器尚未实现（见 [README](../README.md) 的当前版本限制说明），因此不要在 Linux 上把安装成功转述为可用。
 
 安装器的 `host_verification_pending` 表示程序、插件和本机服务已准备好，当前聊天的实际工具调用仍需验证。不要把它转述为全部可用。最后向用户分别确认网页可用和聊天工具可用；尚缺的一步明确说明。
 

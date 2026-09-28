@@ -261,12 +261,6 @@ const ATTRIBUTE_PUBLIC_MESSAGES = {
   unreadable: '这个仓库的 Git 属性文件读不到，无法确认其中不含过滤器，因此暂不自动处理。请检查该路径是否存在且可读。',
 };
 
-// `git ls-files` escapes non-ASCII path names by default, and the escaped text
-// is not a path anyone can open: an attribute source named 配置.gitattributes
-// was measured to make this gate answer "no driver" for a repository that does
-// name one. Ask git for the raw names.
-const UNQUOTED_PATHS = { 'core.quotePath': false };
-
 // Refusal for a source that is reachable only through a link. `rejectSymbolicPath`
 // inspects segments with lstat and never resolves a target, so it cannot stall on
 // a dead share the way a realpath check would.
@@ -351,12 +345,26 @@ function readAttributeSourceSync(candidate) {
 }
 
 async function attributeFileCandidates(cwd, overrides) {
+  // `-z` is not cosmetic: without it git C-style quotes every path whose name
+  // is not plain ASCII (`core.quotePath` defaults to true), so
+  // `测试/.gitattributes` comes back as `"\346\265\213\350\257\225/.gitattributes"`.
+  // That resolves to a file that does not exist, the read below reports ENOENT,
+  // and the candidate is skipped — a repository can hide a `filter=lfs`
+  // attribute rule behind its own directory names, and the same repository then
+  // fails closed once the directory is renamed to ASCII.
   const listed = await git(
     cwd,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.gitattributes'],
-    { ...gitOptions(overrides), config: UNQUOTED_PATHS },
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.gitattributes'],
+    // `raw` because the default trim would strip a leading space that belongs to
+    // the first path's own name.
+    { ...gitOptions(overrides), raw: true },
   );
-  const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+  // No `.trim()` on these entries: `-z` output is a raw path, so a leading or
+  // trailing space belongs to the name. Trimming `" lead/.gitattributes"` to
+  // `"lead/.gitattributes"` resolves to a file that does not exist, the read
+  // below reports ENOENT, and the candidate is skipped — the same fail-open the
+  // `-z` switch exists to close, measured on a directory named ` lead`.
+  const paths = listed.stdout.split('\0').filter(Boolean)
     .map((value) => path.resolve(cwd, value));
 
   // Git reads info/attributes from the common directory (shared by every linked
@@ -566,12 +574,15 @@ function configScopesSync(cwd, overrides) {
 
 function attributeFileCandidatesSync(cwd, overrides) {
   const options = gitSyncOptions(overrides);
+  // Same `-z` requirement as the asynchronous twin: without it git quotes every
+  // non-ASCII path and the quoted name resolves to a file that does not exist.
   const listed = gitSync(
     cwd,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.gitattributes'],
-    { ...options, config: UNQUOTED_PATHS },
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '*.gitattributes'],
+    { ...options, raw: true },
   );
-  const paths = listed.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+  // Raw `-z` entries, no trimming — see `attributeFileCandidates`.
+  const paths = listed.stdout.split('\0').filter(Boolean)
     .map((value) => path.resolve(cwd, value));
 
   const common = gitSync(cwd, ['rev-parse', '--git-common-dir'], options);

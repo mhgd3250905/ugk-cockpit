@@ -1030,34 +1030,34 @@ test('createMcpServer stdio protocol loop: verifies single-line JSON on stdout a
   const lines = stdoutBuffer.split('\n').filter((l) => l.trim().length > 0);
   assert.strictEqual(lines.length, 5, 'Should have exactly 5 responses (empty line & notification skipped)');
 
+  // Responses are matched by id, not by position. JSON-RPC never guarantees an
+  // order, the bridge dispatches each line independently, and a handler that
+  // awaits fewer microtask hops answers first — asserting position here would
+  // only re-pin the dispatcher's internal scheduling.
+  const answered = new Map();
+  const unanswerable = [];
   for (const line of lines) {
     // Each line must be a single line (no internal newlines) and parse as valid JSON
     assert.strictEqual(line.includes('\r'), false);
     const parsed = JSON.parse(line);
     assert.strictEqual(parsed.jsonrpc, '2.0');
     assert.ok('id' in parsed);
+    if (parsed.id === null) unanswerable.push(parsed);
+    else answered.set(parsed.id, parsed);
   }
 
-  const r1 = JSON.parse(lines[0]);
-  assert.strictEqual(r1.id, 101);
+  const r1 = answered.get(101);
   assert.strictEqual(r1.result.serverInfo.name, 'ugk-cockpit');
 
-  const r2 = JSON.parse(lines[1]);
-  assert.strictEqual(r2.id, null);
-  assert.strictEqual(r2.error.code, -32700);
+  assert.equal(unanswerable.length, 2);
+  assert.deepEqual(unanswerable.map((parsed) => parsed.error.code).sort((a, b) => a - b), [-32700, -32600]);
 
-  const r3 = JSON.parse(lines[2]);
-  assert.strictEqual(r3.id, 102);
+  const r3 = answered.get(102);
   assert.deepEqual(JSON.parse(r3.result.content[0].text), { accepted: true, dispatchCode: 'D-123' });
 
-  const r4 = JSON.parse(lines[3]);
-  assert.strictEqual(r4.id, 103);
+  const r4 = answered.get(103);
   assert.strictEqual(r4.result.isError, true);
   assert.match(r4.result.content[0].text, /暂时无法完成/);
-
-  const r5 = JSON.parse(lines[4]);
-  assert.strictEqual(r5.id, null);
-  assert.strictEqual(r5.error.code, -32600);
 
   // Verify stderr received diagnostics
   assert.match(stderrBuffer, /JSON parse error/);
