@@ -609,23 +609,39 @@ export function checkWorkspaceWriteAdmission(db, {
     }, 'WORKSPACE_LIFECYCLE_IN_PROGRESS');
   }
 
-  const space = db.prepare(`
-    SELECT development_spaces.status, projects.archived_at, projects.archive_revision
-    FROM development_spaces
-    JOIN projects ON projects.id = development_spaces.project_id
+  // The archive is a fact about the project, not about a development space: a
+  // project registered on its main location has no development_spaces row at
+  // all, so joining only through that table let an archived project keep taking
+  // write leases on the very folder the user archived.
+  const archived = db.prepare(`
+    SELECT projects.archived_at, projects.archive_revision
+    FROM projects
+    JOIN development_spaces ON development_spaces.project_id = projects.id
     WHERE development_spaces.worktree_id = ?
-  `).get(worktreeId);
-  if (space?.archived_at !== null && space?.archived_at !== undefined) {
+      AND projects.archived_at IS NOT NULL
+    UNION ALL
+    SELECT projects.archived_at, projects.archive_revision
+    FROM projects
+    WHERE projects.worktree_id = ?
+      AND projects.archived_at IS NOT NULL
+    LIMIT 1
+  `).get(worktreeId, worktreeId);
+  if (archived) {
     return {
       ok: false,
       code: 'PROJECT_ARCHIVED',
-      archivedAt: space.archived_at,
-      archiveRevision: space.archive_revision,
+      archivedAt: archived.archived_at,
+      archiveRevision: archived.archive_revision,
       outcome: 'confirmed_failure',
       state: 'failed',
       retryable: false,
     };
   }
+  const space = db.prepare(`
+    SELECT development_spaces.status
+    FROM development_spaces
+    WHERE development_spaces.worktree_id = ?
+  `).get(worktreeId);
   if (space?.status === 'archived') {
     return {
       ok: false,

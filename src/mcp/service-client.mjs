@@ -22,6 +22,7 @@ const INTEGER_FIELDS = [
 const STRING_FIELDS = [
   'sessionId',
   'submissionId',
+  'preflightId',
   'claimId',
   'activeClaimId',
   'status',
@@ -44,6 +45,8 @@ const STRING_FIELDS = [
 const BOOLEAN_FIELDS = [
   'retryable',
   'localIntegrated',
+  'localSaved',
+  'requiresNewPreflight',
   'pushed',
   'humanActionRequired',
   'canContinue',
@@ -607,11 +610,9 @@ export function createServiceHandlers({
       if (arguments_ && typeof arguments_ === 'object' && !Array.isArray(arguments_)) {
         if (arguments_.confirmSessionId !== undefined) request.confirmSessionId = arguments_.confirmSessionId;
         if (arguments_.expectedRevision !== undefined) request.expectedRevision = arguments_.expectedRevision;
-        // The tool schema advertises declaredWorkspace, the service validates it,
-        // and the access instruction tells a host without a resolvable working
-        // directory to pass it — but this request was rebuilt field by field and
-        // dropped it, so the documented fallback could never work on the context
-        // route while init/resume/takeover forwarded it.
+        // The service documents this as the fallback for hosts whose bridge has
+        // no usable working directory, and the tool schema publishes it; without
+        // the pass-through the documented recovery could never resolve a project.
         if (arguments_.declaredWorkspace !== undefined) request.declaredWorkspace = arguments_.declaredWorkspace;
       }
       if (!identity() && bridgeBinding) request.bridgeBinding = { ...bridgeBinding };

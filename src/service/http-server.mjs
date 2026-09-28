@@ -420,6 +420,12 @@ const PUBLIC_ERRORS = {
     impact: 'Cockpit 已停止读取，没有修改代码或已有记录。',
     requiredAction: '请在技术详情中检查 Git alternates 配置，确认后再重试。',
   },
+  GIT_ALTERNATE_UNRESOLVED: {
+    status: 409,
+    message: '这份代码的 Git 指向了一个定位不到的对象目录。',
+    impact: 'Cockpit 已停止读取，没有修改代码或已有记录。',
+    requiredAction: '请恢复该磁盘或网络位置，或清理 .git/objects/info/alternates 里不再存在的条目，然后重试。',
+  },
   FOLDER_GRANT_EXPIRED: {
     status: 409,
     message: '这次文件夹选择已经过期。',
@@ -756,6 +762,15 @@ const PUBLIC_ERRORS = {
     impact: '这些文件保持原样；Cockpit 没有切换分支或删除目录。',
     requiredAction: '请先处理这些改动，再重新开始或删除空间。',
   },
+  // `git worktree remove` deletes ignored content with the directory and Git
+  // cannot restore it, while neither git's own check nor the dirty probe lists
+  // it. The refusal is journaled, so the escape has to name a new command id.
+  WORKSPACE_IGNORED_CONTENT_CONFIRMATION_REQUIRED: {
+    status: 409,
+    message: '这个开发空间里还有被 Git 忽略的文件，例如依赖、构建产物或本地数据。',
+    impact: '删除本地副本会连这些文件一起从电脑上移除，Git 里没有它们的备份；本次没有删除任何文件。',
+    requiredAction: '请先确认这些文件不再需要。确定可以一起删除时，请在工作台重新发起这次删除；由脚本或其他入口调用时请换一个操作编号重新发起并带上确认标记。',
+  },
   WORKSPACE_IDENTITY_MISMATCH: {
     status: 409,
     message: '这个开发空间已经不是登记时的那份代码。',
@@ -990,9 +1005,9 @@ const PUBLIC_ERRORS = {
   },
   UNSAFE_REMOTE_URL: {
     status: 409,
-    message: '这个仓库的 Git 配置包含会改写远端地址或远端命令的设置，当前版本暂不支持自动处理。',
+    message: '这个仓库的 Git 配置包含不能安全用于自动读写的远端地址。',
     impact: '没有读取、暂存、提交、推送或修改任何文件。',
-    requiredAction: '请先在仓库配置中移除 url.*.insteadOf / remote.*.uploadpack / receivepack 等设置，再重新操作。',
+    requiredAction: '请核对仓库的远端配置：网络共享地址（\\\\主机\\共享）与其它主机的 file: 地址不受支持，请改用本机目录或 https/ssh 地址；如设置过 url.*.insteadOf / remote.*.uploadpack / receivepack 也请先移除。',
   },
   SUBMODULE_UNSUPPORTED: {
     status: 409,
@@ -1897,6 +1912,19 @@ const MCP_CONTEXT_BINDING_KEYS = new Set([
   'acceptedRevision',
 ]);
 
+// ugk_work_accept publishes exactly these two keys with additionalProperties:false,
+// and the stdio gate validateAcceptArgs enforces the same set. The HTTP surface must
+// not be wider than the tool schema: before this whitelist, a direct caller could
+// self-mint `sessionId` — measured, a 200,009-character value was accepted with 200
+// and persisted into assignments.session_id, dispatch_grants.accepted_session_id and
+// commands.run_id, after which every export that sanitizes through
+// SAFE_SESSION_ID_PATTERN (≤128) reports the session as null: a session the platform
+// can no longer address. `commandId` was likewise caller-chosen for the command row.
+const MCP_ACCEPT_KEYS = new Set([
+  'dispatchCode',
+  'clientRequestId',
+]);
+
 function rejectUnexpectedMcpFields(body, allowedKeys, operation) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     const error = new Error(`Invalid ${operation} request.`);
@@ -2356,7 +2384,24 @@ function legacyBridgeBindingMatches(state, binding) {
     && current.acceptedRevision === bound.acceptedRevision;
 }
 
-async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
+// Declared size is checked before the first byte is read; the streaming bound
+// below still catches a body that under-reports itself or arrives chunked.
+function declaredSizeExceeds(request, maxBytes) {
+  const declared = Number(request?.headers?.['content-length']);
+  return Number.isFinite(declared) && declared > maxBytes;
+}
+
+export async function readJson(request, { maxBytes = MAX_BODY_BYTES } = {}) {
+  // Refuse on the *declared* size before reading a byte: the MCP routes admit
+  // 18 MiB bodies, and buffering first then rejecting meant N concurrent
+  // sockets cost N x 18 MiB of service memory (measured: 24 concurrent
+  // oversize requests grew the service process from 67 MB to 234 MB) for
+  // requests that were always going to fail.
+  if (declaredSizeExceeds(request, maxBytes)) {
+    const error = new Error('Request body is too large.');
+    error.code = 'REQUEST_TOO_LARGE';
+    throw error;
+  }
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
@@ -2391,6 +2436,9 @@ async function readAvatarUploadBody(request, maxBytes = MAX_AVATAR_FILE_SIZE) {
   // cap must allow an encoded 5MB image; the decoded buffer is still enforced
   // against maxBytes below before any storage or processing happens.
   const hardLimit = maxBytes * 2 + 128 * 1024;
+  if (declaredSizeExceeds(request, hardLimit)) {
+    throw avatarRequestError('所选头像超过 5MB。', 'IMAGE_TOO_LARGE');
+  }
   let size = 0;
   const chunks = [];
   for await (const chunk of request) {
@@ -3544,7 +3592,7 @@ export async function createCockpitHttpServer({
           ...result, expiresAt: new Date(result.expiresAt).toISOString(),
           continueMessage: [
             `请在目标项目的聊天中使用工作台授权接手，调用 ugk_work_takeover，参数为 sessionId: "${sessionId}"、transferCode: "${result.transferCode}"，并生成新的 clientRequestId。`,
-            ...workspaceHintLines(readProjectContext(db, context.projectId)?.canonical_path ?? null),
+            ...workspaceHintLines(context.canonicalPath ?? null),
             '不要重新 init，不清理或覆盖代码。成功后先查询 ugk_work_context({})，报告平台返回的会话 ID、revision 和 canContinue，等待用户安排。',
           ].join('\n'),
         } : result);
@@ -3815,8 +3863,13 @@ export async function createCockpitHttpServer({
         }
         const allowedKeys = action === 'reuse'
           ? new Set(['commandId', 'expectedRevision', 'expectedBaseHead'])
-          : new Set(['commandId', 'expectedRevision']);
+          : new Set(['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval']);
         if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+          sendError(response, 'INVALID_REQUEST');
+          return;
+        }
+        if (body.userConfirmedIgnoredRemoval !== undefined
+          && typeof body.userConfirmedIgnoredRemoval !== 'boolean') {
           sendError(response, 'INVALID_REQUEST');
           return;
         }
@@ -3841,6 +3894,8 @@ export async function createCockpitHttpServer({
               projectId,
               spaceId,
               expectedRevision: body.expectedRevision,
+              ...(body.userConfirmedIgnoredRemoval === true
+                ? { userConfirmedIgnoredRemoval: true } : {}),
             }, { probe, faultInjector });
         if (result.ok) {
           sendJson(response, 200, result);
@@ -3857,6 +3912,10 @@ export async function createCockpitHttpServer({
             extra: {
               space_id: spaceId,
               outcome,
+              // How much ignored content the confirmation covers. The workbench
+              // confirms in its dialog, so this reaches script/ops callers that
+              // have to decide what the number means.
+              ...(typeof result.ignoredCount === 'number' ? { ignored_count: result.ignoredCount } : {}),
               state: command?.state ?? 'received',
               retryable: !confirmedFailure,
               ...(!confirmedFailure ? {
@@ -4507,7 +4566,7 @@ export async function createCockpitHttpServer({
             dispatchCode,
             agent: assignment.agent_id,
             task: assignment.task_id,
-            canonicalPath: observedTarget.project.canonical_path,
+            canonicalPath: observedTarget.observation.canonicalPath ?? null,
           }),
         });
         return;
@@ -4553,6 +4612,7 @@ export async function createCockpitHttpServer({
 
       if (request.method === 'POST' && url.pathname === '/api/v1/mcp/work/accept') {
         const body = await readMcpBody(request);
+        rejectUnexpectedMcpFields(body, MCP_ACCEPT_KEYS, 'accept');
         requireString(body, 'dispatchCode');
         requireString(body, 'clientRequestId');
         const context = readDispatchContext(db, body);
@@ -4560,14 +4620,17 @@ export async function createCockpitHttpServer({
           sendError(response, context.code);
           return;
         }
+        // An adopt code belongs to /work/init. Refuse before acceptAssignment:
+        // consuming the dispatch here left an accepted assignment with a session
+        // but no run or lease, behind a refusal that says nothing was changed.
+        if (context.scope?.mode === 'adopt') {
+          sendError(response, 'INVALID_REQUEST', { extra: { reason: 'dispatch_code_needs_work_init' } });
+          return;
+        }
         const { observation } = await observeRegisteredProject(context.projectId, context);
         const accepted = acceptAssignment(db, body);
         if (!accepted.ok) {
           sendError(response, accepted.code);
-          return;
-        }
-        if (accepted.scope?.mode === 'adopt') {
-          sendError(response, 'INVALID_REQUEST');
           return;
         }
         const latestHandoff = readLatestHandoff(db, accepted.projectId);
@@ -4637,6 +4700,12 @@ export async function createCockpitHttpServer({
           return;
         }
         const { observation } = await observeRegisteredProject(context.projectId, context);
+        // The observation yields to the event loop, and this is the last moment
+        // before the first durable write: a conversation displaced while Git was
+        // being probed must not take the write lease. progress, finish and
+        // handoff already re-assert here; startWriteRun itself never consults
+        // the conversation binding.
+        assertConversationWrite(key, body.sessionId, ['active', 'accepted']);
         // Resolve the assignment CAS before taking the lease: startWriteRun is
         // the first durable step, so a rejection discovered afterwards would
         // leave this session holding a write lease over an assignment that was
@@ -4702,7 +4771,7 @@ export async function createCockpitHttpServer({
           sendError(response, 'INVALID_REQUEST');
           return;
         }
-        const expectedPathHint = readProjectContext(db, context.projectId)?.canonical_path ?? null;
+        const expectedPathHint = context.canonicalPath ?? null;
         const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         if (working.project.id !== context.projectId
           || working.worktreeId !== context.worktreeId) {
@@ -4857,7 +4926,7 @@ export async function createCockpitHttpServer({
         }
         const sessionHintContext = readSessionContext(db, body.sessionId);
         const expectedPathHint = sessionHintContext?.ok
-          ? readProjectContext(db, sessionHintContext.projectId)?.canonical_path ?? null
+          ? sessionHintContext.canonicalPath ?? null
           : null;
         const working = await resolveEntryProject(body.mcpWorkingDirectory, body.declaredWorkspace, expectedPathHint);
         const context = readSessionContext(db, body.sessionId);

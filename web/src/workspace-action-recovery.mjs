@@ -65,13 +65,40 @@ function normalizeRequest(kind, request) {
     };
   }
 
-  if (Object.keys(request).some((key) => !['commandId', 'expectedRevision'].includes(key))) {
+  // Read tolerance, not write shape: a record stored by an intermediate bundle
+  // carried the confirmation inside the body, and rejecting an unknown key here
+  // throws for the whole store — the pending record disappears (there is no
+  // other discard affordance) and every later workspace action fails. Unknown
+  // keys are therefore dropped on read; the canonical body is two fields, and
+  // workspaceActionRequestBody re-derives the confirmation at send time.
+  const allowedKeys = ['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'];
+  if (Object.keys(request).some((key) => !allowedKeys.includes(key))) {
+    return null;
+  }
+  if (request.userConfirmedIgnoredRemoval !== undefined
+    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
     return null;
   }
   return {
     commandId: request.commandId,
     expectedRevision: request.expectedRevision,
   };
+}
+
+export function workspaceActionRequestBody(record) {
+  const kind = record?.kind;
+  // Fail closed rather than pass the stored object through: this is the one
+  // place the removal confirmation is attached, and a silently unconfirmed or
+  // raw-copied body would land on the ignored-content refusal forever.
+  if (!WORKSPACE_ACTION_KINDS.has(kind)) {
+    throw new WorkspaceActionRecoveryDataError('未知的开发空间操作类型。');
+  }
+  const request = normalizeRequest(kind, record?.request);
+  if (!request) {
+    throw new WorkspaceActionRecoveryDataError('开发空间操作记录无法还原请求体。');
+  }
+  if (kind !== 'remove') return request;
+  return { ...request, userConfirmedIgnoredRemoval: true };
 }
 
 function normalizeLastError(error) {

@@ -1,8 +1,9 @@
-import { readFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { isWithin, rejectSymbolicPath } from '../core/path-guard.mjs';
 import { git, gitSync } from './probe.mjs';
 
 // Repository-local configuration is attacker-controlled whenever Cockpit is
@@ -222,6 +223,127 @@ function resolveConfigPath(cwd, value) {
   return value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : path.resolve(cwd, value);
 }
 
+// Every attribute source named below comes out of the repository: a working
+// tree path, a git directory, or the value of `core.attributesFile`. The last
+// one is free-form, so repository content can name any readable file on the
+// machine. Reading it there would (a) let content the repository chose drive a
+// read of a file the user never granted — and the verdict on that file is
+// observable as allowed/blocked, which is an existence and content oracle — and
+// (b) put an unbounded read on the project observation path, which a dashboard
+// refresh repeats, and on the synchronous database-open path, where it stalls
+// startup. Measured on this machine: a 240MB target allocated the whole file
+// for a single observation, and a path on an unmounted volume never returned.
+//
+// So the guard only ever opens a source the repository can show is its own, and
+// only up to a bound. Anything else is refused with the reason it was refused,
+// which is also the honest answer for a repository that merely has a broken
+// `core.attributesFile`: it is not using filters, it is naming something else.
+const ATTRIBUTE_SOURCE_LIMIT_BYTES = 256 * 1024;
+
+const ATTRIBUTE_REFUSAL_MESSAGES = {
+  driver: 'Git clean/smudge/process filters, including LFS, are not supported.',
+  'outside-repository': 'core.attributesFile names an attribute source outside the repository itself, which Cockpit will not read.',
+  oversized: 'A Git attribute source is larger than the safe read limit.',
+  'not-a-file': 'A Git attribute source is not a regular file.',
+  'symbolic-path': 'A Git attribute source is reached through a link.',
+  unreadable: 'A Git attribute source could not be read, so the absence of a filter driver cannot be proven.',
+};
+
+// What the operator is told. The published code stays GIT_FILTER_UNSUPPORTED
+// (it is the same gate), but the catalog text for that code claims the
+// repository configures filters, and for these answers it does not — so the
+// curated override carries the real reason and the real next step.
+const ATTRIBUTE_PUBLIC_MESSAGES = {
+  'outside-repository': '这个仓库把 Git 属性文件（core.attributesFile）指到了仓库自身之外，Cockpit 不会读取未获授权的目录，因此暂不自动处理这个仓库。请把该设置改回仓库内的文件，或保留人工 Git 流程。',
+  oversized: '这个仓库的 Git 属性文件超过安全读取上限（256KB），无法确认其中不含过滤器，因此暂不自动处理。请精简该文件后重试。',
+  'not-a-file': '这个仓库指向的 Git 属性文件不是普通文件，无法确认过滤器是否存在，因此暂不自动处理。请检查 core.attributesFile 的取值。',
+  'symbolic-path': '这个仓库的 Git 属性文件要经过链接才能读到，Cockpit 默认不跟随链接访问目录之外的内容，因此暂不自动处理。请把该属性文件改为真实文件。',
+  unreadable: '这个仓库的 Git 属性文件读不到，无法确认其中不含过滤器，因此暂不自动处理。请检查该路径是否存在且可读。',
+};
+
+// Refusal for a source that is reachable only through a link. `rejectSymbolicPath`
+// inspects segments with lstat and never resolves a target, so it cannot stall on
+// a dead share the way a realpath check would.
+function attributeSourceIsLinked(candidate) {
+  try {
+    rejectSymbolicPath(candidate);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function attributeSourceIsInside(scopes, candidate) {
+  // Case-folded on Windows: both sides come from git output or a user-typed
+  // config value and may differ there by case alone. The containment rule is
+  // the path guard's own, so a child whose name merely starts with `..` cannot
+  // be mistaken for an escape here either.
+  const fold = process.platform === 'win32' ? (value) => value.toLowerCase() : (value) => value;
+  return scopes.some((scope) => isWithin(fold(scope), fold(candidate)));
+}
+
+function attributeScopeRoots(cwd, gitDirectories) {
+  return [path.resolve(cwd), ...gitDirectories.map((value) => resolveConfigPath(cwd, value))];
+}
+
+function classifyAttributeSource(status, content) {
+  if (status === 'missing') return { hostile: false };
+  if (status !== 'ok') return { hostile: true, reason: status };
+  return hasFilterDriver(content)
+    ? { hostile: true, reason: 'driver' }
+    : { hostile: false };
+}
+
+async function readAttributeSource(candidate) {
+  if (attributeSourceIsLinked(candidate)) return { status: 'symbolic-path' };
+  let handle;
+  try {
+    handle = await open(candidate, 'r');
+    const details = await handle.stat();
+    if (!details.isFile()) return { status: 'not-a-file' };
+    if (details.size > ATTRIBUTE_SOURCE_LIMIT_BYTES) return { status: 'oversized' };
+    const buffer = Buffer.allocUnsafe(Number(details.size) + 1);
+    let read = 0;
+    while (read < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return { status: 'ok', content: buffer.subarray(0, read).toString('utf8') };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'missing' };
+    return { status: 'unreadable' };
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+function readAttributeSourceSync(candidate) {
+  if (attributeSourceIsLinked(candidate)) return { status: 'symbolic-path' };
+  let descriptor;
+  try {
+    descriptor = openSync(candidate, 'r');
+    const details = fstatSync(descriptor);
+    if (!details.isFile()) return { status: 'not-a-file' };
+    if (details.size > ATTRIBUTE_SOURCE_LIMIT_BYTES) return { status: 'oversized' };
+    const buffer = Buffer.allocUnsafe(Number(details.size) + 1);
+    let read = 0;
+    while (read < buffer.length) {
+      const bytesRead = readSync(descriptor, buffer, read, buffer.length - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return { status: 'ok', content: buffer.subarray(0, read).toString('utf8') };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { status: 'missing' };
+    return { status: 'unreadable' };
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch {}
+    }
+  }
+}
+
 async function attributeFileCandidates(cwd, overrides) {
   // `-z` is not cosmetic: without it git C-style quotes every path whose name
   // is not plain ASCII (`core.quotePath` defaults to true), so
@@ -253,31 +375,39 @@ async function attributeFileCandidates(cwd, overrides) {
     git(cwd, ['rev-parse', '--git-common-dir'], gitOptions(overrides)),
     git(cwd, ['rev-parse', '--git-dir'], gitOptions(overrides)),
   ]);
+  const scopes = attributeScopeRoots(cwd, [common.stdout, worktreeDir.stdout].filter(Boolean));
   for (const directory of [common.stdout, worktreeDir.stdout]) {
     if (directory) paths.push(path.resolve(cwd, directory, 'info', 'attributes'));
   }
 
+  // A working-tree or git-directory name is inside the repository by
+  // construction; only `core.attributesFile` can name something else, and that
+  // is decided here so the file is never opened.
+  const outsideRepository = [];
   for (const scope of await configScopes(cwd, overrides)) {
     const custom = await git(cwd, ['config', ...scope, '--get', 'core.attributesFile'], gitOptions(overrides));
-    if (custom.stdout) paths.push(resolveConfigPath(cwd, custom.stdout));
+    if (!custom.stdout) continue;
+    const resolved = resolveConfigPath(cwd, custom.stdout);
+    if (attributeSourceIsInside(scopes, resolved)) paths.push(resolved);
+    else outsideRepository.push(resolved);
   }
-  return [...new Set(paths)];
+  return { paths: [...new Set(paths)], outsideRepository };
 }
 
 async function findFilterAttributeFile(cwd, overrides) {
-  for (const candidate of await attributeFileCandidates(cwd, overrides)) {
-    let content;
-    try {
-      content = await readFile(candidate, 'utf8');
-    } catch (error) {
-      // A source git can read but this process cannot is indistinguishable from
-      // one that hides a driver, so fail closed instead of skipping it.
-      if (error?.code !== 'ENOENT') return candidate;
-      continue;
-    }
-    if (hasFilterDriver(content)) return candidate;
+  const { paths, outsideRepository } = await attributeFileCandidates(cwd, overrides);
+  // A driver the repository really carries is the more useful answer, so the
+  // in-scope sources are looked at first; the out-of-scope one is never opened
+  // either way.
+  for (const candidate of paths) {
+    // A source git can read but this process cannot — or will not fit in the
+    // read bound — is indistinguishable from one that hides a driver, so the
+    // repository stays refused; the reason says which of those it was.
+    const { status, content } = await readAttributeSource(candidate);
+    const verdict = classifyAttributeSource(status, content);
+    if (verdict.hostile) return verdict.reason;
   }
-  return null;
+  return outsideRepository.length ? 'outside-repository' : null;
 }
 
 function firstKey(stdout) {
@@ -296,7 +426,10 @@ function hasHostileTransportEntry(stdout) {
  * Inspect the repository configuration and attribute sources that can make Git
  * execute attacker-chosen commands or redirect a push destination.
  *
- * @returns {Promise<null | {kind: 'filter' | 'remote' | 'transport' | 'attributes'}>}
+ * @returns {Promise<null | {kind: 'filter' | 'remote' | 'transport' | 'attributes',
+ *   reason?: string}>} `reason` is set for `attributes` and says which of the
+ *   attribute answers applied: 'driver', 'outside-repository', 'oversized',
+ *   'not-a-file', 'symbolic-path' or 'unreadable'.
  */
 export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
   const scopes = await configScopes(cwd, overrides);
@@ -338,7 +471,7 @@ export async function findHostileRepositoryConfiguration(cwd, overrides = {}) {
   if (verifyResults.some(Boolean) || followResults.some(Boolean)) return { kind: 'transport' };
 
   const attribute = await findFilterAttributeFile(cwd, overrides);
-  if (attribute) return { kind: 'attributes' };
+  if (attribute) return { kind: 'attributes', reason: attribute };
   return null;
 }
 
@@ -356,7 +489,7 @@ export const REPOSITORY_CONFIG_ERROR_CODES = {
 export async function assertRepositoryAllowed(cwd, overrides = {}) {
   const { messages = REPOSITORY_CONFIG_ERROR_CODES, ...gitOverrides } = overrides;
   const hostile = await findHostileRepositoryConfiguration(cwd, gitOverrides);
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages, reason: hostile.reason });
 }
 
 // Flows that only observe a path (folder selection, registration, refresh,
@@ -378,10 +511,13 @@ export async function assertRepositoryAllowedForProbe(cwd, overrides = {}) {
 
 // Existing call sites keep the error codes their contracts and messages already
 // publish; only the detection logic is shared.
-export function repositoryConfigurationError(kind, { messages }) {
+export function repositoryConfigurationError(kind, { messages, reason } = {}) {
   const detail = {
     filter: 'Git clean/smudge/process filters, including LFS, are not supported.',
-    attributes: 'Git clean/smudge/process filters, including LFS, are not supported.',
+    // A named attribute source that is not a driver the repository carries is
+    // not a filter complaint; the code stays published as GIT_FILTER_UNSUPPORTED
+    // because the refusal is the same gate, but the text says what was found.
+    attributes: ATTRIBUTE_REFUSAL_MESSAGES[reason] ?? ATTRIBUTE_REFUSAL_MESSAGES.driver,
     remote: 'Remote overrides are not supported.',
     // Names the setting family, never the value: a repository controls both,
     // and this text reaches the UI. Kept accurate for every key in the pattern:
@@ -389,7 +525,11 @@ export function repositoryConfigurationError(kind, { messages }) {
     // switched-off verification, so the wording covers the whole family.
     transport: 'Repository-owned Git transport settings that change where a connection goes, who it trusts, or what it sends are not supported.',
   }[kind];
-  return Object.assign(new Error(detail), { code: messages[kind] });
+  const publicMessage = kind === 'attributes' ? ATTRIBUTE_PUBLIC_MESSAGES[reason] : null;
+  return Object.assign(new Error(detail), {
+    code: messages[kind],
+    ...(publicMessage ? { publicMessage } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -447,31 +587,31 @@ function attributeFileCandidatesSync(cwd, overrides) {
 
   const common = gitSync(cwd, ['rev-parse', '--git-common-dir'], options);
   const worktreeDir = gitSync(cwd, ['rev-parse', '--git-dir'], options);
+  const scopes = attributeScopeRoots(cwd, [common.stdout, worktreeDir.stdout].filter(Boolean));
   for (const directory of [common.stdout, worktreeDir.stdout]) {
     if (directory) paths.push(path.resolve(cwd, directory, 'info', 'attributes'));
   }
 
+  const outsideRepository = [];
   for (const scope of configScopesSync(cwd, overrides)) {
     const custom = gitSync(cwd, ['config', ...scope, '--get', 'core.attributesFile'], options);
-    if (custom.stdout) paths.push(resolveConfigPath(cwd, custom.stdout));
+    if (!custom.stdout) continue;
+    const resolved = resolveConfigPath(cwd, custom.stdout);
+    if (attributeSourceIsInside(scopes, resolved)) paths.push(resolved);
+    else outsideRepository.push(resolved);
   }
-  return [...new Set(paths)];
+  return { paths: [...new Set(paths)], outsideRepository };
 }
 
 function findFilterAttributeFileSync(cwd, overrides) {
-  for (const candidate of attributeFileCandidatesSync(cwd, overrides)) {
-    let content;
-    try {
-      content = readFileSync(candidate, 'utf8');
-    } catch (error) {
-      // Same fail-closed rule as the async path: a source git can read but
-      // this process cannot is indistinguishable from one that hides a driver.
-      if (error?.code !== 'ENOENT') return candidate;
-      continue;
-    }
-    if (hasFilterDriver(content)) return candidate;
+  const { paths, outsideRepository } = attributeFileCandidatesSync(cwd, overrides);
+  for (const candidate of paths) {
+    // Same fail-closed rule, bounds and answer order as the async path.
+    const { status, content } = readAttributeSourceSync(candidate);
+    const verdict = classifyAttributeSource(status, content);
+    if (verdict.hostile) return verdict.reason;
   }
-  return null;
+  return outsideRepository.length ? 'outside-repository' : null;
 }
 
 export function findHostileRepositoryConfigurationSync(cwd, overrides = {}) {
@@ -489,14 +629,15 @@ export function findHostileRepositoryConfigurationSync(cwd, overrides = {}) {
     if (normalizedTransportEntriesHostileSync(cwd, scope, HOSTILE_TRANSPORT_BOOLEAN_PATTERN, overrides)) return { kind: 'transport' };
     if (normalizedTransportEntriesHostileSync(cwd, scope, HOSTILE_TRANSPORT_REDIRECT_PATTERN, overrides, { boolOrStr: true })) return { kind: 'transport' };
   }
-  if (findFilterAttributeFileSync(cwd, overrides)) return { kind: 'attributes' };
+  const attribute = findFilterAttributeFileSync(cwd, overrides);
+  if (attribute) return { kind: 'attributes', reason: attribute };
   return null;
 }
 
 export function assertRepositoryAllowedSync(cwd, overrides = {}) {
   const { messages = REPOSITORY_CONFIG_ERROR_CODES } = overrides;
   const hostile = findHostileRepositoryConfigurationSync(cwd, overrides);
-  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages });
+  if (hostile) throw repositoryConfigurationError(hostile.kind, { messages, reason: hostile.reason });
 }
 
 export function assertRepositoryAllowedForProbeSync(cwd, overrides = {}) {

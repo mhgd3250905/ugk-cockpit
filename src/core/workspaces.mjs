@@ -7,6 +7,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
 import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import {
@@ -28,7 +29,6 @@ import {
   reserveWorkspaceLifecycle,
 } from './workspace-lifecycle.mjs';
 import { EmptyFolderGrantStore } from './folder-grants.mjs';
-import { singleFlight } from './single-flight.mjs';
 import {
   revalidateEmptyDirectory,
 } from './path-guard.mjs';
@@ -36,6 +36,7 @@ import { probeGitWorktree } from '../git/probe.mjs';
 import { assertRepositoryAllowedForProbe } from '../git/repository-policy.mjs';
 import {
   checkBranchExists,
+  countIgnoredWorktreeEntries,
   createGitWorktree,
   generateStableBranchName,
   isStableWorkspaceBranch,
@@ -226,16 +227,13 @@ function registerAndCompleteWorkspace({
   });
 }
 
-// A client that lost the response retries with the identical request id, so two
-// in-flight drivers for one `workspace.create` are a supported outcome. Without
-// the gate both drivers run the body: the repository lock names the command as
-// its holder, so the second one *renews* the lock instead of being denied, two
-// `git worktree add` calls run against the same repository at once, and the
-// first driver to finish deletes the lock row the second is still relying on —
-// after which any other operation can take the repository mid-creation. This is
-// the same gate `prepareDelivery`, `submitDelivery` and `mergeApprovedSubmission`
-// already use for the same reason.
 export function createDevelopmentWorkspace(db, request = {}, options = {}) {
+  // A lost-response retry arrives with the same command id. Without a gate both
+  // drivers run: the journal replays the second one, `acquireRepositoryLock`
+  // *renews* the holder-matching lock instead of denying it, and whichever
+  // driver finishes first deletes the single repository_locks row the other is
+  // still working under — leaving Git running in the repository with no
+  // exclusivity. merge/delivery already wrap themselves the same way.
   return singleFlight(db, request, () => createDevelopmentWorkspaceOnce(db, request, options));
 }
 
@@ -1461,6 +1459,37 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     if (!workspaceValidation.ok) return failOrUnknown({ ok: false, ...workspaceValidation, spaceId: space.spaceId });
     if (workspaceObservation.after.hasChanges) {
       return failOrUnknown({ ok: false, code: 'WORKSPACE_HAS_CHANGES', spaceId: space.spaceId });
+    }
+    // The dirty gate above reads `status --untracked-files=normal`, which never
+    // lists git-IGNORED content, and the product's own `worktree remove` deletes
+    // that content with the directory (measured: exit 0, file gone). Git cannot
+    // bring it back, so the removal asks first.
+    // The probe must fail like the one above: an escaping throw would leave the
+    // lifecycle reservation held open with no journaled outcome.
+    let ignored;
+    try {
+      // Its own budget, not the removal effect's 15s: this is a read-only probe.
+      ignored = await (options.countIgnoredWorktreeEntries ?? countIgnoredWorktreeEntries)(
+        space.canonicalPath,
+      );
+    } catch (error) {
+      // Same settled shape as the dirty probe above: git failures surface as a
+      // raw exit code (128) or ETIMEDOUT, and an unmapped code would collapse
+      // the public response to REQUEST_FAILED and stay journaled that way.
+      return failOrUnknown({
+        ok: false,
+        code: 'WORKSPACE_PROBE_FAILED',
+        spaceId: space.spaceId,
+        message: error.message,
+      });
+    }
+    if (ignored.count > 0 && request.userConfirmedIgnoredRemoval !== true) {
+      return failOrUnknown({
+        ok: false,
+        code: 'WORKSPACE_IGNORED_CONTENT_CONFIRMATION_REQUIRED',
+        spaceId: space.spaceId,
+        ignoredCount: ignored.count,
+      });
     }
 
     const preEffect = revalidateWorkspaceLifecycle(db, reservation, options);

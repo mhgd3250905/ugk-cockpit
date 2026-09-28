@@ -35,6 +35,20 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'protocol.ftps.allow=never',
   '-c', 'core.sshCommand=ssh',
   '-c', 'ssh.variant=ssh',
+  // `core.askPass` is the same family as core.sshCommand and core.hooksPath:
+  // repository-local config that names a PROGRAM git will run. On an auth
+  // challenge git resolves GIT_ASKPASS -> core.askPass -> SSH_ASKPASS and
+  // executes the value through a shell even with GIT_TERMINAL_PROMPT=0
+  // (measured: a repo-local askpass batch file ran during the product's own
+  // ls-remote against a 401 endpoint). Pin it to git's default so no
+  // repository can answer a credential challenge by running itself.
+  '-c', 'core.askPass=',
+  // `status.showUntrackedFiles` is only how git renders `status`, but the
+  // product reads that output as a completeness decision, and git's own
+  // `worktree remove` safety check consults it too (measured: with `no`,
+  // removing a worktree deletes an untracked file that git would otherwise
+  // have refused to touch). Pin the default so no repository can weaken either.
+  '-c', 'status.showUntrackedFiles=normal',
   '-c', 'filter.lfs.clean=',
   '-c', 'filter.lfs.smudge=',
   '-c', 'filter.lfs.process=',
@@ -83,6 +97,11 @@ export function safeGitEnvironment() {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),
   );
+  // GIT_* is gone with the filter above; SSH_ASKPASS is the next fallback in
+  // git's askpass resolution chain and must not survive from the inherited
+  // environment either (measured: an inherited SSH_ASKPASS executed during a
+  // product ls-remote against a 401 endpoint before this strip existed).
+  delete environment.SSH_ASKPASS;
   environment.GIT_CONFIG_NOSYSTEM = '1';
   environment.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
   environment.GIT_TERMINAL_PROMPT = '0';
@@ -141,11 +160,15 @@ export function gitSync(cwd, args, {
   timeoutMs = 5_000,
   maxBuffer = 4 * 1024 * 1024,
   acceptExitCodes = [0],
+  config = [],
   // Same meaning as in `git()`: keep every byte of `-z` records.
   raw = false,
 } = {}) {
+  const configArgs = Array.isArray(config)
+    ? config
+    : Object.entries(config).flatMap(([key, value]) => ['-c', `${key}=${value}`]);
   try {
-    const stdout = execFileSync('git', [...SAFE_GIT_PREFIX, ...args], {
+    const stdout = execFileSync('git', [...SAFE_GIT_PREFIX, ...configArgs, ...args], {
       cwd,
       timeout: timeoutMs,
       maxBuffer,
@@ -192,7 +215,47 @@ async function resolveGitPath(cwd, value) {
   return realpath(path.isAbsolute(value) ? value : path.resolve(cwd, value));
 }
 
-async function resolveObjectDirectories(primaryObjectDirectory) {
+// An alternate names a directory Git would consult for objects. Resolving it
+// must not become an unbounded filesystem call: the entry comes from
+// `.git/objects/info/alternates`, so repository content chooses the path, and a
+// dangling entry used to throw a raw ENOENT out of every observation while a
+// path on an unmounted volume or a dead share never returned at all — and
+// graceful shutdown waits on open requests.
+//
+// One budget covers the **whole** pass, not each entry: the file may name up to
+// 64 directories, so a per-entry budget would multiply into minutes. A missing
+// entry is dropped because Git itself keeps working without it and it holds no
+// objects to authorize; anything else — a read error or the budget running out
+// — is reported as a refusal rather than silently narrowing the set that path
+// authorization will later be asked to trust.
+function alternateResolutionFailure() {
+  const error = new Error('Git 指向的对象目录无法定位，已停止读取。');
+  error.code = 'GIT_ALTERNATE_UNRESOLVED';
+  return error;
+}
+
+async function resolveAlternate(candidate, deadlineAt) {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw alternateResolutionFailure();
+  let timer;
+  try {
+    return await Promise.race([
+      realpath(candidate),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(alternateResolutionFailure()), remaining);
+        timer.unref();
+      }),
+    ]);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return null;
+    if (error?.code === 'GIT_ALTERNATE_UNRESOLVED') throw error;
+    throw alternateResolutionFailure();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function resolveObjectDirectories(primaryObjectDirectory, { timeoutMs = 5_000 } = {}) {
   const directories = [primaryObjectDirectory];
   const alternatesFile = path.join(primaryObjectDirectory, 'info', 'alternates');
   if (!existsSync(alternatesFile)) return directories;
@@ -209,11 +272,14 @@ async function resolveObjectDirectories(primaryObjectDirectory) {
     error.code = 'GIT_METADATA_TOO_LARGE';
     throw error;
   }
+  // One budget for the whole list, evaluated as an absolute deadline.
+  const deadlineAt = Date.now() + timeoutMs;
   for (const line of entries) {
     const candidate = path.isAbsolute(line)
       ? line
       : path.resolve(primaryObjectDirectory, line);
-    directories.push(await realpath(candidate));
+    const resolved = await resolveAlternate(candidate, deadlineAt);
+    if (resolved) directories.push(resolved);
   }
   return [...new Set(directories)];
 }
@@ -296,7 +362,7 @@ export async function probeGitWorktree(
   const gitDirectory = await resolveGitPath(requestedPath, gitDirValue);
   const primaryObjectDirectory = await resolveGitPath(requestedPath, objectDirectoryValue);
   const indexPath = await resolveGitPath(requestedPath, indexPathValue);
-  const objectDirectories = await resolveObjectDirectories(primaryObjectDirectory);
+  const objectDirectories = await resolveObjectDirectories(primaryObjectDirectory, options);
   const [repositoryIdentity, worktreeIdentity] = await Promise.all([
     fileIdentity(repositoryCommonDir),
     fileIdentity(canonicalPath),

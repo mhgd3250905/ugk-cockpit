@@ -19,7 +19,7 @@ function escapesRoot(relative) {
   return relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
 
-function isWithin(root, candidate) {
+export function isWithin(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || !escapesRoot(relative);
 }

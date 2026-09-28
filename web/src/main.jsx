@@ -46,6 +46,8 @@ import {
 } from './avatar-color.mjs';
 import { copyNoteText } from './copy-note-text.mjs';
 import { completeAssignmentCopy } from './assignment-copy-flow.mjs';
+import { applyPolledProjectDetail } from './project-detail-poll.mjs';
+import { describeSpaceCreateBlock } from './space-create-notice.mjs';
 import {
   classifyWorkspaceActionError,
   createWorkspaceActionRecord,
@@ -54,6 +56,7 @@ import {
   markWorkspaceActionUnknown,
   readWorkspaceActionRecordsWithStatus,
   removeWorkspaceActionRecord,
+  workspaceActionRequestBody,
   upsertWorkspaceActionRecord,
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
@@ -862,11 +865,9 @@ function App() {
             || prev.seed.id !== activeDetailProjectId
             || prev.loadingMore
           ) return prev;
-          const visibleCount = prev.data?.timeline?.items?.length ?? 0;
-          if (visibleCount > limit) return prev;
           return {
             ...prev,
-            data,
+            data: applyPolledProjectDetail(prev.data, data),
             loading: false,
             error: null,
           };
@@ -1206,13 +1207,17 @@ function App() {
     const projectId = current.seed.id;
     const requestId = current.requestId;
     if (!isCurrentDetailRequest(requestId, projectId)) return;
-    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=30&offset=0`);
+    // Same page sizing as the timer poll: a fixed 30-item page would collapse
+    // the window the user accumulated, and the merge decision cannot rescue
+    // rows a smaller-than-visible page never carried (round-30 review).
+    const limit = calculateRefreshLimit(current.data?.timeline?.items?.length ?? 30);
+    const data = await api(`/api/v1/projects/${encodeURIComponent(projectId)}?limit=${limit}&offset=0`);
     if (!isCurrentDetailRequest(requestId, projectId)) return;
     setProjectDetail((previous) => {
       if (!previous || previous.requestId !== requestId || previous.seed.id !== projectId) return previous;
       return {
         ...previous,
-        data,
+        data: applyPolledProjectDetail(previous.data, data),
         loading: false,
         error: null,
         actionNotice,
@@ -1229,7 +1234,12 @@ function App() {
     const project = current?.data?.project;
     const projectId = project?.id;
     const requestId = current?.requestId;
-    if (!projectId || !project?.git?.head || !isCurrentDetailRequest(requestId, projectId)) return;
+    if (!projectId || !isCurrentDetailRequest(requestId, projectId)) return;
+    const blocked = describeSpaceCreateBlock(project);
+    if (blocked) {
+      setProjectDetail((previous) => previous ? { ...previous, actionNotice: blocked } : previous);
+      return;
+    }
     setBusy(true);
     try {
       const selected = await api('/api/v1/folders/select-empty', { method: 'POST', body: '{}' });
@@ -1414,7 +1424,9 @@ function App() {
     try {
       await api(workspaceActionPath(record), {
         method: 'POST',
-        body: JSON.stringify(record.request),
+        // Derived from the durable record, so the first attempt and the
+        // “恢复并核对” replay always send exactly the same request body.
+        body: JSON.stringify(workspaceActionRequestBody(record)),
       });
     } catch (error) {
       const outcome = classifyWorkspaceActionError(error);
@@ -4038,7 +4050,7 @@ function SpaceActionModal({ action, busy, onClose, onConfirm }) {
           <DialogDescription>
             {isReuse
               ? '会为这个空间开始一条新的工作线，基于主项目当前可见的本地版本。'
-              : '会移除这个空间的本地工作副本，释放它占用的电脑空间。'}
+              : '会移除这个空间的本地工作副本，释放它占用的电脑空间；文件夹里被 Git 忽略的内容（依赖、构建产物、本地数据）也会一起删除，而且无法从 Git 恢复。'}
           </DialogDescription>
         </DialogHeader>
 

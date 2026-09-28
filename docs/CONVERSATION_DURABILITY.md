@@ -8,7 +8,7 @@
 
 目录文件身份指纹不再包含 stat device 编号（macOS APFS 卷号会随重启/系统更新漂移，inode+birthtime 已唯一定位目录条目）；device 仅保留在诊断证据中。漂移不等于目录被替换：目录真的被 `cp -R`/替换时 inode 变化，仍会被 100% 拒绝。
 
-schema 30 迁移对每个 worktree 记录按 `canonical_path` 以当前 stat 重算旧格式指纹，与库存旧值精确相等者原地改写为新格式；`repository_identity` 同法，其 common dir 经 `git -C <path> rev-parse --git-common-dir` 求得，并先通过 repository-policy 安全校验（hostile 配置仓库一律不探测、保持原样）。同一轮改写覆盖全部以指纹为键或存指纹的域：`worktrees`、`projects`、`snapshots`、`repository_locks`、`workspace_lifecycle_reservations`，升级前已开始的 run 迁移后仍可正常结束。路径不可达、旧 device 已真漂移或指纹仍不匹配的行保持旧格式，其唯一出路是下面的用户确认重绑；支持本迁移的代码不可被 schema ≤29 的旧程序打开（UNSUPPORTED_SCHEMA_VERSION 拒绝未来版本）。迁移可重复执行，覆盖真实历史数据与全新进程重建验证：`test/confirm-location.test.mjs`。
+schema 30 迁移对每个 worktree 记录按 `canonical_path` 以当前 stat 重算旧格式指纹，与库存旧值精确相等者原地改写为新格式；`repository_identity` 同法，其 common dir 经 `git -C <path> rev-parse --git-common-dir` 求得，并先通过 repository-policy 安全校验（hostile 配置仓库一律不探测、保持原样）。同一轮改写覆盖全部以指纹为键或存指纹的域：`worktrees`、`projects`、`snapshots`、`repository_locks`、`workspace_lifecycle_reservations`，升级前已开始的 run 迁移后仍可正常结束。路径不可达、旧 device 已真漂移或指纹仍不匹配的行保持旧格式，其唯一出路是下面的用户确认重绑；支持本迁移的代码不可被 schema ≤29 的旧程序打开（UNSUPPORTED_SCHEMA_VERSION 拒绝未来版本）。`identity_migration_state`（schema 31）按行记录改写状态，把「schema 已到位」与「按行的改写已收敛」分开：判不了的行（路径不可达、git 尚不可用、敌意配置事后才清除等瞬时原因）与因预算不足被跳过的行都留在 `retry`（仍欠工作）台账（原因、累计尝试次数、首次与最近时间），之后每次开库继续重试直至收敛；判定成功的行进入 `settled`，不再重复 stat/git 探测（真漂移行因此不会每次启动都吃一次 git 成本）。工作副本行被删除后其台账一并清理，因此「是否仍欠工作」的判断同时看未 settled 的行与孤立台账行：台账全部 settled 时开库根本不进写事务（可选的收敛不得为没有的事去抢只有 150ms 预算的写锁），而这一趟本身失败或台账不可读也只记一条 stderr 并继续开库——行保持旧格式是 fail-closed，让服务起不来才是事故。预算按**尝试次数**而非成功次数计（判不了的行往往就是最慢的那一行），且总保证至少尝试一行，避免台账永远不动。这一趟仍发生在 pre-listen 阶段（此时没有事件循环会被同步 git 探测拖住）。只读排查入口是 `identityMigrationBacklog(db)`，非空即表示还有行的位置身份尚未收敛。`POST /api/v1/projects/:id/confirm-location` 仍是「目录真的变了」的唯一出路；台账里因目录不可达而留下的行不需要人工确认，路径恢复后自行收敛。重复执行与收敛性覆盖真实历史数据、全新进程重建与「瞬时不可达后恢复」三类夹具：`test/confirm-location.test.mjs`、`test/audit-2026-09-27-identity-retry.test.mjs`。
 
 `POST /api/v1/projects/:id/confirm-location`（仅浏览器会话）在同路径不变式下由用户确认重绑：拒绝存在活跃 run/租约、pending/accepted/active 邀请或同仓库未过期锁/预留的工作链（409 `PROJECT_LOCATION_CONFIRMATION_BUSY`，先在工作台完成接管或结束）；确认范围内同 `repository_identity` 的全部 worktree 行（含开发空间与送审来源）一并重绑并退休旧键控锁与预留，不留永久孤儿行。普通文件夹项目（`folder:` 身份）走 `observeProjectFolder` 同一口径，状态豁免为 `folder_ready`。命令日志幂等重放在选择授权 5 分钟 TTL 过后仍返回原回执；`FolderGrantStore` 与空目录授权同语义（TTL 只把守首次使用，同命令崩溃可恢复，支持 unclaim 释放）。
 
@@ -25,9 +25,11 @@ schema 29 为项目增加可空 `removed_at`；迁移 28 的操作执行者身�
 会话接续与转交位于所选工作线完整信息中。原请求、忙碌状态和已签发结果在项目页面内按会话保存，关闭弹窗、切换工作线以及晚到响应不丢失重试依据。授权码不写入浏览器持久存储；离开项目页面或刷新后应读取平台当前状态，不承诺恢复临时显示。后端持久化授权与冻结协议保持下文原义。
 
 
-## 未登记工作链的旧运行记录恢复（alpha.42 源码；该修复已随后继部署上线，正式服务当前运行版本见[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)）
+## 未登记工作链的旧运行记录恢复（alpha.42 源码，尚未部署）
 
-alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`，旧运行记录的开始、结束和释放接口因此不可达。alpha.42 将请求授权范围取为注入根与已持久授予的项目、工作副本路径的并集，仍拒绝未授权目录。（「只有服务加载该修复后才可用、本轮没有重启正式服务」是 alpha.42 那一轮的时点记录；本机正式服务在此之后已多次部署，见上文的部署验收条目，不要按本段推断当前是否可用。）
+（2026-09-28 第 31 轮括注：标题的「尚未部署」已过期。`POST /api/v1/runs/release-lease` 路由与释放协议在 main 上存在（`src/service/http-server.mjs`），本机正式服务此后已按 `docs/LOCAL_SERVICE_RECOVERY.md` 的部署验收升级到更高版本；下面的历史叙述保留不改写。）
+
+alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`，旧运行记录的开始、结束和释放接口因此不可达。alpha.42 将请求授权范围取为注入根与已持久授予的项目、工作副本路径的并集，仍拒绝未授权目录。只有服务加载该修复后，下面的恢复入口才可用；本轮没有重启正式服务。
 
 `POST /api/v1/runs/release-lease` 只允许用户明确确认释放没有 assignment 的旧运行记录。聊天绑定与转交记录通过外键关联 assignment，因此受管理工作会话在事务内返回 `RUN_LEASE_MANAGED_SESSION`，不修改运行、租约、工作链或待转交状态；这些会话继续使用下文的工作台转交协议。接口校验授权代码位置、revision 与 lease generation，结果及用户确认进入命令日志，普通 scoped MCP 不能调用；目前没有工作台按钮。
 
@@ -41,7 +43,7 @@ alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`�
 
 schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_at`，新操作记录执行进程的启动代际。在正式服务单实例约束下，恢复逻辑区分当前执行者与旧进程记录；迁移前的 NULL 记录继续采用保守判据。该字段不替代服务实例锁，不改变聊天身份或平台转交协议，也不代表已解决所有平台的 PID 复用问题。独立夹具验证了 schema 27 历史预留行保留、重复打开及真实进程终止后的恢复；正式数据库尚未执行本轮迁移。（此句为其实现时点记录：本机服务已于 2026-09-12 加载 schema 29，见上文与[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)；本段所述 28/29 迁移是否已在正式库执行以该文档的最新条目为准。）
 
-原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断。自 alpha.54 起，这类「Git 效果已发生、结算前中断」的未知操作有了产品内出路：用户在工作台确认后经 `POST /api/v1/projects/:id/workspace-lifecycle` 一次性结算预约行、命令流水行与 persistent 仓库锁三层（只读识别走同名 GET），不触碰代码本身，识别与运维步骤见[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)。在该出路之外（例如尚未加载该版本的服务、或结算被活动写租约拒绝），应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
+原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。（2026-09-28 第 31 轮括注：本句与本文他处「出路只有用户在工作台确认后一次性结算」矛盾，且已被代码推翻——`abandonWorkspaceLifecycle`（`src/core/workspace-lifecycle.mjs`）与 `GET/POST /api/v1/projects/:id/workspace-lifecycle` 提供用户确认结算的入口；此处保留原文不改写。）此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
 
 浏览器在发送删除或复用请求前保存原始请求号、参数和目标空间。页面刷新后仍展示“恢复并核对”入口；服务重建后重新建立浏览器凭据，继续提交原参数。连接中断及后端明确标记的未知结果保留恢复材料，只有确认成功或确认失败才能清除。浏览器不能可靠保存材料时，不发送新的空间操作。
 
@@ -75,7 +77,7 @@ schema 25 在 `commands` 增加操作者类型、平台及宿主会话 ID 三列
 
 `ugk_work_takeover` 仅消费 `{ sessionId, clientRequestId, transferCode }`；模型不能以“用户已确认”、旧 confirmationRequestId 或旧两步参数签发异常接手权限。过期 resume 的新请求必须到工作台授权；以前已经成功的幂等回执保留原事实，当前能力另按数据库计算，不恢复旧权限。有效普通 Relay 接收保持正常流程。
 
-`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端只收到通用 `INVALID_REQUEST`（该回执不带指引），恢复入口即本条所述的工作台转交面板。
+`ugk_work_resume` 的工具定义与 HTTP 边界已同步只发布 `{ continueCode, clientRequestId }`（2026-09-28 括注：本句少列一个字段。当前 schema 与 HTTP 边界接受的是 `{ continueCode, clientRequestId, declaredWorkspace }`——第三个字段是 alpha.51「接入指令即归属」给全局登记宿主用的工作目录回退，见本文开头与 `src/mcp/stdio-protocol.mjs` 的 resume 定义；退役的只是 `confirmationRequestId`/`expectedRevision`，本处不再重复复述字段清单，以免再次过期）：过期 Relay 的第一步就被工作台授权要求拒绝，服务不再产生可供第二步确认的 offer，继续公布 `confirmationRequestId`/`expectedRevision` 只会让 Agent 走进必然失败的分支。stdio bridge 在本地就拒绝这两个参数并给出“到工作台授权转交后再用 `ugk_work_takeover`”的指引；直接按 HTTP 调用的旧客户端只收到通用 `INVALID_REQUEST`（该回执不带指引），恢复入口即本条所述的工作台转交面板。
 
 签发回执重放时，只在当前授权仍有效时重新提供同一码；已消费、取消、过期或替代只返回当前处理状态，不展示可继续使用的空码或旧码。结果未知时保留原参数与原幂等键重试，不自动创建新授权。消费授权、冻结检查、CAS、新 owner、撤销旧 owner、C 接手节点与回执原子提交。
 

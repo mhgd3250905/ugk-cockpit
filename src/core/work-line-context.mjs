@@ -180,12 +180,26 @@ function sessionCandidate(assignment, run = null) {
   };
 }
 
-function readLatestSession(lane, assignments, runsById, reuseBoundaryAt = null) {
+function readLatestSession(db, lane, assignments, runsById, reuseBoundaryAt = null) {
   const candidates = [];
   const addCandidate = (candidate) => {
     if (candidateStartedAfter(candidate, reuseBoundaryAt)) candidates.push(candidate);
   };
+  // Same criterion as the timeline's init nodes: an invitation that never got a
+  // session, never recorded an adopted event, and has no baseline keyed by the
+  // assignment itself never happened. Reporting one as currentAgent would guess
+  // attribution the platform cannot prove (AGENTS.md: unattributed, never guess).
+  const adoptedProbe = db.prepare(`
+    SELECT 1 FROM progress_events WHERE assignment_id = ? AND status = 'adopted' LIMIT 1
+  `);
+  const baselineProbe = db.prepare(`
+    SELECT 1 FROM snapshots WHERE phase = 'baseline' AND run_id = ? LIMIT 1
+  `);
+  const actuallyHappened = (assignment) => Boolean(assignment.session_id)
+    || adoptedProbe.get(assignment.id)
+    || baselineProbe.get(assignment.id);
   for (const assignment of assignments.filter((row) => row.worktree_id === lane.worktreeId)) {
+    if (!actuallyHappened(assignment)) continue;
     const run = assignment.session_id
       ? runsById.get(assignment.session_id)?.worktree_id === assignment.worktree_id
         ? runsById.get(assignment.session_id)
@@ -609,6 +623,7 @@ export function readWorkLineContexts(db, projectId) {
 
   return lanes.map((lane) => {
     const candidate = readLatestSession(
+      db,
       lane,
       assignments,
       new Map([...runsById].filter(([, run]) => run.worktree_id === lane.worktreeId)),

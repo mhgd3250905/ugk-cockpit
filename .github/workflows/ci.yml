@@ -16,7 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          # One source of truth: engines requires >=24.15.0 <25 and .node-version
+          # pins the accepted build. '24' silently drifts to whatever the runner
+          # ships, so the gate can run a Node nobody validated.
+          node-version-file: .node-version
       # The runner image points TEMP at the 8.3 short name (C:\Users\RUNNER~1\...).
       # The service realpaths every user-visible path to the long form, and the
       # fixtures compare against raw os.tmpdir(), so the suite recorded for

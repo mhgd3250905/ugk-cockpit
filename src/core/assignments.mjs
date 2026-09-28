@@ -888,17 +888,12 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
     if (grant.state === 'revoked') {
       return failCommand(db, commandId, { ok: false, code: 'DISPATCH_GRANT_REVOKED', grantId });
     }
-    if (grant.state === 'expired' || grant.expires_at <= now) {
-      db.prepare(`
-        UPDATE dispatch_grants SET state = 'expired'
-        WHERE id = ? AND state = 'active'
-      `).run(grantId);
-      return failCommand(db, commandId, {
-        ok: false,
-        code: 'DISPATCH_GRANT_EXPIRED',
-        grantId,
-      });
-    }
+    // expires_at bounds ISSUANCE. Once the grant is accepted the credential is
+    // consumed and the session is bound; a later retry of the same logical
+    // request must rebuild the original success (same contract relays document
+    // for accepted/expired replays). The expiry guard below must not preempt
+    // this branch — measured before the fix: replay past the TTL returned
+    // DISPATCH_GRANT_EXPIRED while the row stayed a valid accepted session.
     if (grant.state === 'accepted') {
       if (grant.accepted_client_request_id === clientRequestId
         && grant.accepted_session_id === sessionId) {
@@ -926,6 +921,17 @@ export function acceptDispatchGrant(db, request = {}, options = {}) {
         grantId,
         assignmentId: grant.assignment_id,
         sessionId: grant.accepted_session_id,
+      });
+    }
+    if (grant.state === 'expired' || grant.expires_at <= now) {
+      db.prepare(`
+        UPDATE dispatch_grants SET state = 'expired'
+        WHERE id = ? AND state = 'active'
+      `).run(grantId);
+      return failCommand(db, commandId, {
+        ok: false,
+        code: 'DISPATCH_GRANT_EXPIRED',
+        grantId,
       });
     }
 

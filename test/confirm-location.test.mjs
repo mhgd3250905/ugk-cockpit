@@ -387,7 +387,7 @@ test('schema v30 rewrites recoverable legacy fingerprints in place (R2)', async 
   // 旧版本库位重开（原地升级触发 v30）。
   db = openCockpitDatabase(dbPath);
   assert.equal(Number(db.prepare('PRAGMA user_version').get().user_version), SUPPORTED_SCHEMA_VERSION);
-  assert.equal(SUPPORTED_SCHEMA_VERSION, 30, 'the rewrite must ride schema v30');
+  assert.equal(SUPPORTED_SCHEMA_VERSION, 31, 'the rewrite must ride schema v30, with its ledger added in v31');
   const rowA = db.prepare('SELECT * FROM worktrees WHERE canonical_path = ?').get(probeA.canonicalPath);
   assert.equal(rowA.identity_fingerprint, probeA.worktreeIdentity, 'recoverable legacy hash must be rewritten');
   assert.equal(rowA.repository_identity, probeA.repositoryIdentity);
