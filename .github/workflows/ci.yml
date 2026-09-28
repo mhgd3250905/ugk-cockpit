@@ -67,5 +67,6 @@ jobs:
         run: npm ci
       # Each shard has its own runner, ports and workspace. Together they run
       # the full suite once, including Phase 0; no second Phase 0 run is needed.
+      # TAP retains worker exit codes, signals and causes hidden by the spec reporter.
       - name: Full test suite shard ${{ matrix.shard }}
-        run: npm test -- --test-shard=${{ matrix.shard }}
+        run: npm test -- --test-shard=${{ matrix.shard }} --test-reporter=tap
