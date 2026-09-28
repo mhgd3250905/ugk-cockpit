@@ -664,24 +664,27 @@ test('pushDelivery and verifyDeliveryRemote succeed and tolerate local main dirt
   assert.equal(verifiedWithDirtyMain.ok, true);
 });
 
-test('files parameter rejects invalid inputs, traversal, pathspec magic, and non-change paths', async (t) => {
+test('files parameter rejects invalid inputs, traversal, pathspec magic, and non-change paths', (t) => {
+  const sourcePath = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-delivery-files-'));
+  t.after(() => rmSync(sourcePath, { recursive: true, force: true }));
+  writeFileSync(path.join(sourcePath, 'valid.txt'), 'valid\n');
+  const changes = [{ path: 'valid.txt' }];
+  // Keep real filesystem resolution, without probing two Git repositories for
+  // every rejected input. A positive control proves the change list is valid.
+  assert.deepEqual(validateDeliveryFiles(['valid.txt'], changes, sourcePath), ['valid.txt']);
+  for (const files of [
+    ['../outside.txt'], ['*magic.txt'], ['nonexistent.txt'],
+    [path.resolve(sourcePath, 'valid.txt')],
+  ]) {
+    assert.throws(() => validateDeliveryFiles(files, changes, sourcePath), { code: 'INVALID_DELIVERY_FILES' });
+  }
+});
+
+test('inspectDelivery rejects invalid files through the real Git preflight', async (t) => {
   const { sourcePath, targetPath } = createDeliveryFixture(t);
   writeFileSync(path.join(sourcePath, 'valid.txt'), 'valid\n');
-
   await assert.rejects(
     () => inspectDelivery({ sourcePath, targetPath, files: ['../outside.txt'], targetBranch: 'main' }),
-    { code: 'INVALID_DELIVERY_FILES' },
-  );
-  await assert.rejects(
-    () => inspectDelivery({ sourcePath, targetPath, files: ['*magic.txt'], targetBranch: 'main' }),
-    { code: 'INVALID_DELIVERY_FILES' },
-  );
-  await assert.rejects(
-    () => inspectDelivery({ sourcePath, targetPath, files: ['nonexistent.txt'], targetBranch: 'main' }),
-    { code: 'INVALID_DELIVERY_FILES' },
-  );
-  await assert.rejects(
-    () => inspectDelivery({ sourcePath, targetPath, files: [path.resolve(sourcePath, 'valid.txt')], targetBranch: 'main' }),
     { code: 'INVALID_DELIVERY_FILES' },
   );
 });

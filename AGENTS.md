@@ -24,7 +24,7 @@ UGK Cockpit 首先是给项目所有者每天使用的产品，不是只给平�
 - 无法证明修改归属时必须返回 `unattributed`，不得猜测 Agent。
 - 同一 worktree 最多一个 active write lease；takeover 必须由用户确认。
 - Git 和文件系统探测使用 argv、显式 cwd、超时和输出上限，不拼接 shell 命令。
-- 修改后运行 `npm test`；Phase 0 门禁运行 `npm run test:phase0`。
+- 编辑过程运行 `npm run test:quick` 和受影响的定向测试；快组通过不代表完整门禁通过。CI/合并候选运行完整 `npm test`（CI 两个独立 Windows 分片合计覆盖所有测试，每项在完整门禁中执行一次），并完成网页构建。同一候选的完整套件已包含 Phase 0，不重复执行；`npm run test:phase0` 保留为独立诊断入口。测试编排变更须核对完整发现范围、分片无重复/遗漏及错误传播，详见 `docs/TESTING.md`。
 - 启动或重启服务后必须核对已有项目列表及详情，不能仅凭 HTTP 200 报告成功。不得在服务运行时覆盖数据目录；空列表与磁盘记录不一致时，按 `docs/LOCAL_SERVICE_RECOVERY.md` 排查，禁止用重新 init、清库或重新添加项目代替恢复。
 
 ## 版本与提交
