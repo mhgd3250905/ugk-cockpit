@@ -544,14 +544,14 @@ export function readDashboard(db, { archived = false } = {}) {
       ON observations.id = (
         SELECT id FROM project_observations
         WHERE project_id = projects.id
-        ORDER BY observed_at DESC LIMIT 1
+        ORDER BY observed_at DESC, id DESC LIMIT 1
       )
     LEFT JOIN runs ON runs.worktree_id = worktrees.id AND runs.lifecycle = 'active'
     LEFT JOIN runs AS last_runs ON last_runs.id = (
       SELECT id FROM runs AS history
       WHERE history.worktree_id = worktrees.id
         AND history.lifecycle IN ('completed', 'blocked', 'abandoned')
-      ORDER BY history.finished_at DESC LIMIT 1
+      ORDER BY history.finished_at DESC, history.id DESC LIMIT 1
     )
     LEFT JOIN handoff_receipts AS receipts ON receipts.run_id = last_runs.id
     WHERE projects.removed_at IS NULL
@@ -568,11 +568,11 @@ export function readDashboard(db, { archived = false } = {}) {
   const activeAssignmentQuery = db.prepare(`
     SELECT * FROM assignments
     WHERE project_id = ? AND status IN ('pending', 'accepted', 'active')
-    ORDER BY updated_at DESC LIMIT 1
+    ORDER BY updated_at DESC, id DESC LIMIT 1
   `);
   const lastProgressQuery = db.prepare(`
     SELECT status, note, revision, created_at FROM progress_events
-    WHERE assignment_id = ? ORDER BY revision DESC LIMIT 1
+    WHERE assignment_id = ? ORDER BY revision DESC, id DESC LIMIT 1
   `);
   const latestHandoffQuery = db.prepare(`
     SELECT id, summary, next_session_focus, body_markdown, created_at
@@ -661,7 +661,7 @@ export function readDashboard(db, { archived = false } = {}) {
         expiresAt: db.prepare(`
           SELECT expires_at FROM dispatch_grants
           WHERE assignment_id = ? AND state = 'active'
-          ORDER BY created_at DESC LIMIT 1
+          ORDER BY created_at DESC, id DESC LIMIT 1
         `).get(assignment.id)?.expires_at ?? null,
       } : null,
       waitingAgent: isWaiting ? {

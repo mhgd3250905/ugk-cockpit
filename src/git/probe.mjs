@@ -35,6 +35,14 @@ export const SAFE_GIT_PREFIX = [
   '-c', 'protocol.ftps.allow=never',
   '-c', 'core.sshCommand=ssh',
   '-c', 'ssh.variant=ssh',
+  // `core.askPass` is the same family as core.sshCommand and core.hooksPath:
+  // repository-local config that names a PROGRAM git will run. On an auth
+  // challenge git resolves GIT_ASKPASS -> core.askPass -> SSH_ASKPASS and
+  // executes the value through a shell even with GIT_TERMINAL_PROMPT=0
+  // (measured: a repo-local askpass batch file ran during the product's own
+  // ls-remote against a 401 endpoint). Pin it to git's default so no
+  // repository can answer a credential challenge by running itself.
+  '-c', 'core.askPass=',
   // `status.showUntrackedFiles` is only how git renders `status`, but the
   // product reads that output as a completeness decision, and git's own
   // `worktree remove` safety check consults it too (measured: with `no`,
@@ -89,6 +97,11 @@ export function safeGitEnvironment() {
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')),
   );
+  // GIT_* is gone with the filter above; SSH_ASKPASS is the next fallback in
+  // git's askpass resolution chain and must not survive from the inherited
+  // environment either (measured: an inherited SSH_ASKPASS executed during a
+  // product ls-remote against a 401 endpoint before this strip existed).
+  delete environment.SSH_ASKPASS;
   environment.GIT_CONFIG_NOSYSTEM = '1';
   environment.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
   environment.GIT_TERMINAL_PROMPT = '0';
