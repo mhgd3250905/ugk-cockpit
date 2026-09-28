@@ -186,6 +186,29 @@ export async function switchGitWorktreeToNewBranch(worktreePath, {
   }
 }
 
+// The product's dirty gate reads `status --porcelain=v1 -z --untracked-files=normal`,
+// which never lists git-IGNORED paths, and `git worktree remove` (no `--force`)
+// deletes them with the directory anyway. Measured on git 2.50.0.windows.2: with
+// only `ignored/only-copy.md` present the dirty口径 is empty, `worktree remove`
+// exits 0 and the file is gone; making the same file merely untracked makes git
+// refuse (exit 128) and keep it. So ignored content needs its own gate: it is
+// user data that Git cannot bring back.
+//
+// `--untracked-files=normal` keeps the output bounded: an ignored dependency
+// tree collapses into one directory record instead of one per file.
+const IGNORED_STATUS_ARGS = [
+  'status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignored=matching',
+];
+
+export async function countIgnoredWorktreeEntries(targetPath, {
+  timeoutMs = 5_000,
+  maxBuffer = 4 * 1024 * 1024,
+} = {}) {
+  const result = await git(targetPath, IGNORED_STATUS_ARGS, { timeoutMs, maxBuffer });
+  // Only `!!` records name ignored content; the count is what the caller needs.
+  return { count: result.stdout.split('\0').filter((entry) => entry.startsWith('!!')).length };
+}
+
 export async function removeGitWorktree(repoPath, {
   targetPath,
   timeoutMs = 15_000,

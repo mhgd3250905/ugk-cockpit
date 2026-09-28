@@ -56,6 +56,7 @@ import {
   markWorkspaceActionUnknown,
   readWorkspaceActionRecordsWithStatus,
   removeWorkspaceActionRecord,
+  workspaceActionRequestBody,
   upsertWorkspaceActionRecord,
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
@@ -1423,7 +1424,9 @@ function App() {
     try {
       await api(workspaceActionPath(record), {
         method: 'POST',
-        body: JSON.stringify(record.request),
+        // Derived from the durable record, so the first attempt and the
+        // “恢复并核对” replay always send exactly the same request body.
+        body: JSON.stringify(workspaceActionRequestBody(record)),
       });
     } catch (error) {
       const outcome = classifyWorkspaceActionError(error);
@@ -4047,7 +4050,7 @@ function SpaceActionModal({ action, busy, onClose, onConfirm }) {
           <DialogDescription>
             {isReuse
               ? '会为这个空间开始一条新的工作线，基于主项目当前可见的本地版本。'
-              : '会移除这个空间的本地工作副本，释放它占用的电脑空间。'}
+              : '会移除这个空间的本地工作副本，释放它占用的电脑空间；文件夹里被 Git 忽略的内容（依赖、构建产物、本地数据）也会一起删除，而且无法从 Git 恢复。'}
           </DialogDescription>
         </DialogHeader>
 
