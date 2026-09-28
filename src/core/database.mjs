@@ -1220,15 +1220,32 @@ export function pruneSpentFolderGrants(db, nowMillis = Date.now()) {
   const exists = (name) => db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
   ).get(name);
+  const tables = ['folder_grants', 'empty_folder_grants'].filter((name) => exists(name));
+  // Read first, delete only when something is prunable: a converged database
+  // must open without taking any write transaction (alpha.57's identity ledger
+  // pins exactly that), and an uncontended open should not pay for a sweep that
+  // has nothing to remove.
+  const prunable = (table) => db.prepare(`
+    SELECT EXISTS (
+      SELECT 1 FROM ${table}
+      WHERE (state = 'consumed' AND created_at <= ?)
+         OR (state = 'active' AND expires_at <= ?)
+    ) AS hit`).get(cutoffIso, expiredCutoff)?.hit === 1;
+  if (!tables.some(prunable)) return 0;
   const sql = (table) => `
     DELETE FROM ${table}
     WHERE (state = 'consumed' AND created_at <= ?)
        OR (state = 'active' AND expires_at <= ?)`;
-  if (exists('folder_grants')) {
-    removed += db.prepare(sql('folder_grants')).run(cutoffIso, expiredCutoff).changes;
-  }
-  if (exists('empty_folder_grants')) {
-    removed += db.prepare(sql('empty_folder_grants')).run(cutoffIso, expiredCutoff).changes;
+  try {
+    for (const table of tables) {
+      removed += db.prepare(sql(table)).run(cutoffIso, expiredCutoff).changes;
+    }
+  } catch {
+    // Best effort by design: a write lock held elsewhere (alpha.57's converged
+    // fixture pins an open under a foreign BEGIN IMMEDIATE) defers the sweep to
+    // the next open. Hygiene losing a lock race must never become the reason a
+    // data directory cannot be opened.
+    return 0;
   }
   return removed;
 }
