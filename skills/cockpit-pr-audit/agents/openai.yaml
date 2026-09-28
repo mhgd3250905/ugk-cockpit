@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cockpit PR 审核"
+  short_description: "列出当前分支收到的 GitHub PR，选择后核对代码与验证证据"
+  default_prompt: "使用 $cockpit-pr-audit 列出当前分支收到的 PR，供我选择审核。"

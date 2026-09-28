@@ -6,6 +6,15 @@
 
 ## 实施状态
 
+### alpha.60：独立 GitHub PR 查询与审核技能（2026-09-28）
+
+- `0.1.0-alpha.60`：基线 `f8549a8`（alpha.59），开发于独立工作副本 `codex/cockpit-pr-audit`。新增 `$cockpit-pr-audit` 配套效率技能，直接使用 Git、GitHub CLI 与 Node 内置模块；不依赖工作台服务、MCP、平台会话或 init，不增加数据库迁移、API 或网页功能。
+- 裸触发列出当前仓库中目标分支为当前分支的开放 PR（包含草稿），明确展示 CI、冲突及 GitHub 审核状态；选定后才开展具体版本的审核。多远端歧义、未选择目标分支、认证/网络失败与真正的空列表分别处理，列表截断如实标记。
+- 审核固定 PR 身份及源/目标版本，按项目规范执行必要验证，验证需要独立副本时保留当前工作区；审核结束重新核对版本。GitHub 评论、正式 review 与合并遵循用户实际授权，查询脚本本身不执行这些操作。
+- 新技能及其自含脚本纳入共享安装与 Codex/ZCode 插件分发，现有 `cockpit-submit` 工作说明和旧内部 integration 契约保持原义。正式服务与发布状态仍以部署记录为准。
+- 真实 GitHub 只读验收：在本仓库 main 目录查询得到 6 个开放 PR，来源工作副本无须在本机存在；选定 PR 的 `inspect` 同时保留 PR 报告的历史 `baseRefOid` 并直接查询当前目标 ref 得到 `targetHeadOid`。现场发现 PR #22 的历史基准 `fbf1cf9` 与当时 main `f8549a8` 不同后，补上目标 ref 查询与行为回归，技能按 `headRefOid + targetHeadOid` 复核版本，避免把历史基准当作最新目标。
+- Windows 验证：`npm test` 全量 796 项，787 通过、7 项平台跳过、2 项失败（exit 1）；两项均为本轮同步遗漏：阶段记录缺少完整版本标记、ZCode 安装夹具仍报 7 个技能。修正这两处文档/测试夹具后，以 `npm test -- test/pr-audit.test.mjs test/cockpit-skills.test.mjs test/codex-plugin.test.mjs test/zcode-plugin.test.mjs test/setup-zcode.test.mjs` 复验 39 项（38 通过、1 项 macOS 跳过、0 失败，exit 0），并运行 `npm run test:phase0` 97/97（exit 0，包含版本一致性复验）。功能实现与分发代码在全量测试开始后未变化；未把原全量 exit 1 记为最终全量全绿，也未重复运行无影响的完整套件。技能校验、复制安装后独立执行、独立审核与 `git diff --check` 通过。macOS 真机仍未验证。
+
 ### alpha.59：审计修复——删除开发空间不再静默删掉被 Git 忽略的文件、桥不再丢弃 declaredWorkspace、门禁自检补空匹配与掏空用例（2026-09-28，第 31 轮）
 
 - `0.1.0-alpha.59`：审计修复轮（基线 pristine main `db0355b` = alpha.57；版本按未被任何 OPEN PR 占用的下一号登记——`pr/21` 用 alpha.55、`pr/22` 用 alpha.54、`pr/13` 用 alpha.43。2026-09-28 合并适配：并行会话的 PR #26 先行合入 main 占用 alpha.58／第 30 轮，本节据此改记 alpha.59／第 31 轮）。每项先在 pristine 上以回归用例或真实 git 复现为红，修复后转绿，并做「只回退我自己新加的那几行、用例必须变红」的有效性自检；本轮共 6 项已验证缺陷修复、1 项已复现但按第一性原则判定不应在本轮修、2 项已证伪留档。

@@ -15,6 +15,11 @@ test('generated plugin initializes outside repository and contains all skills wi
     assert.equal(config.cwd, undefined, 'host project cwd must not be replaced by the plugin location');
     for (const name of COCKPIT_SKILL_NAMES) assert.ok(existsSync(path.join(result.pluginRoot, 'skills', name, 'SKILL.md')));
     for (const name of ['.data', '.git', 'node_modules', 'api-token', 'src/main.mjs']) assert.equal(existsSync(path.join(result.pluginRoot, name)), false);
+    const auditScript = path.join(result.pluginRoot, 'skills/cockpit-pr-audit/scripts/pr-audit.mjs');
+    assert.equal(readFileSync(auditScript, 'utf8'), readFileSync(path.resolve('skills/cockpit-pr-audit/scripts/pr-audit.mjs'), 'utf8'));
+    assert.ok(execFileSync(process.execPath, [auditScript, '--help'], {
+      cwd: temporary, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true,
+    }).trim());
     const request = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
       protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'plugin-test', version: '1' },
     } };

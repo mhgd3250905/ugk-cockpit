@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,7 +12,7 @@ import {
 
 const repositoryRoot = path.resolve('.');
 
-test('Cockpit skill packages expose the guide and six approved user actions', () => {
+test('Cockpit skill packages expose the guide, platform actions, and independent PR audit', () => {
   assert.deepEqual(COCKPIT_SKILL_NAMES, [
     'cockpit',
     'cockpit-init',
@@ -20,6 +21,7 @@ test('Cockpit skill packages expose the guide and six approved user actions', ()
     'cockpit-submit',
     'cockpit-closeout',
     'cockpit-handoff',
+    'cockpit-pr-audit',
   ]);
   for (const name of COCKPIT_SKILL_NAMES) {
     assert.equal(existsSync(path.join(repositoryRoot, 'skills', name, 'SKILL.md')), true);
@@ -46,7 +48,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
   }
 });
 
-test('only progress may be selected implicitly', () => {
+test('platform lifecycle actions preserve explicit invocation', () => {
   for (const name of ['cockpit-init', 'cockpit-submit', 'cockpit-relay', 'cockpit-closeout', 'cockpit-handoff']) {
     const metadata = readFileSync(
       path.join(repositoryRoot, 'skills', name, 'agents', 'openai.yaml'),
@@ -303,6 +305,12 @@ test('skill installer copies packages and refuses an unapproved overwrite', () =
     for (const name of COCKPIT_SKILL_NAMES) {
       assert.equal(existsSync(path.join(targetRoot, name, 'SKILL.md')), true);
     }
+    const relativeScript = path.join('cockpit-pr-audit', 'scripts', 'pr-audit.mjs');
+    const copiedScript = path.join(targetRoot, relativeScript);
+    assert.equal(readFileSync(copiedScript, 'utf8'), readFileSync(path.join(repositoryRoot, 'skills', relativeScript), 'utf8'));
+    assert.ok(execFileSync(process.execPath, [copiedScript, '--help'], {
+      cwd: targetRoot, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true,
+    }).trim());
     assert.throws(
       () => installCockpitSkills({ targetRoot }),
       /Refusing to overwrite existing skills/,

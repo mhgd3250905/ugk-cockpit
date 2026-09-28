@@ -10,7 +10,7 @@ function fixture() {
   const calls = [];
   const plugin = {
     id: 'ugk-cockpit@ugk-cockpit-local', version: 'v1', enabled: true,
-    skillCount: 7, mcpServerNames: ['plugin:ugk-cockpit:ugk-cockpit'],
+    skillCount: 8, mcpServerNames: ['plugin:ugk-cockpit:ugk-cockpit'],
   };
   return {
     calls, plugin,
@@ -71,7 +71,7 @@ test('legacy configuration is preserved and migration reported', async () => {
 test('wrong version or missing skills fails and closes native process', async () => {
   for (const field of ['version', 'skillCount']) {
     const { calls, deps, plugin } = fixture();
-    plugin[field] = field === 'version' ? 'old' : 6;
+    plugin[field] = field === 'version' ? 'old' : 7;
     await assert.rejects(setupZcode({}, deps), /confirm|expose/);
     assert.equal(calls.at(-1), 'close');
   }
