@@ -27,7 +27,7 @@ schema 29 为项目增加可空 `removed_at`；迁移 28 的操作执行者身�
 
 ## 未登记工作链的旧运行记录恢复（alpha.42 源码，尚未部署）
 
-（2026-09-28 第 30 轮括注：标题的「尚未部署」已过期。`POST /api/v1/runs/release-lease` 路由与释放协议在 main 上存在（`src/service/http-server.mjs`），本机正式服务此后已按 `docs/LOCAL_SERVICE_RECOVERY.md` 的部署验收升级到更高版本；下面的历史叙述保留不改写。）
+（2026-09-28 第 31 轮括注：标题的「尚未部署」已过期。`POST /api/v1/runs/release-lease` 路由与释放协议在 main 上存在（`src/service/http-server.mjs`），本机正式服务此后已按 `docs/LOCAL_SERVICE_RECOVERY.md` 的部署验收升级到更高版本；下面的历史叙述保留不改写。）
 
 alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`，旧运行记录的开始、结束和释放接口因此不可达。alpha.42 将请求授权范围取为注入根与已持久授予的项目、工作副本路径的并集，仍拒绝未授权目录。只有服务加载该修复后，下面的恢复入口才可用；本轮没有重启正式服务。
 
@@ -43,7 +43,7 @@ alpha.41 已实现释放协议，但正式入口没有注入 `authorizedRoots`�
 
 schema 28 为 `workspace_lifecycle_reservations` 增加可空的 `owner_started_at`，新操作记录执行进程的启动代际。在正式服务单实例约束下，恢复逻辑区分当前执行者与旧进程记录；迁移前的 NULL 记录继续采用保守判据。该字段不替代服务实例锁，不改变聊天身份或平台转交协议，也不代表已解决所有平台的 PID 复用问题。独立夹具验证了 schema 27 历史预留行保留、重复打开及真实进程终止后的恢复；正式数据库尚未执行本轮迁移。（此句为其实现时点记录：本机服务已于 2026-09-12 加载 schema 29，见上文与[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)；本段所述 28/29 迁移是否已在正式库执行以该文档的最新条目为准。）
 
-原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。（2026-09-28 第 30 轮括注：本句与本文他处「出路只有用户在工作台确认后一次性结算」矛盾，且已被代码推翻——`abandonWorkspaceLifecycle`（`src/core/workspace-lifecycle.mjs`）与 `GET/POST /api/v1/projects/:id/workspace-lifecycle` 提供用户确认结算的入口；此处保留原文不改写。）此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
+原请求恢复仍可能被 `BASE_HEAD_STALE` 或 `SPACE_REVISION_CONFLICT` 阻断；当前没有用户确认放弃未知操作的完整入口。（2026-09-28 第 31 轮括注：本句与本文他处「出路只有用户在工作台确认后一次性结算」矛盾，且已被代码推翻——`abandonWorkspaceLifecycle`（`src/core/workspace-lifecycle.mjs`）与 `GET/POST /api/v1/projects/:id/workspace-lifecycle` 提供用户确认结算的入口；此处保留原文不改写。）此时应保留原请求和诊断，停止同仓库的后续写入并排查，不能删除预留行、清空命令日志或靠超时解除保护。
 
 浏览器在发送删除或复用请求前保存原始请求号、参数和目标空间。页面刷新后仍展示“恢复并核对”入口；服务重建后重新建立浏览器凭据，继续提交原参数。连接中断及后端明确标记的未知结果保留恢复材料，只有确认成功或确认失败才能清除。浏览器不能可靠保存材料时，不发送新的空间操作。
 

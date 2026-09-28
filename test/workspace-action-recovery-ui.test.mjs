@@ -158,7 +158,7 @@ test('main wires workspace recovery storage and original request retry entry', (
   assert.match(main, /readWorkspaceActionRecordsWithStatus/);
   assert.match(main, /恢复并核对/);
   // The body comes from the durable record through one builder, so the first
-  // attempt and the replay cannot drift apart (alpha.58: the removal
+  // attempt and the replay cannot drift apart (alpha.59: the removal
   // confirmation is added there rather than stored in the record).
   assert.match(main, /workspaceActionRequestBody\(record\)/);
   assert.match(main, /pendingWorkspaceActions/);
