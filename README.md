@@ -178,16 +178,18 @@ npm run install:skills:codex
 
 ## 本地验证
 
+日常编辑使用 `npm run test:quick` 获取快速反馈，再执行本次改动的定向测试。快组不是完整门禁；`npm test` 仍运行全量，也支持 `npm test -- test/某文件.test.mjs`。CI 先做快组与网页构建，再由两个独立 Windows 分片各自串行运行：两片合计覆盖完整套件（含 Phase 0），每项在完整门禁中执行一次，两片均成功才算通过。`npm run test:phase0` 保留作诊断，不在全量后重复执行。详见[测试入口](docs/TESTING.md)。
+
 要求 Node.js 24，最低 24.15.0（`>=24.15.0 <25`）：
 
 ```sh
-npm test
-npm run test:phase0
+npm run test:quick
+npm test -- test/setup-codex.test.mjs
 ```
 
 MCP 后端未新增生产依赖。
 
-main 分支与外部 PR 由 GitHub Actions 自动运行同一组门禁（windows-latest / Node 24：全量 `npm test`、`test:phase0`、网页构建，见 `.github/workflows/ci.yml`）；macOS 与 Linux 尚未纳入 CI，平台结论仍以真机记录为准。
+main 分支与外部 PR 由 GitHub Actions 自动运行同一组门禁（windows-latest / Node 24：快组、网页构建、两个独立分片合计的全量测试（含 Phase 0），见 `.github/workflows/ci.yml`）；macOS 与 Linux 尚未纳入 CI，平台结论仍以真机记录为准。
 
 ## 面向用户的首版目标
 

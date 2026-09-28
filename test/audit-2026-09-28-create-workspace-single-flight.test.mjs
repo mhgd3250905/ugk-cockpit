@@ -1,3 +1,4 @@
+import { withDeadline } from '../scripts/test-support/deadline.mjs';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdirSync, realpathSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -95,20 +96,17 @@ test('同一 commandId 的新建空间并发重放：先完成的一方不得解
 
   const driverA = createDevelopmentWorkspace(f.db, f.request, { probe: parkingProbe });
   // A is now parked inside its first awaited probe, i.e. after the lock.
-  await Promise.race([
-    parked,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('driver A never reached the probe')), 20_000)),
-  ]);
+  await withDeadline(parked, 20_000, () => { throw new Error('driver A never reached the probe'); });
   const heldByA = lockRow(f.db, f.repositoryIdentity);
   assert.equal(heldByA?.holder, f.request.commandId, JSON.stringify(heldByA));
 
   const driverB = createDevelopmentWorkspace(f.db, f.request, { probe: probeGitWorktree });
   // Give the second driver time to run to completion (it does, when the entry
   // point is not gated: it renews the same holder and releases it in finally).
-  const bSettled = await Promise.race([
+  const bSettled = await withDeadline(
     driverB.then((value) => ({ settled: true, value })),
-    new Promise((resolve) => setTimeout(() => resolve({ settled: false }), 3_000)),
-  ]);
+    3_000, () => ({ settled: false }),
+  );
 
   const stillHeld = lockRow(f.db, f.repositoryIdentity);
   assert.ok(stillHeld,

@@ -1,3 +1,4 @@
+import { withDeadline } from '../scripts/test-support/deadline.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -77,10 +78,13 @@ function childExit(child) {
     const finish = (code, signal) => {
       if (settled) return;
       settled = true;
+      child.off('exit', finish);
+      child.off('error', onError);
       resolve({ code, signal });
     };
+    const onError = () => finish(null, null);
     child.once('exit', finish);
-    child.once('error', () => finish(null, null));
+    child.once('error', onError);
   });
 }
 
@@ -91,6 +95,8 @@ function drainStream(stream) {
     const finish = () => {
       if (settled) return;
       settled = true;
+      stream.off('end', finish);
+      stream.off('close', finish);
       resolve();
     };
     stream.once('end', finish);
@@ -114,6 +120,8 @@ async function terminateProcessTree(target, timeoutMs = CLEANUP_TIMEOUT_MS) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        killer.off('error', finish);
+        killer.off('close', finish);
         resolve();
       };
       timer = setTimeout(() => {
@@ -138,7 +146,7 @@ async function terminateProcessTree(target, timeoutMs = CLEANUP_TIMEOUT_MS) {
     return;
   }
   if (child && child.exitCode === null && child.signalCode === null) {
-    await Promise.race([childClose(child), delay(timeoutMs)]);
+    await withDeadline(childClose(child), timeoutMs, () => null);
   }
   if (!(await waitForPidExit(pid, timeoutMs))) {
     // taskkill can report completion just before the kernel removes the PID.
@@ -185,25 +193,23 @@ async function runCaptured(file, args, options = {}, timeoutMs = CHILD_TIMEOUT_M
     gone ? { code: null, signal: null, processGone: true } : null
   ));
   let timedOut = false;
-  let result = await Promise.race([
-    exitPromise,
-    processGonePromise,
-    delay(timeoutMs).then(() => null),
-  ]);
+  let result;
+  try {
+    result = await withDeadline(Promise.race([exitPromise, processGonePromise]), timeoutMs, () => null);
+  } finally {
+    processGoneController.abort();
+    await processGonePromise;
+  }
   if (result?.processGone) {
     await delay(250);
-    result = await Promise.race([exitPromise, delay(1_000).then(() => null)]) ?? result;
+    result = await withDeadline(exitPromise, 1_000, () => null) ?? result;
   }
   if (result === null) {
     timedOut = true;
     await terminateProcessTree(child, CLEANUP_TIMEOUT_MS);
-    result = await Promise.race([exitPromise, delay(CLEANUP_TIMEOUT_MS).then(() => null)]);
+    result = await withDeadline(exitPromise, CLEANUP_TIMEOUT_MS, () => null);
   }
-  processGoneController.abort();
-  await Promise.race([
-    Promise.all([drainStream(child.stdout), drainStream(child.stderr)]),
-    delay(2_000),
-  ]);
+  await withDeadline(Promise.all([drainStream(child.stdout), drainStream(child.stderr)]), 2_000, () => null);
   child.stdout?.destroy();
   child.stderr?.destroy();
   if (result === null || result?.code === null) {
