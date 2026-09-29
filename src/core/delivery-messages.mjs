@@ -46,9 +46,16 @@ const messages = {
 export function deliveryResponse(result) {
   if (result.ok) return result;
   const known = messages[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
-  const required_action = (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file)
-    ? `请从送审范围移除超限文件（${result.details.file}），或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。`
-    : known[1];
+  let required_action = known[1];
+  if (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file) {
+    required_action = `请从送审范围移除超限文件（${result.details.file}），或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。`;
+  } else if (result.code === 'DELIVERY_INDEX_LOCKED' && result.details?.ownerState === 'unattributed') {
+    // Waiting is the wrong instruction for a lock that no running operation
+    // owns: it never clears by itself.
+    required_action = '这个锁文件没有可读取的归属记录，等待不会让它消失。平台不会替你删除它：请先在 Cockpit 之外确认这个工作副本此刻确实没有 Git 操作在运行，再自行处理该暂存区锁文件，然后用原请求恢复送审。';
+  } else if (result.code === 'DELIVERY_INDEX_LOCKED' && result.details?.ownerState === 'own-lock-stuck') {
+    required_action = '这是平台自己上一次保存留下的锁文件，当前系统拒绝删除它（常被安全软件或索引服务短暂占用）。代码没有受影响；请稍后用原请求恢复送审，平台会自动回收自己留下的锁，不需要你手动删除。';
+  }
   return { ...result, message: known[0], impact: result.pushed
     ? '代码已上传，但审核登记尚未完成；主项目代码没有被合并。'
     : result.localSaved ? '本地成果已保存，尚未确认上传并送达审核；主项目代码没有被修改。'

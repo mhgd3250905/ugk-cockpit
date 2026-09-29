@@ -1,3 +1,4 @@
+import { withDeadline } from '../../scripts/test-support/deadline.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
@@ -196,13 +197,11 @@ test('API client abandons a request the service never answers instead of hanging
   });
 
   // 自行设界：一旦回归，本用例必须失败而不是把整个测试进程挂住。
-  const guard = setTimeout(() => {}, 2000);
-  const outcome = await Promise.race([
+  const outcome = await withDeadline(
     api('/api/v1/dashboard', { method: 'GET', timeoutMs: 20 })
       .then(() => ({ settled: true }), (error) => ({ error })),
-    new Promise((resolve) => { setTimeout(() => resolve({ hung: true }), 1500); }),
-  ]);
-  clearTimeout(guard);
+    1500, () => ({ hung: true }),
+  );
   assert.equal(outcome.hung, undefined, 'a request the service never answers must not hang the UI');
   assert.equal(seenSignal?.aborted, true, 'the deadline must actually abort the fetch');
   assert.equal(outcome.error?.code, 'SERVICE_UNAVAILABLE');

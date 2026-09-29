@@ -1197,6 +1197,59 @@ function migrateDatabase(db) {
 // 而不是把整个服务停住等锁。不要为了减少报错而调大这个值。
 export const BUSY_TIMEOUT_MS = 150;
 
+// A folder grant records an absolute path, its canonical path and the principal
+// that accepted it. The picker mints a fresh row for every accepted folder and
+// nothing ever reads a spent one back, so the table only ever grew — on a
+// machine where the operator picks a folder many times a day, that is a
+// permanent, unbounded register of decisions whose privacy value outlives their
+// operational use. Spent and lapsed rows are therefore deleted once they are far
+// beyond any replay window. `claimed` rows are kept: a crashed attempt must stay
+// retryable with its original command id (see src/core/folder-grants.mjs).
+export const FOLDER_GRANT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+export function pruneSpentFolderGrants(db, nowMillis = Date.now()) {
+  const expiredCutoff = nowMillis - FOLDER_GRANT_RETENTION_MS;
+  const cutoffIso = new Date(expiredCutoff).toISOString();
+  let removed = 0;
+  // Guarded per table, and the statement is only prepared once the table is
+  // there (preparing a `DELETE` against a missing table is itself an error): the
+  // grant tables arrive in migration 6, so a hand-built or partially migrated
+  // database may not have them, and a hygiene sweep must never be the reason a
+  // service cannot open its data directory. This round's own first full-suite run
+  // proved it by breaking the phase-0 migration fixtures.
+  const exists = (name) => db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(name);
+  const tables = ['folder_grants', 'empty_folder_grants'].filter((name) => exists(name));
+  // Read first, delete only when something is prunable: a converged database
+  // must open without taking any write transaction (alpha.57's identity ledger
+  // pins exactly that), and an uncontended open should not pay for a sweep that
+  // has nothing to remove.
+  const prunable = (table) => db.prepare(`
+    SELECT EXISTS (
+      SELECT 1 FROM ${table}
+      WHERE (state = 'consumed' AND created_at <= ?)
+         OR (state = 'active' AND expires_at <= ?)
+    ) AS hit`).get(cutoffIso, expiredCutoff)?.hit === 1;
+  if (!tables.some(prunable)) return 0;
+  const sql = (table) => `
+    DELETE FROM ${table}
+    WHERE (state = 'consumed' AND created_at <= ?)
+       OR (state = 'active' AND expires_at <= ?)`;
+  try {
+    for (const table of tables) {
+      removed += db.prepare(sql(table)).run(cutoffIso, expiredCutoff).changes;
+    }
+  } catch {
+    // Best effort by design: a write lock held elsewhere (alpha.57's converged
+    // fixture pins an open under a foreign BEGIN IMMEDIATE) defers the sweep to
+    // the next open. Hygiene losing a lock race must never become the reason a
+    // data directory cannot be opened.
+    return 0;
+  }
+  return removed;
+}
+
 export function openCockpitDatabase(filePath, { migrate = true } = {}) {
   mkdirSync(dirname(filePath), { recursive: true });
   const db = new DatabaseSync(filePath, {
@@ -1215,6 +1268,7 @@ export function openCockpitDatabase(filePath, { migrate = true } = {}) {
     db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     if (migrate) {
       migrateDatabase(db);
+      pruneSpentFolderGrants(db);
       // 指纹改写按行收敛：只在台账显示仍欠工作时补完上次判不了的行（仍在
       // pre-listen 阶段，此时没有事件循环会被同步 git 探测拖住）。全部 settled
       // 时完全不进事务——可选的收敛不得为了「没有的事」去抢写锁：busy_timeout

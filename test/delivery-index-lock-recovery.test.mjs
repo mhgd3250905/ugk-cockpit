@@ -1,3 +1,4 @@
+import { waitForChildMessage } from '../scripts/test-support/deadline.mjs';
 // Crash fitness tests for the delivery index lock. AGENTS.md requires that a
 // file-write crash scenario be tested by terminating a real process, not by an
 // exception that still runs `finally`: a lock left in the Git index.lock
@@ -84,21 +85,10 @@ test('a process killed inside the publish window leaves no partial lock', async 
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     await exited.catch(() => {});
   });
-  const messages = [];
-  child.on('message', (message) => messages.push(message));
-  // The seam announcing itself is the coverage proof: a module that publishes by
-  // create-then-fill never reaches this point, so the wait below would fail.
-  const inside = await Promise.race([
-    new Promise((resolve) => {
-      const check = () => {
-        if (messages.some((message) => message.insidePublishWindow)) resolve(true);
-        else setTimeout(check, 5);
-      };
-      check();
-    }),
-    Promise.all([new Promise((r) => setTimeout(r, 4000)), once(child, 'exit')]).then(() => false),
-  ]);
-  assert.ok(inside, `the publish seam never ran (survived=${messages.some((m) => m.survived)}) ${stderr.slice(0, 200)}`);
+  // Event notification proves the child reached the fault seam. The deadline
+  // also fails when a hung child never exits; all listeners are removed.
+  await waitForChildMessage(child, (message) => message.insidePublishWindow, 4000)
+    .catch((error) => { throw new Error(`${error.message}: ${stderr.slice(0, 200)}`); });
   child.kill('SIGKILL');
   await exited;
   assert.equal(child.signalCode, 'SIGKILL');
@@ -127,10 +117,11 @@ test('a killed holder leaves a lock the next acquirer reclaims by owner pid', as
   });
   const exited = once(child, 'exit');
   child.stderr.on('data', () => {});
-  const [message] = await Promise.race([
-    once(child, 'message'),
-    exited.then(() => { throw new Error('child exited before acquiring'); }),
-  ]);
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited.catch(() => {});
+  });
+  const message = await waitForChildMessage(child, (value) => Boolean(value.held), 4000);
   assert.equal(message.held, lockPath);
   const bytes = readFileSync(lockPath, 'utf8');
   assert.equal(JSON.parse(bytes).pid, child.pid);

@@ -12,16 +12,17 @@ import {
 
 const repositoryRoot = path.resolve('.');
 
-test('Cockpit skill packages expose the guide, platform actions, and independent PR audit', () => {
+test('Cockpit skill packages expose the guide, two independent tools, and six project actions', () => {
   assert.deepEqual(COCKPIT_SKILL_NAMES, [
     'cockpit',
+    'cockpit-update',
+    'cockpit-pr-audit',
     'cockpit-init',
     'cockpit-progress',
     'cockpit-relay',
     'cockpit-submit',
     'cockpit-closeout',
     'cockpit-handoff',
-    'cockpit-pr-audit',
   ]);
   for (const name of COCKPIT_SKILL_NAMES) {
     assert.equal(existsSync(path.join(repositoryRoot, 'skills', name, 'SKILL.md')), true);
@@ -48,7 +49,7 @@ test('Cockpit skills map to the intended MCP tools without adding cockpit-start'
   }
 });
 
-test('platform lifecycle actions preserve explicit invocation', () => {
+test('only progress may be selected implicitly', () => {
   for (const name of ['cockpit-init', 'cockpit-submit', 'cockpit-relay', 'cockpit-closeout', 'cockpit-handoff']) {
     const metadata = readFileSync(
       path.join(repositoryRoot, 'skills', name, 'agents', 'openai.yaml'),
@@ -305,10 +306,18 @@ test('skill installer copies packages and refuses an unapproved overwrite', () =
     for (const name of COCKPIT_SKILL_NAMES) {
       assert.equal(existsSync(path.join(targetRoot, name, 'SKILL.md')), true);
     }
-    const relativeScript = path.join('cockpit-pr-audit', 'scripts', 'pr-audit.mjs');
-    const copiedScript = path.join(targetRoot, relativeScript);
-    assert.equal(readFileSync(copiedScript, 'utf8'), readFileSync(path.join(repositoryRoot, 'skills', relativeScript), 'utf8'));
-    assert.ok(execFileSync(process.execPath, [copiedScript, '--help'], {
+    const updateScript = path.join('cockpit-update', 'scripts', 'check-updates.mjs');
+    assert.equal(
+      readFileSync(path.join(targetRoot, updateScript), 'utf8'),
+      readFileSync(path.join(repositoryRoot, 'skills', updateScript), 'utf8'),
+    );
+    const auditScript = path.join('cockpit-pr-audit', 'scripts', 'pr-audit.mjs');
+    const copiedAuditScript = path.join(targetRoot, auditScript);
+    assert.equal(
+      readFileSync(copiedAuditScript, 'utf8'),
+      readFileSync(path.join(repositoryRoot, 'skills', auditScript), 'utf8'),
+    );
+    assert.ok(execFileSync(process.execPath, [copiedAuditScript, '--help'], {
       cwd: targetRoot, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true,
     }).trim());
     assert.throws(

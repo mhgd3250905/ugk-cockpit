@@ -1,6 +1,6 @@
 {
   "name": "ugk-cockpit",
-  "version": "0.1.0-alpha.60",
+  "version": "0.1.0-alpha.61",
   "private": true,
   "type": "module",
   "engines": {
@@ -18,6 +18,8 @@
     "dev:web": "vite",
     "build:web": "vite build",
     "test": "node --test --test-concurrency=1",
+    "test:quick": "node scripts/run-quick-tests.mjs",
+    "pretest:quick": "node scripts/check-test-suite.mjs .",
     "test:phase0": "node --test --test-concurrency=1 test/phase0/*.test.mjs",
     "pretest": "node scripts/check-test-suite.mjs .",
     "pretest:phase0": "node scripts/check-test-suite.mjs test/phase0"

@@ -5,13 +5,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const COCKPIT_SKILL_NAMES = [
   'cockpit',
+  'cockpit-update',
+  'cockpit-pr-audit',
   'cockpit-init',
   'cockpit-progress',
   'cockpit-relay',
   'cockpit-submit',
   'cockpit-closeout',
   'cockpit-handoff',
-  'cockpit-pr-audit',
 ];
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

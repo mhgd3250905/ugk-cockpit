@@ -8,8 +8,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "UGK Cockpit",
-    "shortDescription": "通过对话使用项目工作台、记录进展与接力。",
-    "longDescription": "包含使用引导、平台工作技能、独立 PR 审核快捷技能和本机 MCP 桥接程序；连接本机 Cockpit 工作台。",
+    "shortDescription": "通过对话使用工作台、检查更新、审核 PR 与记录进展。",
+    "longDescription": "包含使用引导、六个项目工作技能、独立 PR 审核和版本更新检查技能，以及本机 MCP 桥接程序；连接本机 Cockpit 工作台。",
     "developerName": "UGK Cockpit",
     "category": "Productivity",
     "capabilities": [],

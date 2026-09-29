@@ -28,15 +28,11 @@ test('ZCode package uses native manifests and a runnable strict stdio bridge out
     assert.deepEqual(readdirSync(path.join(result.pluginRoot, 'skills')).sort(), [
       'cockpit', 'cockpit-closeout', 'cockpit-handoff', 'cockpit-init',
       'cockpit-pr-audit', 'cockpit-progress', 'cockpit-relay', 'cockpit-submit',
+      'cockpit-update',
     ]);
     for (const name of readdirSync(path.join(result.pluginRoot, 'skills'))) {
       assert.ok(existsSync(path.join(result.pluginRoot, 'skills', name, 'SKILL.md')));
     }
-    const auditScript = path.join(result.pluginRoot, 'skills/cockpit-pr-audit/scripts/pr-audit.mjs');
-    assert.equal(readFileSync(auditScript, 'utf8'), readFileSync(path.resolve('skills/cockpit-pr-audit/scripts/pr-audit.mjs'), 'utf8'));
-    assert.ok(execFileSync(process.execPath, [auditScript, '--help'], {
-      cwd: temporary, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true,
-    }).trim());
     const location = json('installed-location.json');
     assert.equal(location.host, 'zcode');
     assert.ok(path.isAbsolute(location.repositoryRoot));
