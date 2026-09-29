@@ -16,9 +16,9 @@
 
 ## 手动检查与更新
 
-安装包含 `cockpit-update` 的插件后，用户可在项目聊天中调用 `$cockpit-update`。它把插件内的 `VERSION` 与 GitHub 已发布的 release 比较并展示说明，不检查未发布的 `main` 提交，也不拉取代码、安装插件或重启服务。首次发布这个技能时，旧版用户仍需从 GitHub 发布说明等渠道得知它已加入。
+安装包含 `cockpit-update` 的插件后，用户可在项目聊天中调用 `$cockpit-update`。它把插件内的 `VERSION` 与 GitHub 已发布的 release 比较并展示说明，不检查未发布的 `main` 提交，也不拉取代码、安装插件或重启服务。首次发布这个技能时，旧版用户无法调用它，仍需从 [GitHub Releases](https://github.com/mhgd3250905/ugk-cockpit/releases) 手动获知；之后的完整人工升级步骤见[版本与更新管理](VERSIONING.md)的“用户手动更新”。
 
-用户决定更新后，再按目标 release 的版本执行更新。先确认 Cockpit 程序目录、来源仓库和工作树状态；存在本地修改或安装来源不明时先保留并查明，不用 `reset`、`clean` 或覆盖操作。服务与数据库升级按[本机服务恢复](LOCAL_SERVICE_RECOVERY.md)中适用于目标版本的规程备份、停止、升级和启动；然后从该程序目录运行对应的 `setup:codex` 或 `setup:zcode` 来安装新版插件。安装结果需核对服务版本、已有项目及详情，并在宿主重连或新聊天后验证工具与技能已加载。安装器不会自动替换运行中的旧服务。
+升级的是 Cockpit 程序和宿主插件，不是用户正在管理的业务项目。Codex/ZCode 安装器不会自动切换程序版本；发现服务与程序目录版本不匹配时会停止，不会替换运行中的服务。先按版本更新文档完成精确服务切换和数据核验，再执行本节的 `setup:codex` 或 `setup:zcode`。不得用重新 init、清库、重加项目或强制覆盖解决升级问题。
 
 版本号、版本说明、检查范围和发布门禁见[版本与更新管理](VERSIONING.md)。
 
