@@ -6,6 +6,11 @@
 
 ## 实施状态
 
+### alpha.62：转交冻结窗口内的位置重绑放行（2026-09-29）
+
+- `0.1.0-alpha.62`：PR #22（fix: let location rebind proceed under an open transfer freeze）合并锚点。签发了未决转交（`state='pending'`，含已过期未被接手——过期只使接手码失效，冻结保留）的会话没有任何可写持有者：原聊天已被冻结、新聊天未取得写权限。设备身份漂移后的接手恢复此前形成三方死锁：takeover 被身份预检拒绝（`WORKTREE_IDENTITY_CHANGED`）、confirm-location 重绑被活跃工作守卫拒绝（`PROJECT_LOCATION_CONFIRMATION_BUSY`）、结束会话同样要走身份预检。`readRebindConflict` 现对处于转交冻结窗口的工作副本放行重绑（active run／写租约／活跃 assignment 三守卫均按冻结集合过滤）；`consumed`／`superseded`／`cancelled` 的转交不豁免，`repository_locks`／`workspace_lifecycle_reservations` 检查不变。工作台转交面板为等待接手的会话补「确认新代码位置」入口。附带修复：`audit-2026-09-24` 的 Windows credential helper 用例在非 Windows 宿主补 `skip`（对 Windows 宿主无行为变化）。
+- 验证（Windows，集成树 = main `16c6c6d` + PR#22 head `c416d03` + 本锚点）：全量 `npm test` **854 项 / 847 通过 / 0 失败 / 7 平台跳过**（23.3 分钟）；`npm run test:phase0` **97/97**；`npm run build:web` 738 模块通过；`git diff --check` 干净。审核存活盘点：main 侧 `readRebindConflict` 自 PR 基线起逐字节未变（c689d5d 未触碰），`conversation_transfers` 四态语义（pending/superseded/consumed/cancelled）与豁免假设一致，web 侧 `ConversationControlChain` 的 `waiting`/actions 插入点完整存活；PR 基线 fbf1cf9 起唯一触碰 `projects.mjs` 的提交未改动该函数。
+
 ### alpha.61：版本更新管理与用户技能（2026-09-29）
 
 - `0.1.0-alpha.61`：将此前 PR #27 的独立 `$cockpit-pr-audit` 与只读 `$cockpit-update` 一并纳入九技能分发清单；工作台指南、Codex/ZCode 插件说明和安装文档同步列出。PR #27 原先标记 alpha.60，但该版本已被主线审计修复占用；按版本事实源只保留一个 alpha.61 候选，不重复发布 alpha.60。更新检查比较插件内 `VERSION` 与 GitHub 非草稿 Release（含预发布版），呈现版本、日期、链接和说明；网络/API 失败不冒充“没有更新”，不拉取、安装或重启。

@@ -702,3 +702,51 @@ test('FolderGrantStore mirrors the empty store: expiry gates first claim, same c
   assert.throws(() => store.claim(second.grantId, 'cmd-3', 'principal-a'), { code: 'FOLDER_GRANT_CONSUMED' });
   assert.throws(() => store.claim(second.grantId, 'cmd-3', 'principal-b'), { code: 'FOLDER_GRANT_EXPIRED' });
 });
+
+test('confirm-location allows rebind under an open (possibly expired) transfer freeze (R6)', (t) => {
+  const cleanup = [];
+  t.after(runCleanupLifo(cleanup));
+  const root = realpathSync(mkdtempSync(path.join(realpathSync(os.tmpdir()), 'ugk-r6-freeze-')));
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const db = openCockpitDatabase(path.join(root, 'cockpit.db'));
+  cleanup.push(() => db.close());
+  const registered = registerProject(db, { commandId: 'reg-r6', name: 'R6', observation: observation() });
+  const worktreeId = worktreeIdFor('worktree-one');
+  // 与现场一致的完整阻塞组合：active run + 写租约 + active 会话任务。
+  startWriteRun(db, {
+    commandId: 'run-r6', runId: 'session-r6', agentClaim: 'zcode',
+    worktreeId, canonicalPath: '/fixture/project', goal: 'frozen takeover',
+    repositoryIdentity: 'repository-one', worktreeIdentity: 'worktree-one',
+    baseline: { head: 'a'.repeat(40), branch: 'main', indexFingerprint: 'i', worktreeFingerprint: 'w', coherence: 'coherent' },
+  });
+  const timestamp = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO assignments (id, project_id, worktree_id, agent_id, task_id, scope_json, status, revision, session_id, created_at, updated_at)
+    VALUES ('assignment-r6', ?, ?, 'ZCode', 'frozen', '{}', 'active', 3, 'session-r6', ?, ?)
+  `).run(registered.projectId, worktreeId, timestamp, timestamp);
+  // 签发后已过期但未被接手的转交：状态仍 pending，会话保持冻结。
+  db.prepare(`
+    INSERT INTO conversation_transfers (
+      id, session_id, worktree_id, state, code_hash, issued_revision,
+      previous_owner_key, expires_at, created_at
+    ) VALUES ('transfer-r6', 'session-r6', ?, 'pending', ?, 3, ?, ?, ?)
+  `).run(worktreeId, 'h'.repeat(64), 'owner-key', Date.now() - 1000, timestamp);
+
+  const drifted = observation({ repositoryIdentity: 'repository-drifted', worktreeIdentity: 'worktree-drifted' });
+  const frozenOk = confirmProjectLocation(db, { commandId: 'confirm-r6-frozen', projectId: registered.projectId, observation: drifted });
+  assert.equal(frozenOk.ok, true, JSON.stringify(frozenOk));
+  assert.equal(frozenOk.locationConfirmed, true);
+  const worktree = db.prepare('SELECT * FROM worktrees WHERE id = ?').get(worktreeId);
+  assert.equal(worktree.repository_identity, 'repository-drifted');
+  assert.equal(worktree.identity_fingerprint, 'worktree-drifted');
+
+  // 接手完成后（consumed）会话恢复可写，冻结豁免不再适用。
+  db.prepare('UPDATE worktrees SET repository_identity = ?, identity_fingerprint = ? WHERE id = ?')
+    .run('repository-one', 'worktree-one', worktreeId);
+  db.prepare("UPDATE conversation_transfers SET state = 'consumed', consumed_by = 'zcode:chat-2', resolved_at = ? WHERE id = 'transfer-r6'")
+    .run(new Date().toISOString());
+  const busyAfterConsumed = confirmProjectLocation(db, { commandId: 'confirm-r6-consumed', projectId: registered.projectId, observation: drifted });
+  assert.equal(busyAfterConsumed.ok, false);
+  assert.equal(busyAfterConsumed.code, 'PROJECT_LOCATION_CONFIRMATION_BUSY');
+  assert.equal(busyAfterConsumed.blockingRunId, 'session-r6');
+});
