@@ -27,7 +27,8 @@ test('ZCode package uses native manifests and a runnable strict stdio bridge out
     assert.equal(path.resolve(outputRoot, marketplace.plugins[0].source), result.pluginRoot);
     assert.deepEqual(readdirSync(path.join(result.pluginRoot, 'skills')).sort(), [
       'cockpit', 'cockpit-closeout', 'cockpit-handoff', 'cockpit-init',
-      'cockpit-progress', 'cockpit-relay', 'cockpit-submit',
+      'cockpit-pr-audit', 'cockpit-progress', 'cockpit-relay', 'cockpit-submit',
+      'cockpit-update',
     ]);
     for (const name of readdirSync(path.join(result.pluginRoot, 'skills'))) {
       assert.ok(existsSync(path.join(result.pluginRoot, 'skills', name, 'SKILL.md')));

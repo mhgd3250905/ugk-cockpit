@@ -11,9 +11,11 @@ import {
 
 const repositoryRoot = path.resolve('.');
 
-test('Cockpit skill packages expose the guide and six approved user actions', () => {
+test('Cockpit skill packages expose the guide, two independent tools, and six project actions', () => {
   assert.deepEqual(COCKPIT_SKILL_NAMES, [
     'cockpit',
+    'cockpit-update',
+    'cockpit-pr-audit',
     'cockpit-init',
     'cockpit-progress',
     'cockpit-relay',
@@ -303,6 +305,11 @@ test('skill installer copies packages and refuses an unapproved overwrite', () =
     for (const name of COCKPIT_SKILL_NAMES) {
       assert.equal(existsSync(path.join(targetRoot, name, 'SKILL.md')), true);
     }
+    const updateScript = path.join('cockpit-update', 'scripts', 'check-updates.mjs');
+    assert.equal(
+      readFileSync(path.join(targetRoot, updateScript), 'utf8'),
+      readFileSync(path.join(repositoryRoot, 'skills', updateScript), 'utf8'),
+    );
     assert.throws(
       () => installCockpitSkills({ targetRoot }),
       /Refusing to overwrite existing skills/,
