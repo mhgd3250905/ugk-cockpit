@@ -311,21 +311,35 @@ export function refreshProject(db, request) {
 
 function readRebindConflict(db, projectId, scopeWorktreeIds, oldRepositoryIdentity) {
   const placeholders = scopeWorktreeIds.map(() => '?').join(', ');
-  const activeRun = db.prepare(`
-    SELECT id FROM runs WHERE worktree_id IN (${placeholders}) AND lifecycle = 'active' LIMIT 1
-  `).get(...scopeWorktreeIds);
-  if (activeRun) return { blockingRunId: activeRun.id };
-  const lease = db.prepare(`
-    SELECT worktree_id FROM write_leases WHERE worktree_id IN (${placeholders}) LIMIT 1
-  `).get(...scopeWorktreeIds);
-  if (lease) return { blockingWorktreeId: lease.worktree_id };
-  const assignment = db.prepare(`
-    SELECT id, status FROM assignments
-    WHERE (project_id = ? OR worktree_id IN (${placeholders}))
-      AND status IN ('pending', 'accepted', 'active')
-    LIMIT 1
-  `).get(projectId, ...scopeWorktreeIds);
-  if (assignment) return { blockingAssignmentId: assignment.id, assignmentStatus: assignment.status };
+  // 转交冻结窗口：签发了转交授权但尚未被接手（pending，含已过期——过期只
+  // 让接手码失效，冻结保留）的会话没有任何可写持有者：原聊天已被冻结，
+  // 新聊天未取得写权限。设备身份漂移后的接手恢复正卡在这里——takeover
+  // 被身份预检拒绝，重绑若再被冻结会话挡住就互相死锁，因此守卫对这些
+  // 工作副本放行。consumed/superseded/cancelled 不豁免：那时会话要么已被
+  // 新持有者接手（可写），要么转交已被替代取消（原持有者可写）。
+  const frozenWorktreeIds = new Set(db.prepare(`
+    SELECT DISTINCT worktree_id FROM conversation_transfers
+    WHERE worktree_id IN (${placeholders}) AND state = 'pending'
+  `).all(...scopeWorktreeIds).map((row) => row.worktree_id));
+  const liveWorktreeIds = scopeWorktreeIds.filter((id) => !frozenWorktreeIds.has(id));
+  const livePlaceholders = liveWorktreeIds.map(() => '?').join(', ');
+  if (liveWorktreeIds.length > 0) {
+    const activeRun = db.prepare(`
+      SELECT id FROM runs WHERE worktree_id IN (${livePlaceholders}) AND lifecycle = 'active' LIMIT 1
+    `).get(...liveWorktreeIds);
+    if (activeRun) return { blockingRunId: activeRun.id };
+    const lease = db.prepare(`
+      SELECT worktree_id FROM write_leases WHERE worktree_id IN (${livePlaceholders}) LIMIT 1
+    `).get(...liveWorktreeIds);
+    if (lease) return { blockingWorktreeId: lease.worktree_id };
+    const assignment = db.prepare(`
+      SELECT id, status, worktree_id FROM assignments
+      WHERE (project_id = ? OR worktree_id IN (${livePlaceholders}))
+        AND status IN ('pending', 'accepted', 'active')
+    `).all(projectId, ...liveWorktreeIds)
+      .find((row) => !frozenWorktreeIds.has(row.worktree_id));
+    if (assignment) return { blockingAssignmentId: assignment.id, assignmentStatus: assignment.status };
+  }
   if (oldRepositoryIdentity) {
     const lock = db.prepare(
       'SELECT lock_id FROM repository_locks WHERE repository_identity = ? AND expires_at > ? LIMIT 1',
