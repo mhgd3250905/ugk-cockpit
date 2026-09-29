@@ -6,11 +6,11 @@
 
 ## 实施状态
 
-### alpha.61：版本更新管理与用户技能（2026-09-29，未发布候选）
+### alpha.61：版本更新管理与用户技能（2026-09-29）
 
 - `0.1.0-alpha.61`：将此前 PR #27 的独立 `$cockpit-pr-audit` 与只读 `$cockpit-update` 一并纳入九技能分发清单；工作台指南、Codex/ZCode 插件说明和安装文档同步列出。PR #27 原先标记 alpha.60，但该版本已被主线审计修复占用；按版本事实源只保留一个 alpha.61 候选，不重复发布 alpha.60。更新检查比较插件内 `VERSION` 与 GitHub 非草稿 Release（含预发布版），呈现版本、日期、链接和说明；网络/API 失败不冒充“没有更新”，不拉取、安装或重启。
 - 版本约定集中到[版本与更新管理](VERSIONING.md)：`VERSION` 是版本事实源，包元数据和当前文档同步校验；README 标为当前开发候选，发布说明面向旧版用户，独立 readiness 审核通过后才打 tag 并发布。
-- 验证与发布状态（Windows）：针对性测试 37 项 / 36 通过 / 0 失败 / 1 项 macOS 专项跳过；`npm run test:quick` 为 146 项 / 145 通过 / 0 失败 / 1 项 macOS 专项跳过；`npm run build:web` 转换 738 个模块并通过；`git diff --check` 通过。完整 `npm test` 由候选 PR 的 Windows 双分片 CI 执行，结果以 PR 检查为准。当前未创建 tag 或 GitHub Release；候选 PR 保持草稿，需独立 readiness 审核。
+- 验证（Windows）：针对性测试 37 项 / 36 通过 / 0 失败 / 1 项 macOS 专项跳过；`npm run test:quick` 为 146 项 / 145 通过 / 0 失败 / 1 项 macOS 专项跳过；`npm run build:web` 转换 738 个模块并通过；`git diff --check` 通过。当前完整 CI run [36527025548](https://github.com/mhgd3250905/ugk-cockpit/actions/runs/36527025548) 的 quick-build 和 Windows 双分片全部通过。独立 readiness 审核已于 2026-09-29 对 PR head `56cb0d80a5e60f8665ea0d8a076212dc64b5e98f` 通过；发布 tag 应指向合并后的 `main` 提交，已发布状态以 [GitHub Releases](https://github.com/mhgd3250905/ugk-cockpit/releases) 为准。
 
 ### 测试反馈提速与门禁文档收口（2026-09-28，PR #28，无版本变更）
 
