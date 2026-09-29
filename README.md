@@ -20,11 +20,15 @@ npm run setup:zcode
 
 安装器将准备工作台、安装包含全部技能和 MCP 的对应宿主插件，并复用已经正常运行的服务。若当前聊天需要重新连接才能加载工具，会明确提示；实际调用验证通过后才算可以使用。之后直接说“帮我打开 Cockpit”或“这个工具怎么用”即可。
 
+安装包含该技能的版本后，用户可以在已连接 Cockpit 的聊天中说“`$cockpit-update` 检查更新”，查看本机技能版本、官方已发布版本和更新说明。该技能只检查并提供手动更新指引，不会自动下载、安装或重启；旧版用户需先通过发布说明获知新版本。
+
 目前提供 Windows 与 macOS 下 Codex 和 ZCode 两个安装入口，运行环境由 Agent 按[安装说明](docs/AGENT_INSTALL.md)准备；macOS 的宿主聊天内工具调用验收进度见该说明。已有手动安装发生冲突时保留原配置，先处理迁移；不会自动覆盖已有安装或重置项目。
 
 2026-09-06 已按工作台试用反馈调整项目卡片、宽屏比例、时间线摘要、返回导航及 Logo，并修复提示语与加载占位重叠。完整问题清单和验证结果见 [工作台试用反馈](docs/WORKBENCH_FEEDBACK.md)。
 
-## 当前版本
+## 当前开发版本
+
+`0.1.0-alpha.61` — 随 PR #27 纳入独立 `$cockpit-pr-audit`，并新增只读 `$cockpit-update`：比较插件安装版本与 GitHub 已发布版本，整理更新说明和手动更新指引；不会自动下载、安装或重启。工作台“使用指南”与技能总表同步加入这两项。旧版用户通过本版本的 GitHub Release 说明获知它首次加入更新检查技能，并需手动升级后才能使用。
 
 `0.1.0-alpha.60` — 审计修复（2026-09-26 审计，分支 `fix/audit-2026-09-26-conflict-and-concurrency-gates`，2026-09-28 经独立审核一条龙合并；原自记 alpha.55／第 28 轮，版本与轮次分别被先合入的 #23（alpha.56）与 #23 的轮次记录占用，#24/#25/#26 又先后取走 57-59，合并适配改记 alpha.60／第 32 轮）：仍未解决的合并冲突不再被当作正常成果送审——`git stash pop` 撞上已移动的分支这类**没有任何标记文件**的冲突状态此前能通过全部预检，冲突标记文本被哈希进候选提交、保存时又把这些路径的索引项改写成 stage 0，结果是「分支干净、历史里带着 `<<<<<<<`、冲突状态已消失」；现在预检直接以索引里的未合并项（git 自己的事实源）拒绝，并如实列出冲突路径。仓库敌意配置门禁此前在非 ASCII 路径上失效：`.gitattributes` 枚举没带 `-z`，`测试/.gitattributes` 被 git 转义成一个不存在的路径后跳过，同一仓库仅因目录名的字节编码不同就能从「拒绝」变成「放行」，现按 `-z` 读取。（合并适配注：本项与先行合入的 PR #25 其五为同一修复，合并取 main 实现；MCP `ugk_work_context` 的 `declaredWorkspace` 转发亦同由 #25 其二落地——本段保留原审计记录。）同一操作编号的并发「创建开发空间」不再同时进入 `git worktree add`（仓库锁的持有者就是该命令号，第二个驱动只会续锁而不会被拒），且先完成者不再释放后者仍在用的仓库锁——该流程此前没有 `singleFlight` 闸，而交付与合并流早有。MCP `ugk_work_context` 恢复转发 `declaredWorkspace`：工具 schema、服务端校验与接入指引都承诺了这条「宿主无法解析工作目录时」的兜底通路，但桥在重建请求时丢掉了它，只有 init/resume/接手转发。交付暂存区锁的释放失败不再被丢弃：本进程自己发布的、字节完全一致的锁现在会被下一次获取回收（Windows 上安全软件短暂占用文件即可造成永久 `DELIVERY_INDEX_LOCKED`，指引却让用户「等待另一个操作」），无法归属的锁也如实说明而不是假称有并发操作。stdio 桥不再把宿主的心跳 `ping` 排在一次慢工具调用之后（此前实测被顶到 30 秒），单行长度守卫的分行口径与 readline 对齐（`\r` 分帧的宿主此前会因累计字节被误杀）。另修复本机卫生两项：文件夹授权记录（含绝对路径与主体哈希）从此只增不删，现在过期/已用记录在数据库打开时清理；`LOCALAPPDATA`/`XDG_DATA_HOME` 为相对路径时不再静默落到当前目录下的另一份空数据库；MCP 作用域凭据表满 64 时不再逐出「最早创建」的那条会话（正在任务中、只签发一次的 Agent 会话此前会被风暴式签发的新会话顶掉，实测 401），改为按使用逐出的最近最少使用。本分支 Windows 全量与 Phase 0 结果、以及本轮的已证伪/已证实未修/未证实条目见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
@@ -104,7 +108,7 @@ alpha.44 的工作说明复制区、开发空间操作、工作线聚焦及顶�
 
 保留 `alpha.31` 的本地收束与可选平台登记分离：没有会话信息或 MCP 不可用时，仍可整理文档、保存提交，并执行用户明确授权的普通 push。正式 handoff 仍须用户明确结束并通过平台校验。
 
-当前开发版本以 `VERSION` 为准；版本与阶段验收的当前事实源是 [阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
+当前开发版本以 `VERSION` 为准；版本策略见[版本与更新管理](docs/VERSIONING.md)，阶段验收事实见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
 2026-09-08 已合并工作台反馈及返工版本 `b523b386`，包含此前 PR #6 的修复。新增项目归档、手动关闭/重开工作线、按工作线查看上下文，以及工作副本复用/移除的并发保护和原请求恢复。独立全量 442/442、Phase 0 97/97、构建及差异检查通过；本机服务已从分支切回主项目并升级到 schema 27，7 个已有项目及详情正常。当时保留版本 alpha.39，未创建新发布；当前结果与既有遗留项见[阶段记录](docs/PHASE1_VERTICAL_SLICE.md)。
 
@@ -166,7 +170,9 @@ npm run mcp
 
 ## 配套 Skills
 
-仓库内置七个 Skill：统一的 `$cockpit` 使用助手，以及六个面向用户动作的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。它们把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有其他持有人时，用户可返回原聊天，或到工作台授权转交并将完整指令交给目标聊天；`ugk_work_takeover` 仅消费该授权。平台持久保存可靠宿主聊天身份；历史连接身份只读保留，不能根据同目录或时间相近认领。context 查询不改变业务会话、归属、租约、心跳或 revision，旧回执不恢复当前权限。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
+`$cockpit-pr-audit` 使用 Git 与 GitHub CLI，不依赖工作台会话或 MCP；它先列出候选供用户选择，评论、review 和合并仍需明确授权。
+
+仓库内置九个 Skill：统一的 `$cockpit` 使用助手、`$cockpit-update` 版本检查、`$cockpit-pr-audit` 独立 PR 审核，以及六个面向平台工作流程的 Skill：`$cockpit-init`、`$cockpit-progress`、`$cockpit-relay`、`$cockpit-submit`、`$cockpit-closeout`、`$cockpit-handoff`。版本检查只读 GitHub 已发布的 release；更新由用户手动决定，旧版用户通过 GitHub Release 说明得知新版本。六个工作流程技能把 session、revision、幂等请求号、接力上下文和标准交接字段留在 Agent 与 MCP 之间，用户不需要记忆原始工具参数。聊天上下文遗失 session 信息时，`ugk_work_context` 会按当前代码目录重新核对平台状态；同目录候选不会自动接管。已有其他持有人时，用户可返回原聊天，或到工作台授权转交并将完整指令交给目标聊天；`ugk_work_takeover` 仅消费该授权。平台持久保存可靠宿主聊天身份；历史连接身份只读保留，不能根据同目录或时间相近认领。context 查询不改变业务会话、归属、租约、心跳或 revision，旧回执不恢复当前权限。`submit`、`closeout`、`relay`、`handoff` 都只能在用户显式动作中触发；closeout 聚焦本地收束与独立 commit 并可选登记检查点；`completed` handoff 的选择可伴随执行本地 closeout；`progress` 是唯一允许在有效检查点后自动触发的动作。主项目审核不另设 Skill，由项目页复制的标准提示词驱动 `ugk_integration_begin`、`ugk_integration_review`、`ugk_integration_merge`，确保平台收到规范回执。
 
 推荐使用上方完整插件安装入口。仅需传统独立 Skills 安装时：
 

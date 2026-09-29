@@ -1,0 +1,6 @@
+interface:
+  display_name: "检查 Cockpit 更新"
+  short_description: "查看官方已发布版本与更新内容，提供安全的手动更新指引"
+  default_prompt: "使用 $cockpit-update 检查是否有新版，并说明怎样手动更新。"
+policy:
+  allow_implicit_invocation: true

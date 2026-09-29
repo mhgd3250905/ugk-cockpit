@@ -19,6 +19,6 @@ test('VERSION, package metadata, and current product docs have one value', () =>
   assert.equal(VERSION, packageLock.version);
   assert.equal(VERSION, packageLock.packages[''].version);
   const escapedVersion = VERSION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  assert.match(readme, new RegExp('## 当前版本\\s*\\n\\s*`' + escapedVersion + '`'));
+  assert.match(readme, new RegExp('## 当前开发版本\\s*\\n\\s*`' + escapedVersion + '`'));
   assert.match(phase1, new RegExp('- `' + escapedVersion + '`：'));
 });
