@@ -6,6 +6,12 @@
 
 ## 实施状态
 
+### alpha.63：重复进展内容拒绝（2026-09-30，开发候选）
+
+- `0.1.0-alpha.63`：基线为 `62540b1`（已记录 alpha.62 本机部署），实现提交 `76c6eb4`。此前 ZCode 在一个会话中反复发送摘要 `x。`，200 余条均以新 `clientRequestId` 入账；数据库和 CAS 未损坏，但活动日志被噪音填充。现在同一 assignment／session 内，只要新 `working`／`in_progress` 的摘要与已入账进展相同（旧记录兼容 `note`），就返回 `PROGRESS_DUPLICATE_CONTENT`（HTTP 409、`retryable: false`），提示检查误发、停止无新成果的调用；拒绝不新增进展或提高 revision。原请求完全相同的重放仍走既有幂等回执；不断改写摘要的调用不在本轮拦截范围。
+- 范围：`src/core/assignments.mjs`、`src/service/http-server.mjs` 与对应回归用例，以及本轮版本元数据、README、阶段记录、本机恢复记录和 `$cockpit-progress` 技能源文案。修复落地时的定向回归 **10/10**，本轮加入版本一致性用例后定向回归 **11/11**；`npm run test:quick` **146 项 / 145 通过 / 0 失败 / 1 平台跳过**；完整 `npm test` **854 项 / 847 通过 / 0 失败 / 7 平台跳过**（Windows，130 个测试文件，约 26.4 分钟）；`npm run build:web` **738 模块**通过，Vite 报既有的大 chunk 提示。完整套件已含 Phase 0，不重复执行独立入口。
+- 运行事实：本机服务在用户授权后从 PID 51356 切换到 PID 53624，SQLite 一致性备份、11 个可见项目列表及全部详情、数据库完整性均经核对，既有 4 条位置身份待收敛警告未变化；具体现场见[本机服务恢复记录](LOCAL_SERVICE_RECOVERY.md)。该进程仍回报 `0.1.0-alpha.62`，宿主插件也未更新；`alpha.63` 当前只是本地源码候选。远端 Windows CI、独立 readiness 审核、标签和 Release 尚未执行；审核前不创建发布标签。
+
 ### alpha.62：转交冻结窗口内的位置重绑放行（2026-09-29）
 
 - `0.1.0-alpha.62`：PR #22（fix: let location rebind proceed under an open transfer freeze）合并锚点。签发了未决转交（`state='pending'`，含已过期未被接手——过期只使接手码失效，冻结保留）的会话没有任何可写持有者：原聊天已被冻结、新聊天未取得写权限。设备身份漂移后的接手恢复此前形成三方死锁：takeover 被身份预检拒绝（`WORKTREE_IDENTITY_CHANGED`）、confirm-location 重绑被活跃工作守卫拒绝（`PROJECT_LOCATION_CONFIRMATION_BUSY`）、结束会话同样要走身份预检。`readRebindConflict` 现对处于转交冻结窗口的工作副本放行重绑（active run／写租约／活跃 assignment 三守卫均按冻结集合过滤）；`consumed`／`superseded`／`cancelled` 的转交不豁免，`repository_locks`／`workspace_lifecycle_reservations` 检查不变。工作台转交面板为等待接手的会话补「确认新代码位置」入口。附带修复：`audit-2026-09-24` 的 Windows credential helper 用例在非 Windows 宿主补 `skip`（对 Windows 宿主无行为变化）。
