@@ -136,6 +136,22 @@ test('existing Agent initializes the registered project, continues, and hands of
   const progress = await progressResponse.json();
   assert.equal(progress.revision, 3);
 
+  const duplicateResponse = await post(service, '/api/v1/mcp/work/progress', {
+    sessionId: initialized.sessionId,
+    clientRequestId: 'progress-duplicate',
+    expectedRevision: progress.revision,
+    status: 'working',
+    note: '协议与状态机已经接通',
+  });
+  assert.equal(duplicateResponse.status, 409, await duplicateResponse.clone().text());
+  const duplicate = await duplicateResponse.json();
+  assert.equal(duplicate.code, 'PROGRESS_DUPLICATE_CONTENT');
+  assert.equal(duplicate.revision, progress.revision);
+  assert.equal(duplicate.retryable, false);
+  assert.match(duplicate.message, /相同的进展/);
+  assert.match(duplicate.required_action, /误触发.*重复发送/);
+  assert.match(duplicate.required_action, /停止调用/);
+
   const finishResponse = await post(service, '/api/v1/mcp/work/handoff', {
     sessionId: initialized.sessionId,
     clientRequestId: 'handoff-1',
