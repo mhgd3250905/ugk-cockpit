@@ -210,7 +210,10 @@ function conflictFromActiveWork(worktreeId, lease, assignment) {
   return null;
 }
 
-function checkLifecycleTarget(db, request, { allowedStatuses = [] } = {}) {
+function checkLifecycleTarget(db, request, {
+  allowedStatuses = [],
+  ignoreNeverAcceptedInvitationsForProject = null,
+} = {}) {
   const project = db.prepare(`
     SELECT id, archived_at, archive_revision, status
     FROM projects WHERE id = ?
@@ -299,8 +302,10 @@ function checkLifecycleTarget(db, request, { allowedStatuses = [] } = {}) {
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
+      AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?)
     ORDER BY updated_at DESC, id DESC LIMIT 1
-  `).get(request.worktreeId, ...ACTIVE_ASSIGNMENT_STATES);
+  `).get(request.worktreeId, ...ACTIVE_ASSIGNMENT_STATES,
+    ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   const activeWork = conflictFromActiveWork(request.worktreeId, lease, assignment);
   if (activeWork) return activeWork;
 
@@ -398,7 +403,10 @@ export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
     const legacy = legacyFence(db, request);
     if (!legacy.ok) return legacy;
 
-    const target = checkLifecycleTarget(db, request, { allowedStatuses });
+    const target = checkLifecycleTarget(db, request, {
+      allowedStatuses,
+      ignoreNeverAcceptedInvitationsForProject: options.ignoreNeverAcceptedInvitationsForProject ?? null,
+    });
     if (!target.ok) return target;
 
     const epoch = Number(target.worktree.lifecycle_epoch ?? 0) + 1;
@@ -490,6 +498,7 @@ export function revalidateWorkspaceLifecycle(db, request = {}, options = {}) {
     if (!sameOwner(row, request)) return ownershipFailure(row, request);
     const target = checkLifecycleTarget(db, request, {
       allowedStatuses: request.allowedStatuses ?? [],
+      ignoreNeverAcceptedInvitationsForProject: options.ignoreNeverAcceptedInvitationsForProject ?? null,
     });
     if (!target.ok) {
       db.prepare(`

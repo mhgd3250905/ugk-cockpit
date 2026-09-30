@@ -2698,18 +2698,24 @@ export async function createCockpitHttpServer({
   let closing;
   function close() {
     closing ??= (async () => {
-      await new Promise((resolve, reject) => {
+      const listenerClosed = new Promise((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
         server.closeIdleConnections();
       });
+      // The folder dialog is awaited inside a request handler, so that handler's
+      // connection is exactly what keeps `server.close()` pending. Releasing it
+      // before waiting for the listener is the only order in which this teardown
+      // can ever run: after the await it deadlocked shutdown against the very
+      // request it exists to unstick, and the process stayed alive holding
+      // service.lock while the port was already refusing connections.
+      try {
+        if (folderPicker === selectFolder) await closeFolderPicker();
+        else if (typeof folderPicker?.close === 'function') await folderPicker.close();
+      } catch {}
+      await listenerClosed;
       // Disconnected clients can leave an asynchronous write handler running.
       // Keep the database open until these handlers have finished as well.
       await Promise.allSettled([...activeRequests]);
-      if (folderPicker === selectFolder) {
-        try { await closeFolderPicker(); } catch {}
-      } else if (typeof folderPicker?.close === 'function') {
-        try { await folderPicker.close(); } catch {}
-      }
       db.close();
     })();
     return closing;
