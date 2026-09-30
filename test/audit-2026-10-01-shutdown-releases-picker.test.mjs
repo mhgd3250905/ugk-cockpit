@@ -91,5 +91,66 @@ test('反向对照：关闭不打断正在完成的请求，回执仍然送达',
 
   const response = await withDeadline(inflight, 15_000, () => null);
   assert.ok(response, 'a request already in flight must not be abandoned by shutdown');
+  // Reading only "a response arrived" is not enough: a handler answering from an
+  // already-closed database fails with 400 and still produces a response.
+  assert.equal(response.status, 200,
+    `the draining handler must still be able to answer, got ${response.status}`);
+  const payload = await response.json();
+  assert.equal(payload.ok, true, JSON.stringify(payload));
+  assert.ok(typeof payload.grantId === 'string' && payload.grantId.length > 0,
+    `the handler's own receipt must be intact, got ${JSON.stringify(payload)}`);
   await withDeadline(closing, 15_000, () => { throw new Error('close() never returned for a draining handler'); });
+});
+
+// A dialog that refuses to close must not put the hang back. The teardown error is
+// tolerated so the database still closes, and the grace period force-closes whatever
+// connection is left rather than waiting on it forever.
+test('释放选择器抛错时关闭仍必须在宽限期后完成', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ugk-cockpit-shutdown-refuse-'));
+  const refusingPicker = Object.assign(
+    () => new Promise(() => {}),
+    { close: async () => { throw new Error('native dialog refused to close'); } },
+  );
+  const service = await createCockpitHttpServer({
+    dbPath: path.join(root, 'cockpit.db'),
+    token: TOKEN,
+    folderPicker: refusingPicker,
+  });
+  t.after(async () => {
+    await withDeadline(service.close(), 30_000, () => {});
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  const inflight = fetch(`http://${service.host}:${service.port}/api/v1/folders/select`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}` },
+  }).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // The residual risk must be said out loud, not swallowed: a bounded drain means a
+  // handler can still be running when the database closes.
+  const written = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { written.push(String(chunk)); return originalWrite(chunk, ...rest); };
+  let outcome;
+  try {
+    outcome = await withDeadline(
+      service.close().then(() => ({ done: true })),
+      20_000,
+      () => ({ done: false }),
+    );
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  await inflight;
+  assert.equal(outcome.done, true,
+    'close() never returned: a picker that refuses to release put the hang back');
+  assert.ok(written.some((line) => /still running after the grace period/.test(line)),
+    `the abandoned drain must be reported, stderr saw: ${JSON.stringify(written)}`);
+
+  const probe = await withDeadline(
+    fetch(`http://${service.host}:${service.port}/health`).then((r) => r.status).catch(() => 'refused'),
+    5_000, () => 'timeout',
+  );
+  assert.equal(probe, 'refused', 'the port must be gone once shutdown has completed');
 });

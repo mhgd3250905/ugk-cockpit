@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -157,3 +157,32 @@ test('反向对照：删除真正完成时才清理关闭工作线上未被接�
   assert.equal(invitation(f.db).revision, 2, 'the cancellation bumps the revision exactly once');
   assert.equal(dispatchedGrant(f.db).state, 'revoked', 'and revokes its dispatch grant');
 });
+
+// The exclusion has to be exactly as narrow as the cancellation it replaces. A
+// mutation that drops `status='pending' AND session_id IS NULL` from the predicate
+// (so every assignment of the removing project stops blocking) keeps both tests above
+// green, so they are pinned here instead.
+for (const [label, row] of [
+  ['accepted', { status: 'accepted', sessionId: 'session-accepted' }],
+  ['pending with a session', { status: 'pending', sessionId: 'session-held' }],
+]) {
+  test(`例外只针对从未被接手的邀请：${label} 的邀请仍然挡住删除`, async (t) => {
+    const f = await fixture(t);
+    f.db.prepare('DELETE FROM repository_locks').run();
+    f.db.prepare('UPDATE assignments SET status = ?, session_id = ? WHERE id = ?')
+      .run(row.status, row.sessionId, 'assignment-invite');
+
+    const result = await removeDevelopmentWorkspace(f.db, {
+      commandId: `cmd-remove-${row.status}`,
+      projectId: 'proj-1',
+      spaceId: f.spaceId,
+      expectedRevision: f.revision,
+    }, { probe: probeGitWorktree });
+
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.code, 'SPACE_CLOSED_HAS_ACTIVE_WORK', JSON.stringify(result));
+    assert.equal(invitation(f.db).status, row.status,
+      `a ${label} invitation must keep counting as active work`);
+    assert.equal(existsSync(f.spacePath), true, 'the workspace must survive');
+  });
+}

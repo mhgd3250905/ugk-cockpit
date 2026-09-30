@@ -2698,8 +2698,14 @@ export async function createCockpitHttpServer({
   let closing;
   function close() {
     closing ??= (async () => {
-      const listenerClosed = new Promise((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
+      const SHUTDOWN_GRACE_MS = 5_000;
+      let listenerError = null;
+      // Resolve instead of reject: `server.close` reports its error asynchronously
+      // while the teardown below is still awaiting, so a rejection would land with
+      // nothing attached and surface as an unhandledRejection. It is rethrown at the
+      // end instead, after the database has been closed.
+      const listenerClosed = new Promise((resolve) => {
+        server.close((error) => { if (error) listenerError = error; resolve(); });
         server.closeIdleConnections();
       });
       // The folder dialog is awaited inside a request handler, so that handler's
@@ -2711,12 +2717,44 @@ export async function createCockpitHttpServer({
       try {
         if (folderPicker === selectFolder) await closeFolderPicker();
         else if (typeof folderPicker?.close === 'function') await folderPicker.close();
-      } catch {}
+      } catch (error) {
+        // Tolerated, because a dialog that will not close must not stop the database
+        // from closing — but said out loud, or the hang below looks like nothing.
+        process.stderr.write(`[ugk-cockpit] shutdown: folder picker release failed: ${error?.code ?? error?.message ?? 'UNKNOWN'}\n`);
+      }
+      // A handler that never settles must not turn shutdown into an indefinite hang.
+      // After the grace period the remaining connections are forced closed; the
+      // handlers are still drained before the database closes, so a request that was
+      // merely slow still gets to finish its durable writes.
+      let graceTimer;
+      const settled = await Promise.race([
+        listenerClosed.then(() => true),
+        new Promise((resolve) => { graceTimer = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS); }),
+      ]);
+      clearTimeout(graceTimer);
+      if (!settled) {
+        process.stderr.write('[ugk-cockpit] shutdown: forcing remaining connections closed after the grace period\n');
+        server.closeAllConnections();
+      }
       await listenerClosed;
       // Disconnected clients can leave an asynchronous write handler running.
-      // Keep the database open until these handlers have finished as well.
-      await Promise.allSettled([...activeRequests]);
+      // Keep the database open until these handlers have finished as well — but only
+      // up to a bounded wait, because a handler that never settles would otherwise
+      // leave the process alive holding service.lock with the port already gone. The
+      // command journal and the workspace lifecycle fence are what make an
+      // interrupted operation recoverable; this must not pretend a drain completed.
+      const handlers = [...activeRequests];
+      let drainTimer;
+      const drained = await Promise.race([
+        Promise.allSettled(handlers).then(() => true),
+        new Promise((resolve) => { drainTimer = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS); }),
+      ]);
+      clearTimeout(drainTimer);
+      if (!drained) {
+        process.stderr.write(`[ugk-cockpit] shutdown: ${activeRequests.size} request handler(s) still running after the grace period; closing the database anyway\n`);
+      }
       db.close();
+      if (listenerError) throw listenerError;
     })();
     return closing;
   }

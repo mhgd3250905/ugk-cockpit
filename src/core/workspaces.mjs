@@ -27,6 +27,7 @@ import {
   releaseWorkspaceLifecycle,
   releaseWorkspaceLifecycleExecutor,
   reserveWorkspaceLifecycle,
+  NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL,
 } from './workspace-lifecycle.mjs';
 import { EmptyFolderGrantStore } from './folder-grants.mjs';
 import {
@@ -693,7 +694,7 @@ function readActiveWorkspaceWork(db, worktreeId, {
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN ('pending', 'accepted', 'active')
-      AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?)
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
   `).get(worktreeId, ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   return assignment ? { kind: 'assignment', assignmentId: assignment.id, status: assignment.status } : null;

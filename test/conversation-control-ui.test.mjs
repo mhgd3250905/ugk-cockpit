@@ -57,14 +57,18 @@ test('transfer requests reuse a retained idempotent body and keep authorization 
 // it there compiles, renders, and then throws ReferenceError the moment the button
 // is clicked. The action therefore travels the same prop chain every sibling action
 // on that panel already uses.
-const detailPageSignature = source.slice(
-  source.indexOf('function ProjectDetailPage('),
-  source.indexOf('\n}', source.indexOf('function ProjectDetailPage(')),
-);
-const detailContentSignature = source.slice(
-  source.indexOf('function ProjectDetailContent('),
-  source.indexOf('\n}', source.indexOf('function ProjectDetailContent(')),
-);
+// The two "signature" slices must stop at the end of the destructured parameter list.
+// Slicing to the next `\n}` instead swallows the component body, whose forwarding JSX
+// also mentions the prop name — and then deleting the prop from the parameter list (the
+// exact bug this pins) still reads green.
+function destructuredParams(name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`component ${name} not found`);
+  const end = source.indexOf(') {', start);
+  return source.slice(start, end);
+}
+const detailPageSignature = destructuredParams('ProjectDetailPage');
+const detailContentSignature = destructuredParams('ProjectDetailContent');
 const detailContentBody = source.slice(
   source.indexOf('function ProjectDetailContent('),
   source.indexOf('function ConversationControlPanel('),

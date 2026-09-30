@@ -4,6 +4,17 @@ import { canonicalJson, beginCommand, parseCommandResponse } from './command-jou
 import { withImmediateTransaction } from './database.mjs';
 
 const ACTIVE_ASSIGNMENT_STATES = ['pending', 'accepted', 'active'];
+
+// One definition of the exception this product makes: on a *closed* work line an
+// invitation that was never accepted holds no session and no run, so it is not work
+// a workspace operation has to wait for. It is read by the removal gate, by the
+// durable fence checks in this module, and by the operator's abandon path — the
+// invitation itself is only retired when a removal actually commits, never on a
+// refused attempt. Bind it to the project whose closed line is in scope, or to NULL
+// to keep every row (SQL's `IS NOT NULL` yields 0, never NULL, so NULL can only
+// widen the result).
+export const NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL =
+  "AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?)";
 const RESERVATION_STATES = new Set(['executing', 'unknown']);
 
 function nowMillis(options = {}) {
@@ -302,7 +313,7 @@ function checkLifecycleTarget(db, request, {
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
-      AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?)
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
   `).get(request.worktreeId, ...ACTIVE_ASSIGNMENT_STATES,
     ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
@@ -741,13 +752,29 @@ function commitCommand(db, commandId, response, timestamp) {
   return response;
 }
 
-function activeWorkOnWorktree(db, worktreeId) {
+/**
+ * The project whose never-accepted invitations should stop counting as work for this
+ * worktree, or NULL when no exception applies. Fail-closed: without both a space and
+ * a worktree, or unless that work line is actually closed, nothing is excluded.
+ */
+function neverAcceptedInvitationScope(db, spaceId, worktreeId) {
+  if (!spaceId || !worktreeId) return null;
+  const space = db.prepare('SELECT project_id FROM development_spaces WHERE id = ?').get(spaceId);
+  if (!space) return null;
+  return db.prepare(
+    "SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'",
+  ).get(space.project_id, worktreeId) ? space.project_id : null;
+}
+
+function activeWorkOnWorktree(db, worktreeId, ignoreNeverAcceptedInvitationsForProject = null) {
   const lease = db.prepare('SELECT run_id FROM write_leases WHERE worktree_id = ?').get(worktreeId);
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
-  `).get(worktreeId, ...ACTIVE_ASSIGNMENT_STATES);
+  `).get(worktreeId, ...ACTIVE_ASSIGNMENT_STATES,
+    ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   return conflictFromActiveWork(worktreeId, lease, assignment);
 }
 
@@ -1019,7 +1046,15 @@ export function abandonWorkspaceLifecycle(db, request = {}, options = {}) {
     const spaceId = row?.space_id ?? journalTarget?.spaceId ?? null;
 
     if (worktreeId) {
-      const activeWork = activeWorkOnWorktree(db, worktreeId);
+      // Abandon is the operator's only way out of a wedged fence. It must apply the
+      // same definition of "work" as the paths it is unwinding, or a closed work
+      // line's stale invitation walls off the escape hatch while the receipt tells
+      // the operator to go finish a handoff nobody was ever asked to accept.
+      const activeWork = activeWorkOnWorktree(
+        db,
+        worktreeId,
+        neverAcceptedInvitationScope(db, spaceId, worktreeId),
+      );
       if (activeWork) {
         return transient(activeWork.code, {
           worktreeId,
