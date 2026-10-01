@@ -604,9 +604,10 @@ export function releaseWorkspaceLifecycleExecutor(db, request = {}, options = {}
 }
 
 /**
- * A manual work-line marker may change historical or archived records, but must
- * not change the target of an unsettled workspace operation. Call inside the
- * marker's write transaction so the fence check and state change are atomic.
+ * Reopening a manual work-line marker must not invalidate the closed-line
+ * exception during an unsettled workspace operation. Closing remains available
+ * to retire old invitations and recover an interrupted command. Call inside the
+ * reopening transaction so the fence check and state change are atomic.
  * Unlike write admission, this only fences this worktree and imposes no archive
  * or Git-observation requirements on a records-only action.
  */

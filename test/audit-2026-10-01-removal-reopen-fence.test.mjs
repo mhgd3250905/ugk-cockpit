@@ -10,7 +10,9 @@ import { openCockpitDatabase } from '../src/core/database.mjs';
 import { EmptyFolderGrantStore } from '../src/core/folder-grants.mjs';
 import { authorizeEmptyDirectory } from '../src/core/path-guard.mjs';
 import { beginCommand } from '../src/core/command-journal.mjs';
+import { createAssignment, issueDispatchGrant } from '../src/core/assignments.mjs';
 import { setWorkLineClosed } from '../src/core/manual-records.mjs';
+import { abandonWorkspaceLifecycle } from '../src/core/workspace-lifecycle.mjs';
 import { createDevelopmentWorkspace, removeDevelopmentWorkspace } from '../src/core/workspaces.mjs';
 import { probeGitWorktree, safeGitEnvironment, SAFE_GIT_PREFIX } from '../src/git/probe.mjs';
 import { removeGitWorktree } from '../src/git/workspace-ops.mjs';
@@ -242,11 +244,8 @@ test('删除确认失败释放围栏：被挡住的重开原样重试成功，�
   assert.equal(probes, 1);
 });
 
-function lifecycleWorker(f, config) {
-  const child = spawn(process.execPath, [
-    fileURLToPath(new URL('../scripts/workspace-lifecycle-test-worker.mjs', import.meta.url)),
-    Buffer.from(JSON.stringify(config)).toString('base64url'),
-  ], { cwd: fileURLToPath(new URL('..', import.meta.url)), windowsHide: true,
+function trackedWorker(f, args) {
+  const child = spawn(process.execPath, args, { cwd: fileURLToPath(new URL('..', import.meta.url)), windowsHide: true,
     shell: false, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   const exit = new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
   f.children.push({ child, exit });
@@ -264,7 +263,14 @@ function lifecycleWorker(f, config) {
   return { child, exit, message };
 }
 
-async function reopenInFreshProcess(f) {
+function lifecycleWorker(f, config) {
+  return trackedWorker(f, [
+    fileURLToPath(new URL('../scripts/workspace-lifecycle-test-worker.mjs', import.meta.url)),
+    Buffer.from(JSON.stringify(config)).toString('base64url'),
+  ]);
+}
+
+async function reopenInFreshProcess(f, request = f.reopen) {
   // A separate, newly started process opens the same durable database. No PID or
   // in-memory executor state is forged, and the installed service is never used.
   const source = `
@@ -276,7 +282,7 @@ async function reopenInFreshProcess(f) {
     finally { db.close(); }
   `;
   const output = await execFileAsync(process.execPath, ['--input-type=module', '--eval', source,
-    Buffer.from(JSON.stringify({ dbPath: f.dbPath, request: f.reopen })).toString('base64url')], {
+    Buffer.from(JSON.stringify({ dbPath: f.dbPath, request })).toString('base64url')], {
     cwd: fileURLToPath(new URL('..', import.meta.url)), windowsHide: true, shell: false,
     encoding: 'utf8', timeout: PROCESS_BUDGET_MS, maxBuffer: 1024 * 1024,
   });
@@ -337,4 +343,88 @@ test('旧未决 journal 没有 reservation 也挡同一工作线；其他工作�
   assert.equal(noChange.ok, true, 'a no-op does not cross the lifecycle fence');
   assert.equal(noChange.changed, false);
   assert.deepEqual({ ...line(f) }, { status: 'closed', revision: 1 });
+});
+
+test('真实 journal 提交后进程终止：关闭须能取消正常邀请并解除未决删除死角', { timeout: 90_000 }, async (t) => {
+  const f = await fixture(t);
+  // Replace the historical invitation with a normal API-created invitation on
+  // an open line. This recovery scenario does not need an unusual persisted row.
+  f.db.prepare("DELETE FROM dispatch_grants WHERE id = 'invite-grant'").run();
+  f.db.prepare("DELETE FROM assignments WHERE id = 'invite'").run();
+  const opened = setWorkLineClosed(f.db, f.reopen);
+  assert.equal(opened.ok, true, JSON.stringify(opened));
+  assert.equal(opened.revision, 2);
+  const assigned = createAssignment(f.db, {
+    commandId: 'create-normal-invitation', assignmentId: 'invite', projectId: 'project',
+    spaceId: f.created.spaceId, agentId: 'Codex', taskId: 'waiting', scope: { mode: 'write' },
+  });
+  assert.equal(assigned.ok, true, JSON.stringify(assigned));
+  const issued = issueDispatchGrant(f.db, {
+    assignmentId: assigned.assignmentId, grantId: 'invite-grant', dispatchCode: 'isolated-recovery-fixture',
+  });
+  assert.equal(issued.ok, true, JSON.stringify(issued));
+  assert.deepEqual({ ...invitation(f.db) }, { status: 'pending', revision: 0 });
+  assert.equal(grant(f.db).state, 'active');
+
+  const source = `
+    import { openCockpitDatabase } from ${JSON.stringify(new URL('../src/core/database.mjs', import.meta.url).href)};
+    import { beginCommand } from ${JSON.stringify(new URL('../src/core/command-journal.mjs', import.meta.url).href)};
+    const config = JSON.parse(Buffer.from(process.argv[1], 'base64url').toString());
+    const db = openCockpitDatabase(config.dbPath);
+    beginCommand(db, { commandId: config.request.commandId, kind: 'workspace.remove', request: config.request });
+    process.send({ phase: 'journal-persisted' });
+    await new Promise(() => { setInterval(() => {}, 1000); });
+  `;
+  const crashing = trackedWorker(f, ['--input-type=module', '--eval', source,
+    Buffer.from(JSON.stringify({ dbPath: f.dbPath, request: f.request })).toString('base64url')]);
+  assert.deepEqual(await crashing.message, { phase: 'journal-persisted' });
+  crashing.child.kill('SIGKILL');
+  await crashing.exit;
+  assert.equal(journalState(f.db, f.request.commandId), 'received');
+  assert.equal(reservation(f.db), undefined, 'the executor died before reservation or active-work refusal');
+  assert.equal(existsSync(f.target), true);
+
+  const repositoryIdentity = f.db.prepare('SELECT repository_identity FROM worktrees WHERE id = ?')
+    .get(f.created.worktreeId).repository_identity;
+  const abandonRequest = {
+    commandId: 'abandon-interrupted-removal', blockedCommandId: f.request.commandId,
+    repositoryIdentity, userConfirmed: true,
+  };
+  const blockedAbandon = abandonWorkspaceLifecycle(f.db, abandonRequest);
+  assert.equal(blockedAbandon.ok, false, JSON.stringify(blockedAbandon));
+  assert.equal(blockedAbandon.code, 'SPACE_HAS_ACTIVE_WORK', JSON.stringify(blockedAbandon));
+  assert.equal(blockedAbandon.retryable, true);
+  assert.equal(journalState(f.db, abandonRequest.commandId), 'received');
+
+  const closeRequest = { ...f.reopen, commandId: 'close-stuck-line', expectedRevision: 2, closed: true };
+  const closed = await reopenInFreshProcess(f, closeRequest);
+  assert.equal(closed.ok, true, JSON.stringify(closed));
+  assert.equal(closed.changed, true);
+  assert.equal(closed.revision, 3);
+  assert.deepEqual({ ...line(f) }, { status: 'closed', revision: 3 });
+  assert.deepEqual({ ...invitation(f.db) }, { status: 'cancelled', revision: 1 });
+  assert.equal(grant(f.db).state, 'revoked');
+  assert.ok(grant(f.db).revoked_at);
+  assert.deepEqual(await reopenInFreshProcess(f, closeRequest), closed, 'close replays without cancelling twice');
+
+  const abandoned = abandonWorkspaceLifecycle(f.db, abandonRequest);
+  assert.equal(abandoned.ok, true, JSON.stringify(abandoned));
+  assert.equal(abandoned.fenceSource, 'journal');
+  assert.deepEqual(abandoned.remainingPendingCommandIds, []);
+  assert.equal(journalState(f.db, f.request.commandId), 'failed');
+  assert.equal(journalState(f.db, abandonRequest.commandId), 'committed');
+  assert.deepEqual(abandonWorkspaceLifecycle(f.db, abandonRequest), abandoned);
+  const originalReplay = await removeDevelopmentWorkspace(f.db, f.request, {
+    probe: () => { throw new Error('abandoned command is terminal'); },
+    removeGitWorktree: () => { throw new Error('abandoned command must not mutate'); },
+  });
+  assert.equal(originalReplay.ok, false);
+  assert.equal(originalReplay.code, 'WORKSPACE_LIFECYCLE_ABANDONED');
+  assert.equal(originalReplay.outcome, 'confirmed_failure');
+  assert.equal(originalReplay.retryable, false);
+  assert.equal(existsSync(f.target), true, 'closing and abandoning alter records only');
+  assert.equal((await probeGitWorktree(f.target)).after.branch, f.created.branch);
+  assert.equal(invitation(f.db).revision, 1, 'terminal replays must not cancel twice');
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.equal(f.db.prepare('PRAGMA foreign_key_check').all().length, 0);
 });
