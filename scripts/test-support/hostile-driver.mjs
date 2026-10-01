@@ -2,36 +2,43 @@
 // repository-owned driver" by checking that a marker file was NOT created.
 //
 // Why this exists. Git reports success even when the driver cannot do its work:
-// measured on this machine (git 2.50.0.windows.2, Node 24.15) a repository with
-// `filter.evil.clean = <missing binary>; printf x` makes `git status` exit 0 and
-// print an ordinary `M file.txt` record while the marker is never created. So an
-// absence assertion is satisfied both by "the product refused before Git ran" and
-// by "this host cannot produce the marker" — the second answer proves nothing.
+// measured on this machine (git 2.50.0.windows.2, Node 24.15), a repository whose
+// `filter.evil.clean` is a chained body that cannot write its marker still makes
+// `git status` exit 0 and print an ordinary `M file.txt` record. So an absence
+// assertion is satisfied both by "the product refused before Git ran" and by
+// "this host cannot produce the marker" — and the second answer proves nothing.
 // A driver body must therefore be proven capable before anything leans on it.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-// One command, the absolute interpreter path, and forward slashes.
-//
-// * A single command means the driver's own exit status is what Git sees; the
-//   `cmd1; cmd2` shape reports cmd2's status and hides a failed marker write.
-// * `process.execPath` removes the dependence on a separate binary being
-//   reachable from the shell Git spawns: the `touch "<backslash path>"` body
-//   this repository shipped failed to write its marker in 5 of 40 fixture
-//   builds here (artifacts/probe-control.log), which is the same rate as the
-//   intermittent CI failure it caused.
-// * Forward slashes stay literal inside the shell's double quotes; the shipped
-//   body relied on a Windows path with backslashes surviving that shell.
+// sh treats a single-quoted argument as literal, so only a `'` needs escaping;
+// double quotes would let `$` and backticks expand inside a profile path.
+function shellSingleQuote(value) {
+  return `'${String(value).split("'").join(`'\\''`)}'`;
+}
+
+/**
+ * A driver body that stays correct for hostile marker paths.
+ *
+ * The interpreter is addressed absolutely (`process.execPath`) rather than as
+ * `node`, so the proof does not depend on what happens to be first on PATH. The
+ * marker path is carried base64-encoded: measured on this machine, the previous
+ * shape — the path spliced into a single-quoted JavaScript literal inside a
+ * double-quoted shell argument — failed silently on a temp path containing an
+ * apostrophe, dollar sign and backtick (`git add` still succeeded, no marker was
+ * written), which is the same masking this file exists to prevent.
+ */
 export function hostileDriverBody(markerPath) {
   if (typeof markerPath !== 'string' || markerPath.length === 0) {
     throw new Error('hostileDriverBody requires the marker path');
   }
-  const target = markerPath.split(path.sep).join('/');
-  return `"${process.execPath}" -e "require('fs').writeFileSync('${target}','pwned')"`;
+  const encoded = Buffer.from(markerPath, 'utf8').toString('base64');
+  return `${shellSingleQuote(process.execPath)} -e `
+    + `"require('fs').writeFileSync(Buffer.from('${encoded}','base64').toString(),'pwned')"`;
 }
 
-function git(cwd, args) {
+export function git(cwd, args) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
@@ -40,7 +47,8 @@ function git(cwd, args) {
   });
 }
 
-function initRepo(dir) {
+/** A repository with an identity set locally, so ambient git config is not needed. */
+export function initFixtureRepo(dir) {
   mkdirSync(dir, { recursive: true });
   git(dir, ['init', '-q', '-b', 'main']);
   git(dir, ['config', 'user.email', 'driver-control@example.invalid']);
@@ -48,12 +56,10 @@ function initRepo(dir) {
   return dir;
 }
 
-function controlFailure(mode, marker, stderr) {
-  const detail = String(stderr ?? '').split(/\r?\n/).filter(Boolean).slice(0, 2).join(' / ');
+function controlFailure(claim) {
   const error = new Error(
-    `hostile-driver control (${mode}): the marker was not created at ${marker}`
-    + `${detail ? ` — git said: ${detail}` : ''}.`
-    + ' Every "the filter must not have run" assertion that leans on this body would'
+    `hostile-driver control: ${claim}.`
+    + ' Every "the filter must not have run" assertion that leans on this fixture would'
     + ' now pass whether or not the product refused, so the fixture cannot prove'
     + ' anything on this host and refuses to report a pass.',
   );
@@ -61,56 +67,67 @@ function controlFailure(mode, marker, stderr) {
   return error;
 }
 
+export function assertDriverMarkerProduced(marker, mode = 'clean') {
+  if (!existsSync(marker)) {
+    throw controlFailure(`${mode} driver did not create its marker at ${marker}`);
+  }
+  return marker;
+}
+
 /**
- * Ask Git, without running anything, whether a path in this repository really
- * resolves to the named driver. `filter.evil.clean = <body>` on its own is inert:
- * no command runs until an attribute source binds `filter=evil` to a path, so a
- * fixture that sets only the config is decorating itself with a driver that Git
- * will never invoke.
+ * Ask Git, without running anything, which driver name a path resolves to, and
+ * require that exact name.
+ *
+ * `filter.evil.clean = <body>` alone is inert: no command runs until an attribute
+ * source binds `filter=evil` to a path. Comparing the answer by prefix would let
+ * a repository bound to a *different, longer* driver name (measured:
+ * `file.txt: filter: evil2` satisfies `includes('filter: evil')`) pass the very
+ * control that exists to rule out vacuity.
  */
 export function assertDriverAttributeBound(repo, targetPath, expectedDriver) {
-  const report = execFileSync('git', ['check-attr', 'filter', '--', targetPath], {
-    cwd: repo,
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  if (!report.includes(`filter: ${expectedDriver}`)) {
-    const error = new Error(
-      `hostile-driver control: ${targetPath} does not resolve to filter=${expectedDriver}`
-      + ` (git said ${report.trim() || 'nothing'}). The driver body in this fixture can`
-      + ' never run, so any "the filter must not have run" assertion about it is vacuous.',
+  const report = git(repo, ['check-attr', 'filter', '--', targetPath]);
+  const line = report.split(/\r?\n/)
+    .find((entry) => entry.startsWith(`${targetPath}: filter:`));
+  const resolved = line ? line.slice(line.indexOf('filter:') + 'filter:'.length).trim() : undefined;
+  if (resolved !== expectedDriver) {
+    throw controlFailure(
+      `${targetPath} resolves to filter=${resolved ?? '<unset>'} in this repository, not filter=${expectedDriver}`,
     );
-    error.code = 'HOSTILE_DRIVER_CONTROL_FAILED';
-    throw error;
   }
-  return report;
+  return resolved;
 }
 
-// A new file under an active clean attribute cannot be hashed without running
-// the filter, so this exercises the body in the direction the guards refuse.
-// `bodyFor` exists so a test can hand the control a body that is known not to
-// write and check that the control notices; product-shaped callers omit it.
-export function assertCleanDriverWrites(base, { bodyFor = hostileDriverBody } = {}) {
-  const repo = initRepo(path.join(base, 'clean-driver-proof'));
-  const marker = path.join(base, 'clean-driver-proof-marker.txt');
+/**
+ * Run the repository's own clean driver through the one trigger Git cannot skip:
+ * hashing a brand-new file for `git add` has to pass it through the clean filter
+ * to compute the blob at all. Whether a read-only `git status` re-cleans is a stat
+ * cache decision and is measurably unreliable, so nothing in this family asserts
+ * that.
+ *
+ * The staged control file is untracked before and after, so the repository the
+ * product is shown is the repository the fixture described.
+ */
+export function assertCleanDriverRunsHere(repo, marker, { controlFile = 'hostile-driver-control.txt' } = {}) {
+  writeFileSync(path.join(repo, controlFile), 'control\n');
+  rmSync(marker, { force: true });
   try {
-    writeFileSync(path.join(repo, '.gitattributes'), '*.proof filter=proof\n');
-    git(repo, ['add', '.gitattributes']);
-    git(repo, ['commit', '-qm', 'attributes']);
-    git(repo, ['config', '--local', 'filter.proof.clean', bodyFor(marker)]);
-    writeFileSync(path.join(repo, 'tracked.proof'), 'content\n');
-    git(repo, ['add', 'tracked.proof']);
-    if (!existsSync(marker)) throw controlFailure('clean', marker, '');
+    git(repo, ['add', '--', controlFile]);
+    assertDriverMarkerProduced(marker, 'clean');
   } finally {
-    rmSync(marker, { force: true });
-    rmSync(path.join(base, 'clean-driver-proof'), { recursive: true, force: true });
+    // Cleanup is allowed to fail without replacing the control's own error, but
+    // it must not hide a leaked directory: Windows keeps recently spawned filter
+    // children holding handles for a moment, hence the retries.
+    try {
+      git(repo, ['reset', '-q', '--', controlFile]);
+    } catch {}
+    rmSync(path.join(repo, controlFile), { force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(marker, { force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
-// A body shaped the way this file's fixtures used to be shaped: the marker step
-// is one command in a chain, so the shell reports the last command's status and
-// Git never learns the write failed. Used only by the control's own test.
+// A body shaped the way this repository's fixtures used to be shaped: the marker
+// step is one command in a chain, so the shell reports the last command's status
+// and Git never learns the write failed. Used only by the control's own test.
 export function maskedDriverBody(markerPath) {
-  const quoted = process.platform === 'win32' ? `"${markerPath}"` : `'${markerPath}'`;
-  return `this-driver-body-does-not-exist ${quoted}; printf x`;
+  return `this-driver-body-does-not-exist ${shellSingleQuote(markerPath)}; printf x`;
 }

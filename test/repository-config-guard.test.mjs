@@ -11,7 +11,7 @@ import { checkUnsupportedFeatures } from '../src/git/delivery-ops.mjs';
 import { createGitWorktree, generateStableBranchName } from '../src/git/workspace-ops.mjs';
 import { assertRepositoryAllowed, findHostileRepositoryConfiguration } from '../src/git/repository-policy.mjs';
 import {
-  assertCleanDriverWrites,
+  assertCleanDriverRunsHere,
   assertDriverAttributeBound,
   hostileDriverBody,
 } from '../scripts/test-support/hostile-driver.mjs';
@@ -144,11 +144,12 @@ test('submit push refuses remote.*.receivepack without running it', async (t) =>
     () => pushSubmissionBranch(repo, { remote: 'origin', branch: 'cockpit/work/guardsubmit01' }),
     (error) => error.code === 'UNSAFE_REMOTE_URL',
   );
-  // This marker is the secondary proof. The rejection above is the primary one:
-  // with the transport check removed the push does not fail as
-  // UNSAFE_REMOTE_URL, so the test cannot go green silently. No control runs
-  // the receivepack program here — doing so would mean pushing on purpose —
-  // which is why the assertion is written as corroboration, not as the gate.
+  // Measured on this machine: for a push to a local path Git spawns the
+  // `remote.<name>.receivepack` program, so this marker is a live detector, not
+  // decoration — with the value set to a marker-writing command the marker
+  // appeared and the push then failed for want of a real transport. The
+  // rejection above is still the primary proof, since a removed transport check
+  // would fail with a different code.
   assert.equal(existsSync(marker), false,
     'remote.*.receivepack is executed by git during transport and must be refused');
 });
@@ -163,6 +164,8 @@ test('integration push refuses remote.*.receivepack without running it', async (
     () => pushIntegratedMain(repo, { remote: 'origin', branch: 'cockpit/work/guardinteg001' }),
     (error) => error.code === 'UNSAFE_REMOTE_URL',
   );
+  // Same detector as the submission twin above: this push path spawns the
+  // repository's receivepack program too.
   assert.equal(existsSync(marker), false,
     'integration push must apply the same repository policy as submission');
 });
@@ -172,10 +175,10 @@ test('integration fast-forward refuses a repo-local smudge filter', async (t) =>
   const marker = path.join(base, 'pwned-ff.txt');
   // The merge target has to move the working tree. `merge --ff-only <HEAD>`
   // answers "Already up to date.", writes no file, and therefore cannot run a
-  // checkout-direction driver even with this gate removed — measured: 0 of 25
-  // same-head merges produced the marker, 25 of 25 descendant merges did
-  // (artifacts/probe-ff.log). A fixture that merged HEAD made the assertion
-  // below pass no matter what the product did.
+  // checkout-direction driver even with this gate removed — measured on this
+  // machine: 0 of 25 same-head merges produced the marker, 25 of 25 descendant
+  // merges did. A fixture that merged HEAD made the assertion below pass no
+  // matter what the product did.
   gitSync(repo, ['checkout', '-qb', 'cockpit/work/ff-source']);
   writeFileSync(path.join(repo, 'README.md'), '# fixture moved\n');
   gitSync(repo, ['commit', '-qam', 'move']);
@@ -285,12 +288,15 @@ test('a driver in the worktree-scoped config is detected', async (t) => {
 });
 
 test('the guard runs before the first probe of a hostile main location', async (t) => {
-  const { base, repo } = createFixture(t, 'ugk-guard-before-probe-');
+  const { repo } = createFixture(t, 'ugk-guard-before-probe-');
   const marker = path.join(repo, 'pwned-by-probe.txt');
-  assertCleanDriverWrites(base);
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
   gitSync(repo, ['config', '--local', 'filter.evil.clean', markerCommand(marker)]);
+  // Both halves of the claim that the absence assertion below is supposed to
+  // support: this repository binds the driver to a tracked path, and this
+  // repository's own driver really produces its marker when Git has to run it.
   assertDriverAttributeBound(repo, 'README.md', 'evil');
+  assertCleanDriverRunsHere(repo, marker);
 
   // 探针本身运行 `git status`，足以触发 clean 过滤器：闸门必须更早。
   await assert.rejects(

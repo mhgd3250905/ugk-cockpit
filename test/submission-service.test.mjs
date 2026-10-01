@@ -16,7 +16,7 @@ import {
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
 import {
-  assertCleanDriverWrites,
+  assertCleanDriverRunsHere,
   assertDriverAttributeBound,
   hostileDriverBody,
 } from '../scripts/test-support/hostile-driver.mjs';
@@ -389,14 +389,15 @@ test('a hostile repository is refused before the first probe of the real submit 
   const marker = path.join(f.root, 'pwned-by-submit-probe.txt');
   writeFileSync(path.join(f.mainPath, '.git', 'info', 'attributes'), '* filter=evil\n');
   git(f.mainPath, ['config', '--local', 'filter.evil.clean', hostileDriverBody(marker)]);
-  // Two controls, and deliberately no third. Configured: the driver body can
-  // write when Git invokes it, and this repository really binds it to a tracked
-  // path. Not configured: whether a read-only `git status` re-cleans a tracked
-  // file is a Git stat-cache decision, measured unreliable here — asserting it
-  // is what made audit-2026-09-11 an intermittent red on main. Ordering is
-  // proven by the refusal itself plus the marker check below.
-  assertCleanDriverWrites(f.root);
+  // Two controls, and deliberately no third. Asserted: this repository binds the
+  // driver to a tracked path, and this repository's own body really writes its
+  // marker when Git has to run it. Not asserted: whether a read-only
+  // `git status` re-cleans a tracked file — that is a Git stat-cache decision,
+  // measured unreliable here, and claiming it is what made audit-2026-09-11 an
+  // intermittent red on main. Ordering rests on the refusal code plus the marker
+  // check below.
   assertDriverAttributeBound(f.mainPath, 'README.md', 'evil');
+  assertCleanDriverRunsHere(f.mainPath, marker);
 
   const result = await submitDevelopmentSpace(f.db, {
     commandId: 'submit-hostile-probe',

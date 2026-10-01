@@ -25,7 +25,7 @@ import {
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import {
-  assertCleanDriverWrites,
+  assertCleanDriverRunsHere,
   assertDriverAttributeBound,
   hostileDriverBody,
 } from '../scripts/test-support/hostile-driver.mjs';
@@ -60,18 +60,14 @@ async function post(service, pathname, body) {
 //
 // Whether Git runs a clean filter while it is only *reading* (status, or the
 // index refresh a commit performs) is a stat-cache decision, not a requirement:
-// measured here, the same hostile repository produced its sentinel in 38 of 40
-// such reads (artifacts/probe-flake.log, artifacts/fix-0911-run*.log). That is
-// what made this fixture an intermittent red on main, and it is why nothing in
-// this file asserts "this read ran the filter". Two things that are certain are
-// asserted instead:
-//   * the sentinel body can write when Git invokes it — proven through a
-//     trigger Git cannot skip (`git add` of a new file has to run the clean
-//     filter to compute the blob at all);
-//   * this repository really binds that body to the tracked file — asked of Git
-//     with `check-attr`, which reads attributes without executing anything.
-// The sentinel is deleted before returning: callers assert on absence AFTER the
-// operation under test.
+// measured on this machine, driving the real `probeGitWorktree` over this fixture
+// produced the sentinel in only 35 of 40 attempts. That is what made this file an
+// intermittent red on main, and it is why nothing here asserts "this read ran the
+// filter". Two things that are certain are asserted instead, both through the
+// shared helper: the sentinel body really runs in this repository when Git has no
+// choice but to invoke it, and this repository really binds that body to a tracked
+// path. The sentinel is deleted before returning: callers assert on absence AFTER
+// the operation under test.
 function createHostileRepo(parent, name, sentinelPath) {
   const repo = path.join(parent, name);
   mkdirSync(repo, { recursive: true });
@@ -86,14 +82,13 @@ function createHostileRepo(parent, name, sentinelPath) {
   execFileSync('git', ['add', '.gitattributes'], { cwd: repo });
   execFileSync('git', ['commit', '-qm', 'attr'], { cwd: repo });
   writeFileSync(path.join(repo, 'file.txt'), 'changed\n');
+  assertCleanDriverRunsHere(repo, sentinelPath);
   assertDriverAttributeBound(repo, 'file.txt', 'evil');
-  rmSync(sentinelPath, { force: true });
   return repo;
 }
 
 test('hostile repository: folder selection and registration reject BEFORE the first probe runs filters', async (t) => {
   const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-hostile-'));
-  assertCleanDriverWrites(container);
   const sentinel = path.join(container, 'sentinel-select.txt');
   const hostileRepo = createHostileRepo(container, 'hostile-select', sentinel);
   const cleanup = [];
@@ -152,17 +147,16 @@ test('hostile repository: folder selection and registration reject BEFORE the fi
 test('hostile repository: createDevelopmentWorkspace gates before its first probe', async (t) => {
   const container = mkdtempSync(path.join(fixtureTempRoot(), 'ugk-audit-create-'));
   t.after(() => rmSync(container, { recursive: true, force: true }));
-  assertCleanDriverWrites(container);
   const sentinel = path.join(container, 'sentinel-create.txt');
   const hostileRepo = createHostileRepo(container, 'hostile-create', sentinel);
 
   // Setup runs one probe only to register the project. Whether that read runs
-  // the clean filter is a Git stat-cache decision, not a guarantee: measured
-  // here, 5 of 40 probes of this exact repository produced no sentinel
-  // (artifacts/probe-flake.log). Nothing is asserted about it, because the
-  // ordering proof below is the injected probe seam, which answers the question
-  // every time, and the two controls above already established that this body
-  // can write and that this repository binds it.
+  // the clean filter is a Git stat-cache decision, not a guarantee: measured on
+  // this machine, 5 of 40 probes of this exact repository produced no sentinel.
+  // Nothing is asserted about it, because the ordering proof below is the
+  // injected probe seam, which answers the question every time, and
+  // createHostileRepo already proved this sentinel body runs in this repository
+  // when Git has no choice about it.
   const observation = await probeGitWorktree(hostileRepo);
   rmSync(sentinel, { force: true });
 

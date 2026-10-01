@@ -2,13 +2,13 @@
 //
 // The hostile-driver guards prove themselves by asserting a marker file was NOT
 // created. That only means something if the marker could have been created, and
-// Git does not say when it could not: these cases measure that, and then require
-// the control to notice. Without a control, "the product refused before Git ran
-// the repository's driver" and "this fixture's driver can never run" look the
-// same on the screen — which is how the family in audit-2026-09-11 and
-// repository-config-guard went green while proving nothing.
+// Git does not say when it could not: these cases measure that, then require the
+// control to notice. Without a control, "the product refused before Git ran the
+// repository's driver" and "this fixture's driver can never run" look the same on
+// the screen — which is how the family in audit-2026-09-11 and
+// repository-config-guard could go green while proving nothing, and how main's CI
+// became intermittently red on the one assertion that could still notice.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,9 +16,11 @@ import test from 'node:test';
 
 import { gitText } from '../src/git/probe.mjs';
 import {
-  assertCleanDriverWrites,
+  assertCleanDriverRunsHere,
   assertDriverAttributeBound,
+  git,
   hostileDriverBody,
+  initFixtureRepo,
   maskedDriverBody,
 } from '../scripts/test-support/hostile-driver.mjs';
 
@@ -29,39 +31,32 @@ function fixtureTempRoot() {
 
 function container(t, prefix) {
   const base = mkdtempSync(path.join(fixtureTempRoot(), prefix));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
+  t.after(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return base;
 }
 
-function git(cwd, args) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-}
-
-function initRepo(dir) {
-  mkdirSync(dir, { recursive: true });
-  git(dir, ['init', '-q', '-b', 'main']);
-  git(dir, ['config', 'user.email', 'control@example.invalid']);
-  git(dir, ['config', 'user.name', 'Control']);
-  return dir;
+// A repository that binds `filter=evil` to *.txt and points the driver at a
+// marker. `dirtyTrackedFile` is what the shipped fixture does; leaving the
+// tracked file unmodified would let this case pass on Git's attribute-change
+// re-clean alone and quietly make the assertion about a state nobody created.
+function hostileRepo(base, { body = hostileDriverBody, dirtyTrackedFile = true } = {}) {
+  const repo = initFixtureRepo(path.join(base, 'repo'));
+  const marker = path.join(base, 'sentinel.txt');
+  writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
+  git(repo, ['add', 'file.txt']);
+  git(repo, ['commit', '-qm', 'init']);
+  git(repo, ['config', '--local', 'filter.evil.clean', body(marker)]);
+  writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=evil\n');
+  git(repo, ['add', '.gitattributes']);
+  git(repo, ['commit', '-qm', 'attr']);
+  if (dirtyTrackedFile) writeFileSync(path.join(repo, 'file.txt'), 'changed\n');
+  rmSync(marker, { force: true });
+  return { repo, marker };
 }
 
 test('Git reports success through the product runner when a clean filter cannot write its marker', async (t) => {
   const base = container(t, 'ugk-driver-masked-');
-  const repo = initRepo(path.join(base, 'repo'));
-  const marker = path.join(base, 'never-written.txt');
-  writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
-  git(repo, ['add', 'file.txt']);
-  git(repo, ['commit', '-qm', 'init']);
-  git(repo, ['config', '--local', 'filter.evil.clean', maskedDriverBody(marker)]);
-  writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=evil\n');
-  git(repo, ['add', '.gitattributes']);
-  git(repo, ['commit', '-qm', 'attr']);
-  rmSync(marker, { force: true });
+  const { repo, marker } = hostileRepo(base, { body: maskedDriverBody });
 
   // The product's own command runner: same -c prefix, same stripped environment.
   const status = await gitText(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=normal']);
@@ -70,49 +65,73 @@ test('Git reports success through the product runner when a clean filter cannot 
     'a chained driver body hides its own failure, so Git never learns the marker was not written');
 });
 
-test('the driver control refuses a body whose marker step Git cannot see fail', async (t) => {
-  const base = container(t, 'ugk-driver-control-caught-');
+test('the control refuses a chained driver body in the very repository that uses it', async (t) => {
+  const base = container(t, 'ugk-driver-caught-');
+  const { repo, marker } = hostileRepo(base, { body: maskedDriverBody });
+  // Bidirectional: the violation is caught, and the message names the
+  // consequence rather than only the symptom.
   assert.throws(
-    () => assertCleanDriverWrites(base, { bodyFor: maskedDriverBody }),
+    () => assertCleanDriverRunsHere(repo, marker),
     (error) => error.code === 'HOSTILE_DRIVER_CONTROL_FAILED'
-      && /did not|was not created/.test(error.message),
+      && /did not create its marker/.test(error.message)
+      && /cannot prove[\s\S]*refuses to report a pass/.test(error.message),
   );
-  // The throw must name the consequence, not just the symptom: an operator
-  // reading it has to know the guard tests are now uninformative.
-  assert.throws(
-    () => assertCleanDriverWrites(base, { bodyFor: maskedDriverBody }),
-    /cannot prove[\s\S]*refuses to report a pass/,
-  );
+  // Cleanup must not leak the staged control file when the control throws.
+  assert.equal(existsSync(path.join(repo, 'hostile-driver-control.txt')), false,
+    'the control has to undo its own staging even when it fails');
 });
 
-test('the driver control accepts a body Git can run', async (t) => {
-  const base = container(t, 'ugk-driver-control-passes-');
-  assert.doesNotThrow(() => assertCleanDriverWrites(base));
-  // No residue: the control is meant to run inside somebody else's fixture.
-  assert.equal(existsSync(path.join(base, 'clean-driver-proof')), false,
-    'the control must clean up its throwaway repository');
-  assert.equal(existsSync(path.join(base, 'clean-driver-proof-marker.txt')), false);
+test('the control accepts a driver body Git can run, and leaves the repository as it found it', async (t) => {
+  const base = container(t, 'ugk-driver-passes-');
+  const { repo, marker } = hostileRepo(base);
+  const indexBefore = git(repo, ['ls-files', '--stage']);
+  assert.doesNotThrow(() => assertCleanDriverRunsHere(repo, marker));
+  assert.equal(git(repo, ['ls-files', '--stage']), indexBefore,
+    'the control must unstage its control file, so the repository the product sees is unchanged');
+  assert.equal(existsSync(path.join(repo, 'hostile-driver-control.txt')), false);
+  assert.equal(existsSync(marker), false, 'the control removes the marker it produced');
 });
 
-// A configured driver is not a reachable driver: git only runs it once an
+// A configured driver is not a reachable driver: Git only runs it once an
 // attribute source names it for a path. Fixtures that set `filter.evil.clean`
-// and no attribute have a marker that can never appear, which is the shape
+// with no attribute have a marker that can never appear — the shape
 // confirm-location.test.mjs and audit-2026-09-27-identity-retry.test.mjs shipped.
 test('the attribute control separates a bound driver from a configured one', async (t) => {
-  const base = container(t, 'ugk-driver-attribute-');
-  const repo = initRepo(path.join(base, 'repo'));
+  const base = container(t, 'ugk-driver-unbound-');
+  const repo = initFixtureRepo(path.join(base, 'repo'));
   writeFileSync(path.join(repo, 'README.md'), '# fixture\n');
   git(repo, ['add', 'README.md']);
   git(repo, ['commit', '-qm', 'fixture']);
-  git(repo, ['config', '--local', 'filter.evil.clean', hostileDriverBody(path.join(base, 'unbound.txt'))]);
+  git(repo, ['config', '--local', 'filter.evil.clean', hostileDriverBody(path.join(base, 'never.txt'))]);
 
   assert.throws(
     () => assertDriverAttributeBound(repo, 'README.md', 'evil'),
-    (error) => error.code === 'HOSTILE_DRIVER_CONTROL_FAILED',
+    (error) => error.code === 'HOSTILE_DRIVER_CONTROL_FAILED'
+      && /not filter=evil/.test(error.message),
   );
 
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
-  assert.match(assertDriverAttributeBound(repo, 'README.md', 'evil'), /filter: evil/);
+  assert.equal(assertDriverAttributeBound(repo, 'README.md', 'evil'), 'evil');
+});
+
+// The control's own comparison must not be a prefix match: measured, a repository
+// bound to `filter=evil2` satisfied `report.includes('filter: evil')`, so the
+// control that exists to rule out vacuity passed for a different driver.
+test('the attribute control does not accept a longer driver name as a match', async (t) => {
+  const base = container(t, 'ugk-driver-prefix-');
+  const repo = initFixtureRepo(path.join(base, 'repo'));
+  writeFileSync(path.join(repo, 'file.txt'), 'x\n');
+  git(repo, ['add', 'file.txt']);
+  git(repo, ['commit', '-qm', 'x']);
+  git(repo, ['config', '--local', 'filter.evil2.clean', ':']);
+  writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil2\n');
+
+  assert.throws(
+    () => assertDriverAttributeBound(repo, 'file.txt', 'evil'),
+    (error) => error.code === 'HOSTILE_DRIVER_CONTROL_FAILED'
+      && /filter=evil2/.test(error.message),
+  );
+  assert.equal(assertDriverAttributeBound(repo, 'file.txt', 'evil2'), 'evil2');
 });
 
 // The rule itself, so the next fixture cannot quietly reintroduce the shape that
@@ -122,9 +141,19 @@ test('a driver body is one command and never relies on a second binary', async (
   const marker = path.join(base, 'sub', 'dir', 'marker.txt');
   const body = hostileDriverBody(marker);
   assert.equal(body.split(';').length, 1, `chained body would mask its own failure: ${body}`);
-  assert.ok(body.includes(`"${process.execPath}"`),
-    'the interpreter must be addressed absolutely, not by whatever node is first on PATH');
-  assert.ok(body.includes(marker.split(path.sep).join('/')),
-    'the marker path must survive the shell Git spawns, which means forward slashes on Windows');
+  assert.ok(body.includes('base64'),
+    'the marker path must reach the interpreter without passing through shell quoting');
   assert.throws(() => hostileDriverBody(''), /requires the marker path/);
+});
+
+// Quoting is the failure mode, so quote it: a profile or temp path containing an
+// apostrophe, a dollar sign, a backtick or a space used to make the body fail to
+// write while the surrounding git command still reported success.
+test('a driver body survives a marker path that needs shell quoting', async (t) => {
+  const base = container(t, 'ugk-driver-quotes-');
+  const tricky = path.join(base, "o'brien $HOME", 'tick `y`', 'with space');
+  mkdirSync(tricky, { recursive: true });
+  const { repo, marker } = hostileRepo(tricky);
+  assert.equal(assertDriverAttributeBound(repo, 'file.txt', 'evil'), 'evil');
+  assert.doesNotThrow(() => assertCleanDriverRunsHere(repo, marker));
 });
