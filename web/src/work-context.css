@@ -22,8 +22,9 @@
 .work-context-fields { margin: 0; display: grid; gap: 18px; }
 .work-context-fields dt { margin-bottom: 5px; color: var(--wb-muted); font-size: 12px; }
 .work-context-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.85; }
-.work-context-dialog { max-height: calc(100dvh - 40px); overflow-y: auto; }
-.work-context-dialog [data-slot='dialog-body'] { overflow-y: auto; overscroll-behavior: contain; }
+.work-context-dialog { max-height: calc(100dvh - 40px); overflow: hidden; }
+.work-context-dialog [data-slot='dialog-content'] { max-height: calc(100dvh - 54px); }
+.work-context-dialog [data-slot='dialog-body'] { overflow-y: auto; overscroll-behavior: contain; padding: 26px 30px; }
 .work-context-caption { margin: 18px 0; color: var(--wb-muted); font-size: 12px; }
 .work-context-technical summary { color: var(--wb-muted); cursor: pointer; font-size: 12px; }
 .work-context-technical .work-context-fields { margin-top: 16px; }
@@ -36,3 +37,76 @@
 .manual-record-notice { flex-basis: 100%; min-width: 0; margin: 4px 0 0; overflow-wrap: anywhere; font-size: 12px; color: var(--wb-muted); }
 .detail-title-action-row:has(.manual-record-notice), .work-line-record-actions:has(.manual-record-notice) { flex-wrap: wrap; }
 .work-context-dialog [data-slot='dialog-title'], .manual-record-dialog [data-slot='dialog-title'] { overflow-wrap: anywhere; }
+
+/* Only the upper summary and its dialog use this reading layout. */
+.project-detail-content .work-context-summary {
+  padding: 22px 0;
+  gap: 12px;
+  border: 0;
+  border-top: 1px solid var(--wb-line);
+  border-bottom: 1px solid var(--wb-line);
+  border-radius: 0;
+  background: transparent;
+}
+.project-detail-content .work-context-summary:hover { background: transparent; border-color: var(--wb-line); }
+.project-detail-content .work-context-name { font-size: 14px; color: var(--wb-ink); font-weight: 600; }
+.project-detail-content .work-context-goal { font-size: 14px; line-height: 1.8; }
+.project-detail-content .work-context-facts { align-items: center; gap: 8px 16px; font-size: 12px; }
+.project-detail-content .work-context-facts .agent-platform-badge { font-size: 11px; }
+.work-context-dialog [data-slot='dialog-header'] { padding: 26px 30px 18px; padding-right: 70px; gap: 5px; }
+.work-context-dialog [data-slot='dialog-title'] { font-size: 25px; line-height: 1.4; letter-spacing: 0; }
+.work-context-dialog [data-slot='dialog-description'] { font-size: 14px; line-height: 1.65; color: var(--wb-muted); }
+.work-context-tabs { display: flex; flex-shrink: 0; gap: 28px; margin: 0 30px; border-bottom: 1px solid var(--wb-line); }
+.work-context-tabs [role='tab'] { position: relative; padding: 12px 0 15px; border: 0; border-radius: 0; background: transparent; color: var(--wb-muted); font-size: 14px; font-weight: 500; cursor: pointer; }
+.work-context-tabs [aria-selected='true'] { color: var(--wb-accent); font-weight: 600; }
+.work-context-tabs [aria-selected='true']::after { position: absolute; content: ''; height: 2px; inset: auto 0 -1px; background: var(--wb-accent); }
+.work-context-tabs [role='tab']:hover { color: var(--wb-ink); }
+.work-context-tabs [role='tab']:focus-visible, .work-context-overview-links button:focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 3px; }
+.work-context-panel[hidden] { display: none; }
+.work-context-panel { min-width: 0; outline-offset: -2px; }
+.work-context-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.work-context-section-heading h3 { margin: 0; color: var(--wb-ink); font-size: 19px; font-weight: 600; }
+.work-context-full-goal { margin: 0 0 26px; color: var(--wb-ink); font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-context-dialog .work-context-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 28px; }
+.work-context-dialog .work-context-fields > div:nth-child(3) { grid-column: auto; }
+.work-context-dialog .work-context-fields dt { font-size: 12px; }
+.work-context-dialog .work-context-fields dd { font-size: 14px; }
+.work-context-dialog .work-context-caption { margin: 20px 0; line-height: 1.7; font-size: 12px; }
+.work-context-overview-links { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--wb-line); }
+.work-context-overview-links button { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: transparent; color: var(--wb-accent); font-size: 13px; cursor: pointer; }
+.work-context-dialog .work-context-technical { padding: 18px 0 0; border-top: 1px solid var(--wb-line); }
+.work-context-dialog .work-context-technical summary { color: var(--wb-ink); font-size: 13px; }
+.work-context-dialog .work-context-footer { flex-shrink: 0; flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; margin: 0 30px; padding: 16px 0 20px; border-top: 1px solid var(--wb-line); }
+.work-context-footer p { margin: 0; font-size: 12px; line-height: 1.65; color: var(--wb-muted); }
+.work-context-footer button { min-width: 66px; font-size: 13px; }
+
+.work-context-dialog .conversation-control { border: 0; margin: 0; padding: 0; }
+.work-context-dialog .conversation-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.work-context-dialog .conversation-heading h3 { margin: 0; font-size: 19px; font-weight: 600; }
+.work-context-dialog .conversation-heading > button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 0; border: 0; background: transparent; color: var(--wb-muted); font-size: 12px; box-shadow: none; }
+.work-context-dialog .conversation-control > p { font-size: 13px; margin: 8px 0 18px; line-height: 1.75; }
+.work-context-dialog .conversation-chain { border: 0; border-top: 1px solid var(--wb-line); border-radius: 0; padding: 24px 0 0; margin-top: 24px; background: transparent; }
+.work-context-dialog .conversation-chain:first-of-type { padding-top: 18px; margin-top: 0; border-top: 0; }
+.work-context-dialog .conversation-session-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.work-context-dialog .conversation-session-heading .agent-platform-badge { padding: 0; border: 0; background: transparent; gap: 10px; color: var(--wb-ink); font-size: 18px; font-weight: 600; }
+.work-context-dialog .conversation-session-heading .agent-platform-badge img { width: 32px; height: 32px; border-radius: 6px; }
+.work-context-dialog .conversation-session-status { display: inline-flex; align-items: center; padding: 4px 9px; border-radius: 999px; background: var(--wb-raised); color: var(--wb-muted); font-size: 12px; }
+.work-context-dialog .conversation-task { margin: 14px 0 8px; font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.work-context-dialog .conversation-session-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 20px 0 0; }
+.work-context-dialog .conversation-session-facts dt { font-size: 12px; color: var(--wb-muted); }
+.work-context-dialog .conversation-session-facts dd { font-size: 14px; line-height: 1.7; }
+.work-context-dialog .conversation-handoff { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--wb-line); }
+.work-context-dialog .conversation-handoff h4 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+.work-context-dialog .conversation-handoff p { margin: 8px 0; font-size: 13px; color: var(--wb-muted); line-height: 1.75; }
+.work-context-dialog .conversation-handoff .conversation-control-actions { margin-top: 16px; }
+.work-context-dialog .conversation-control-actions > .conversation-transfer-primary { min-width: 240px; min-height: 44px; gap: 8px; padding: 11px 22px; border: 1px solid var(--wb-accent); background: var(--wb-accent); color: var(--primary-foreground, #fff); font-size: 15px; font-weight: 600; box-shadow: none; }
+.work-context-dialog .conversation-control-actions > .conversation-transfer-primary:hover { background: var(--wb-accent); border-color: var(--wb-accent); filter: brightness(.95); }
+.work-context-dialog .conversation-identities { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--wb-line); }
+.work-context-dialog .conversation-identities > summary { color: var(--wb-ink); font-size: 13px; cursor: pointer; }
+.work-context-dialog .conversation-identities dl { margin: 18px 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
+.work-context-dialog .conversation-identities dl > div:last-child { grid-column: 1 / -1; }
+.work-context-dialog .conversation-identities dt { font-size: 12px; }
+.work-context-dialog .conversation-identities dd { font-size: 13px; line-height: 1.75; }
+.work-context-dialog .conversation-history { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--wb-line); }
+.work-context-dialog .conversation-history > summary { font-size: 13px; color: var(--wb-ink); }
+.work-context-dialog .conversation-transfer-result { margin-top: 18px; padding: 14px; border: 1px solid var(--wb-line); border-radius: 6px; background: var(--wb-raised); }

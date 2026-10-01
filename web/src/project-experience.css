@@ -14,7 +14,11 @@ body { font-family: var(--font-sans); }
 .detail-title-group { flex: 1; min-width: 0; }
 .detail-title-group h2 { font-size: clamp(24px, 2.2vw, 28px); font-weight: 600; letter-spacing: 0; line-height: 1.4; }
 .detail-title-action-row { gap: 12px; }
-.detail-title-action-row h2 { margin-right: auto; }
+.detail-title-platform { display: flex; align-items: center; gap: 12px; min-width: 0; margin-right: auto; flex-wrap: wrap; }
+.detail-title-platform h2 { overflow-wrap: anywhere; }
+.detail-title-platform .agent-platform-badge { flex-shrink: 0; }
+.detail-header-actions { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+.detail-header-actions > button { gap: 7px; min-height: 36px; }
 .detail-kicker-row { margin-top: 8px; }
 .detail-status-badge { font-size: 12px; }
 .detail-title-group p { margin-top: 6px; font-size: 14px; line-height: 1.65; }
@@ -70,6 +74,7 @@ body { font-family: var(--font-sans); }
 .project-detail-content .workspace-context dd { font-size: 14px; }
 .project-more-actions { margin-left: 4px; position: relative; }
 .project-more-actions > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; font-size: 13px; padding: 8px 10px; border-radius: 6px; background: var(--wb-surface); }
+.project-more-actions > summary::before { display: none; }
 .project-more-actions > summary:focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 2px; }
 .project-more-actions > div { position: absolute; z-index: 20; top: 42px; right: 0; width: 200px; padding: 10px; background: var(--wb-raised); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: none; display: grid; gap: 8px; }
 @media (max-width: 700px) {
