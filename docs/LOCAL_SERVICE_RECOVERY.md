@@ -2,7 +2,7 @@
 
 ## alpha.64 合并与本机部署验收（2026-10-01）
 
-PR #29 经补修后以 `4df7194639bcd98a092849d22acb755ca4ff1608` 合并，本地主目录从 alpha.63 `e98eca7` 快进，重复进展拒绝及原有历史保留。实际源码树与通过完整 CI 的 `3ffb29e` 完全一致；两个 Windows 分片合计 874 项/867 通过/0 失败/7 平台跳过，快组及网页构建通过，详细边界见[阶段记录](PHASE1_VERTICAL_SLICE.md)。当前开发版本为 alpha.64，没有创建发布标签。
+PR #29 经补修后以 `4df7194639bcd98a092849d22acb755ca4ff1608` 合并，本地主目录从 alpha.63 `e98eca7` 快进，重复进展拒绝及原有历史保留。实际源码树与通过完整 CI 的 `3ffb29e` 完全一致；两个 Windows 分片合计 874 项/867 通过/0 失败/7 平台跳过，快组及网页构建通过，详细边界见[阶段记录](PHASE1_VERTICAL_SLICE.md)。该次部署时的开发版本为 alpha.64，没有创建发布标签（本机**运行版本至今仍是 alpha.64**；后续开发候选及其验收见[阶段记录](PHASE1_VERTICAL_SLICE.md)。）
 
 部署前使用 SQLite backup API 保存 `.data/service/backups/before-alpha64-deploy-2026-10-01T02-58-53-030Z.db`。源库与备份均为 schema 31、`integrity_check=ok`、外键错误 0、项目记录 12 条（11 个可见）。既有 `launch-cockpit.ps1 -RepoDirectory E:/AII/ugk-cockpit -DataDirectory E:/AII/ugk-cockpit/.data/service -TimeoutSeconds 180 -NoPause` 重新构建网页，核验停止旧 PID 10680（alpha.63），从本仓库入口隐藏启动 PID 49280，继续使用原 `.data/service`。启动器输出验收成功后，内层 PowerShell 已退出，但宿主包装 shell PID 43240 未返回；核实身份后仅终止该包装进程，未递归停止新服务。包装 shell 的停留原因未定位，不将这次操作记成外层命令正常退出。
 
