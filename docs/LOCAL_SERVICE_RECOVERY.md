@@ -1,5 +1,15 @@
 # 本机服务数据一致性与故障恢复
 
+## alpha.64 合并与本机部署验收（2026-10-01）
+
+PR #29 经补修后以 `4df7194639bcd98a092849d22acb755ca4ff1608` 合并，本地主目录从 alpha.63 `e98eca7` 快进，重复进展拒绝及原有历史保留。实际源码树与通过完整 CI 的 `3ffb29e` 完全一致；两个 Windows 分片合计 874 项/867 通过/0 失败/7 平台跳过，快组及网页构建通过，详细边界见[阶段记录](PHASE1_VERTICAL_SLICE.md)。当前开发版本为 alpha.64，没有创建发布标签。
+
+部署前使用 SQLite backup API 保存 `.data/service/backups/before-alpha64-deploy-2026-10-01T02-58-53-030Z.db`。源库与备份均为 schema 31、`integrity_check=ok`、外键错误 0、项目记录 12 条（11 个可见）。既有 `launch-cockpit.ps1 -RepoDirectory E:/AII/ugk-cockpit -DataDirectory E:/AII/ugk-cockpit/.data/service -TimeoutSeconds 180 -NoPause` 重新构建网页，核验停止旧 PID 10680（alpha.63），从本仓库入口隐藏启动 PID 49280，继续使用原 `.data/service`。启动器输出验收成功后，内层 PowerShell 已退出，但宿主包装 shell PID 43240 未返回；核实身份后仅终止该包装进程，未递归停止新服务。包装 shell 的停留原因未定位，不将这次操作记成外层命令正常退出。
+
+03:00 UTC 的 `/health` 确认 `0.1.0-alpha.64`；再次运行 `verify-service-data.mjs` 核对 11 个已有项目及全部详情通过。重启后 schema 仍为 31，完整性 `ok`、外键错误 0，12 个项目 ID 与部署前备份一致。新进程的命令行入口与数据目录均经核对；终止包装 shell 后健康复核仍通过。本轮未迁移 schema、替换数据库、重新 init、重新添加项目或更新宿主插件。
+
+既有 4 条位置身份警告继续保留，台账为 17 行 settled、4 行 retry，尝试次数从 8 到 9 随开库增加。当前只读核对：`E:\AII-Worktree`、`E:\AII\REVIEWS\review-ugk-cockpit` 不存在（ENOENT）；`E:\AII\REVIEWS\review-ugk-android`、`E:\AII\REVIEWS\review-ugk-cockpit-audit` 存在但为空、不是 Git 工作副本（Error）。下方历史记录曾统称「已删除旧路径」，应以本次区分后的现状为准。这些记录仍有历史关联，不能通过清库、移除项目或为路径新建 Git 仓库消除警告；11 个可见项目及详情不受本次警告影响。
+
 ## 重复进展拒绝的本机部署验收（2026-09-30）
 
 本地提交 `76c6eb4` 为同一工作会话的重复进展增加拒绝：新请求即使换了 `clientRequestId` 并使用最新 revision，只要摘要与该会话已记录的进展相同（旧格式使用 `note`），就返回 `PROGRESS_DUPLICATE_CONTENT`（409、`retryable: false`），说明可能误触发重复发送，并提醒没有新成果时停止调用、继续原任务。拒绝不新增进展或提高 revision；原请求原样重放仍保持幂等。定向测试 10/10 通过，`npm run test:quick` 145 通过、1 项按平台跳过。行为由独立临时夹具验证，未向真实工作会话发送测试进展。
