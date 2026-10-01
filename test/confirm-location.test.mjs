@@ -25,6 +25,7 @@ import { observeDeliverySource } from '../src/core/delivery-sources.mjs';
 import { FolderGrantStore } from '../src/core/folder-grants.mjs';
 import { startWriteRun, finishRun } from '../src/core/runs.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
+import { hostileDriverBody } from '../scripts/test-support/hostile-driver.mjs';
 
 // Windows 语义：SQLite/HTTP 资源必须先关闭再删除其所在临时目录，
 // 否则 rmSync 抛 EPERM 且 close 永不执行（进程挂死）。cleanup 数组按
@@ -434,7 +435,15 @@ test('schema v30 never probes a hostile repository and leaves its rows untouched
   t.after(runCleanupLifo(cleanup));
   const container = realTemp(cleanup, 'ugk-v30-hostile-');
   const repo = initGit(path.join(container, 'hostile'));
-  gitSync(repo, ['config', '--local', 'filter.evil.clean', 'touch /tmp/ugk-pwned']);
+  // The repository is hostile because its config names a driver, which is what
+  // the policy gate reads and refuses on. Nothing here asserts a side effect:
+  // this fixture has no tracked file and binds `filter=evil` to no path, so the
+  // driver could not run even if the gate were removed. The body stays inside
+  // the container and is one command, per scripts/test-support/hostile-driver.mjs
+  // — the previous `touch /tmp/ugk-pwned` was unreachable on Windows and would
+  // have written outside the fixture had it ever run.
+  gitSync(repo, ['config', '--local', 'filter.evil.clean',
+    hostileDriverBody(path.join(container, 'never-pwned-by-v30-migration.txt'))]);
   const dbPath = path.join(container, 'data', 'cockpit.db');
   let db = openCockpitDatabase(dbPath);
   cleanup.push(() => { try { db.close(); } catch {} });

@@ -15,6 +15,11 @@ import {
 } from '../src/core/submission-service.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
+import {
+  assertCleanDriverWrites,
+  assertDriverAttributeBound,
+  hostileDriverBody,
+} from '../scripts/test-support/hostile-driver.mjs';
 
 // Fixture git must observe the same config contract as the product
 // (safeGitEnvironment strips system/global git config): a runner whose
@@ -383,8 +388,15 @@ test('a hostile repository is refused before the first probe of the real submit 
   const f = await fixture(t);
   const marker = path.join(f.root, 'pwned-by-submit-probe.txt');
   writeFileSync(path.join(f.mainPath, '.git', 'info', 'attributes'), '* filter=evil\n');
-  git(f.mainPath, ['config', '--local', 'filter.evil.clean',
-    `node -e "require('fs').writeFileSync('${marker.split(path.sep).join('/')}','pwned')"`]);
+  git(f.mainPath, ['config', '--local', 'filter.evil.clean', hostileDriverBody(marker)]);
+  // Two controls, and deliberately no third. Configured: the driver body can
+  // write when Git invokes it, and this repository really binds it to a tracked
+  // path. Not configured: whether a read-only `git status` re-cleans a tracked
+  // file is a Git stat-cache decision, measured unreliable here — asserting it
+  // is what made audit-2026-09-11 an intermittent red on main. Ordering is
+  // proven by the refusal itself plus the marker check below.
+  assertCleanDriverWrites(f.root);
+  assertDriverAttributeBound(f.mainPath, 'README.md', 'evil');
 
   const result = await submitDevelopmentSpace(f.db, {
     commandId: 'submit-hostile-probe',
