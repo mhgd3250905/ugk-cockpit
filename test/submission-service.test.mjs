@@ -381,8 +381,10 @@ test('a workspace without a write lease is not blocked by the ownership check', 
   assert.equal(retry.ok, true, JSON.stringify(retry));
 });
 
-// 真实调用链验证：探针里的 `git status` 足以触发 clean 过滤器，因此送审必须在
-// 探测之前就拒绝敌意仓库，而不是等到 rejectUnsupportedSubmitFeatures。
+// 真实调用链验证：敌意仓库必须在探测之前就被拒绝，而不是等到
+// rejectUnsupportedSubmitFeatures。探针的那次 `git status` 会不会重清洗跟踪文件
+// 属于 Git 的 stat 缓存判断（见 scripts/test-support/hostile-driver.mjs），所以
+// 本用例的能力证明走 `git add` 这个无法回避的触发点。
 // 开发空间是主项目的链接工作副本，二者共享 common 目录的配置与属性来源。
 test('a hostile repository is refused before the first probe of the real submit chain', async (t) => {
   const f = await fixture(t);

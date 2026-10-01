@@ -35,11 +35,11 @@ function container(t, prefix) {
   return base;
 }
 
-// A repository that binds `filter=evil` to *.txt and points the driver at a
-// marker. `dirtyTrackedFile` is what the shipped fixture does; leaving the
-// tracked file unmodified would let this case pass on Git's attribute-change
-// re-clean alone and quietly make the assertion about a state nobody created.
-function hostileRepo(base, { body = hostileDriverBody, dirtyTrackedFile = true } = {}) {
+// A repository that binds `filter=evil` to *.txt, points the driver at a marker,
+// and then leaves the tracked file modified — the state the shipped fixture
+// creates. Skipping that last step would let a case here pass on Git's
+// attribute-change re-clean alone, i.e. assert about a state nobody created.
+function hostileRepo(base, { body = hostileDriverBody } = {}) {
   const repo = initFixtureRepo(path.join(base, 'repo'));
   const marker = path.join(base, 'sentinel.txt');
   writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
@@ -49,7 +49,7 @@ function hostileRepo(base, { body = hostileDriverBody, dirtyTrackedFile = true }
   writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=evil\n');
   git(repo, ['add', '.gitattributes']);
   git(repo, ['commit', '-qm', 'attr']);
-  if (dirtyTrackedFile) writeFileSync(path.join(repo, 'file.txt'), 'changed\n');
+  writeFileSync(path.join(repo, 'file.txt'), 'changed\n');
   rmSync(marker, { force: true });
   return { repo, marker };
 }
@@ -68,6 +68,7 @@ test('Git reports success through the product runner when a clean filter cannot 
 test('the control refuses a chained driver body in the very repository that uses it', async (t) => {
   const base = container(t, 'ugk-driver-caught-');
   const { repo, marker } = hostileRepo(base, { body: maskedDriverBody });
+  const indexBefore = git(repo, ['ls-files', '--stage']);
   // Bidirectional: the violation is caught, and the message names the
   // consequence rather than only the symptom.
   assert.throws(
@@ -76,9 +77,12 @@ test('the control refuses a chained driver body in the very repository that uses
       && /did not create its marker/.test(error.message)
       && /cannot prove[\s\S]*refuses to report a pass/.test(error.message),
   );
-  // Cleanup must not leak the staged control file when the control throws.
+  // Cleanup runs even on the throwing branch: a leftover control file or staged
+  // entry would change the repository the product is then shown.
   assert.equal(existsSync(path.join(repo, 'hostile-driver-control.txt')), false,
-    'the control has to undo its own staging even when it fails');
+    'the control has to remove its control file even when it fails');
+  assert.equal(git(repo, ['ls-files', '--stage']), indexBefore,
+    'the control has to unstage its control file even when it fails');
 });
 
 test('the control accepts a driver body Git can run, and leaves the repository as it found it', async (t) => {
@@ -134,16 +138,47 @@ test('the attribute control does not accept a longer driver name as a match', as
   assert.equal(assertDriverAttributeBound(repo, 'file.txt', 'evil2'), 'evil2');
 });
 
-// The rule itself, so the next fixture cannot quietly reintroduce the shape that
-// failed to write its marker in 5 of 40 fixture builds on this machine.
-test('a driver body is one command and never relies on a second binary', async (t) => {
+// The rule that actually holds, pinned so the next fixture cannot quietly
+// reintroduce the shape that failed 5 of 40 builds on this machine: the body must
+// not depend on a second binary, and must not be a chain whose last command
+// fabricates output. A single command is *not* a safety net: measured, a lone
+// clean-filter command exiting 3 also leaves `git add` at exit 0, and Git only
+// reports `external filter ... failed` when `filter.<name>.required = true`
+// (that case is pinned below).
+test('a driver body relies on no second binary and on no trailing command', async (t) => {
   const base = container(t, 'ugk-driver-body-');
   const marker = path.join(base, 'sub', 'dir', 'marker.txt');
   const body = hostileDriverBody(marker);
-  assert.equal(body.split(';').length, 1, `chained body would mask its own failure: ${body}`);
+  assert.equal(body.split(';').length, 1, `chained body fabricates output: ${body}`);
   assert.ok(body.includes('base64'),
     'the marker path must reach the interpreter without passing through shell quoting');
+  assert.ok(body.startsWith(`'${process.execPath}'`),
+    `the interpreter must be addressed absolutely, not by whatever node is first on PATH: ${body}`);
   assert.throws(() => hostileDriverBody(''), /requires the marker path/);
+});
+
+// The other half of the same lesson: do not let anyone re-justify this family by
+// "Git will fail if the driver fails". It does not.
+test('Git ignores a failing clean filter unless the driver is marked required', async (t) => {
+  const base = container(t, 'ugk-driver-required-');
+  const repo = initFixtureRepo(path.join(base, 'repo'));
+  const body = `'${process.execPath}' -e "process.exit(3)"`;
+  git(repo, ['config', '--local', 'filter.e.clean', body]);
+  writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=e\n');
+  git(repo, ['add', '.gitattributes']);
+  git(repo, ['commit', '-qm', 'attributes']);
+  git(repo, ['config', '--local', 'filter.e.required', 'false']);
+  writeFileSync(path.join(repo, 'optional.txt'), 'one\n');
+  git(repo, ['add', '--', 'optional.txt']);
+  assert.match(git(repo, ['diff', '--cached', '--name-only']), /optional\.txt/,
+    'a non-required filter that exits non-zero must still let git add succeed');
+
+  git(repo, ['config', '--local', 'filter.e.required', 'true']);
+  writeFileSync(path.join(repo, 'mandatory.txt'), 'two\n');
+  assert.throws(
+    () => git(repo, ['add', '--', 'mandatory.txt']),
+    (error) => /external filter .* failed 3/.test(String(error.stderr ?? error.message)),
+  );
 });
 
 // Quoting is the failure mode, so quote it: a profile or temp path containing an

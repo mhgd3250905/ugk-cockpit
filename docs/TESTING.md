@@ -10,7 +10,7 @@ CI 先在快速 job 执行快组和实际 `npm run build:web`，成功后由两�
 
 TAP 输出保留测试子进程的退出码、信号和异常详情。遇到文件级 `test failed` 时先保留日志并检查这些字段；默认 spec 输出可能隐藏退出信息，单文件通过或换文件失败都不能证明根因已修复。已知验收结果及未解问题见[阶段记录](PHASE1_VERTICAL_SLICE.md#测试反馈提速与门禁文档收口2026-09-28pr-28无版本变更)。
 
-断言「Git 没有执行仓库自带的转换驱动」（靠标记文件不存在来证明闸门提前拒绝）的用例，必须先证明这条驱动在本机能产生该标记，否则被拒绝的形状与失效的夹具在结果上同形——Git 在驱动写不出结果时仍返回 0。共享夹具入口是 `scripts/test-support/hostile-driver.mjs`：驱动体只用 `hostileDriverBody`（单命令、绝对解释器路径、正斜杠路径），控制只用 `assertDriverMarkerProduced` / `assertCleanDriverWrites` / `assertDriverAttributeBound`，不再各文件复制一份。控制必须走 Git 无法回避的触发点（新文件入库、写出不同内容的检出/合并），不要用只读 `git status` 是否重清洗来当证据——那是 Git 的 stat 缓存启发式，实测不确定。写方向的操作请优先用「同仓库、同驱动、不受拦截直接跑一次，标记必须出现」的同流程对照。
+断言「Git 没有执行仓库自带的转换驱动」（靠标记文件不存在来证明闸门提前拒绝）的用例，必须先证明这条驱动在本机能产生该标记，否则被拒绝的形状与失效的夹具在结果上同形。实测：Git 对非 `required` 的过滤器**完全不报失败**——驱动体缺失、退出码非零、写不出标记，`git status` 与 `git add` 都仍返回 0；只有 `filter.<name>.required = true` 才会得到 `external filter ... failed`。因此能力证明不能靠退出码推断，也不要各文件再复制一份夹具构造：共享入口是 `scripts/test-support/hostile-driver.mjs`，驱动体只用 `hostileDriverBody`（绝对解释器路径 + base64 携带标记路径），控制只用 `assertCleanDriverRunsHere`（在被审仓库里用 `git add` 新文件这一 Git 无法回避的触发点跑它自己配置的驱动）与 `assertDriverAttributeBound`（`git check-attr` 取该路径解析出的驱动名并**全等**比较）。不要用只读 `git status` 是否重清洗来当证据——那是 Git 的 stat 缓存启发式，实测不确定。会写出文件的方向（`worktree add`、真实移动工作树的合并、`push` 时的 `remote.*.receivepack`）请优先用「同仓库、同驱动、不受拦截直接跑一次，标记必须出现」的同流程对照，它比通用能力证明更强。写方向的操作请优先用「同仓库、同驱动、不受拦截直接跑一次，标记必须出现」的同流程对照。
 
 纯文档收口按 `AGENTS.md` 运行快组，再检查受影响的本地链接、命令与事实引用。没有运行时代码、测试、依赖或构建配置变化时，不额外创建完整合并候选；完整测试与构建沿用明确绑定提交的已有证据，注明本次未重跑。修改测试编排、实现或发布候选时仍按前述完整门禁执行。
 
