@@ -50,3 +50,41 @@ test('transfer requests reuse a retained idempotent body and keep authorization 
   assert.match(panel, /error.impact/);
   assert.match(panel, /error.required_action/);
 });
+
+// The 确认新代码位置 button is the only remedy an operator has when a takeover is
+// refused with WORKTREE_IDENTITY_CHANGED. ProjectDetailContent is a module-level
+// component, so it cannot see App's local confirmProjectLocationFlow: referencing
+// it there compiles, renders, and then throws ReferenceError the moment the button
+// is clicked. The action therefore travels the same prop chain every sibling action
+// on that panel already uses.
+// The two "signature" slices must stop at the end of the destructured parameter list.
+// Slicing to the next `\n}` instead swallows the component body, whose forwarding JSX
+// also mentions the prop name — and then deleting the prop from the parameter list (the
+// exact bug this pins) still reads green.
+function destructuredParams(name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`component ${name} not found`);
+  const end = source.indexOf(') {', start);
+  return source.slice(start, end);
+}
+const detailPageSignature = destructuredParams('ProjectDetailPage');
+const detailContentSignature = destructuredParams('ProjectDetailContent');
+const detailContentBody = source.slice(
+  source.indexOf('function ProjectDetailContent('),
+  source.indexOf('function ConversationControlPanel('),
+);
+
+test('confirm-location action reaches the transfer chain through props, not App scope', () => {
+  assert.doesNotMatch(detailContentBody, /confirmProjectLocationFlow/,
+    'a module-level component must not reference App-local handlers');
+  assert.match(detailContentSignature, /\bonConfirmProjectLocation\b/,
+    'ProjectDetailContent must receive the action as a prop');
+  assert.match(detailPageSignature, /\bonConfirmProjectLocation\b/,
+    'ProjectDetailPage must forward the action prop');
+  assert.match(detailContentBody, /onConfirmLocation=\{\(\) => onConfirmProjectLocation\(project\)\}/,
+    'the panel must invoke the prop with the project being viewed');
+  assert.match(source, /<ProjectDetailPage[\s\S]*?onConfirmProjectLocation=\{\(projectToConfirm\) => confirmProjectLocationFlow\(projectToConfirm\)\}/,
+    'App must bind its local handler at the ProjectDetailPage call site');
+  assert.match(source, /<ProjectDetailContent[\s\S]*?onConfirmProjectLocation=\{onConfirmProjectLocation\}/,
+    'ProjectDetailPage must forward the prop to ProjectDetailContent');
+});

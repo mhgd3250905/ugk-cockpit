@@ -51,6 +51,7 @@ scoped MCP credential、connection handle、宿主 `_meta` 和 diagnosticId 由 
 ## 重试与不可用
 
 - 传输结果不确定时，用同一个 `clientRequestId` 重发完全相同的 payload；不要换 ID、改 revision 或再次执行 Git。
+- 若返回 `PROGRESS_DUPLICATE_CONTENT`，说明当前会话已记录过相同进展。检查是否误触发了重复发送；没有新完成的工作就停止调用并继续原任务，不换请求号、改 revision 或只改写措辞重试。拒绝不会新增进展或提高 revision。
 - 平台登记缺失、跳过或失败时，只报告平台进展未登记，不影响已成功 Git 或后续已授权 Git；不回滚、撤销 commit 或阻塞授权 push。
 - 若错误包含 `diagnosticId`，只在当前会话的故障说明中引用该标识；不要记录 token、handle、请求体、路径或异常原文。传输结果未知时沿用同一 `clientRequestId` 和 payload 重放。
 - MCP 不可用时明确提示安装/启用 `ugk-cockpit` 本地 MCP 后重试，不声称完成。

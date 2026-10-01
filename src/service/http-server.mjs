@@ -226,6 +226,11 @@ const PUBLIC_ERRORS = {
     status: 409, message: '进展记录与平台当前状态冲突。', impact: '代码没有被修改；本次进展没有入账。',
     requiredAction: '查询最新 revision 后用同一 clientRequestId 重试或放弃本次记录。',
   },
+  PROGRESS_DUPLICATE_CONTENT: {
+    status: 409, message: '当前 AI 工作会话已经记录过相同的进展内容。',
+    impact: '本次没有新增进展，revision 没有变化；Cockpit 没有修改代码。',
+    requiredAction: '请检查是否误触发了重复发送。不要换请求号或仅改写措辞重试；如果没有新完成的工作，请停止调用并继续原任务。',
+  },
   HANDOFF_REQUEST_CONFLICT: {
     status: 409, message: '交接请求与平台当前状态冲突。', impact: '代码没有被修改；本次交接没有生效。',
     requiredAction: '查询当前会话状态与 revision，再决定重试或取消交接。',
@@ -2698,19 +2703,63 @@ export async function createCockpitHttpServer({
   let closing;
   function close() {
     closing ??= (async () => {
-      await new Promise((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
+      const SHUTDOWN_GRACE_MS = 5_000;
+      let listenerError = null;
+      // Resolve instead of reject: `server.close` reports its error asynchronously
+      // while the teardown below is still awaiting, so a rejection would land with
+      // nothing attached and surface as an unhandledRejection. It is rethrown at the
+      // end instead, after the database has been closed.
+      const listenerClosed = new Promise((resolve) => {
+        server.close((error) => { if (error) listenerError = error; resolve(); });
         server.closeIdleConnections();
       });
+      // The folder dialog is awaited inside a request handler, so that handler's
+      // connection is exactly what keeps `server.close()` pending. Releasing it
+      // before waiting for the listener is the only order in which this teardown
+      // can ever run: after the await it deadlocked shutdown against the very
+      // request it exists to unstick, and the process stayed alive holding
+      // service.lock while the port was already refusing connections.
+      try {
+        if (folderPicker === selectFolder) await closeFolderPicker();
+        else if (typeof folderPicker?.close === 'function') await folderPicker.close();
+      } catch (error) {
+        // Tolerated, because a dialog that will not close must not stop the database
+        // from closing — but said out loud, or the hang below looks like nothing.
+        process.stderr.write(`[ugk-cockpit] shutdown: folder picker release failed: ${error?.code ?? error?.message ?? 'UNKNOWN'}\n`);
+      }
+      // A handler that never settles must not turn shutdown into an indefinite hang.
+      // After the grace period the remaining connections are forced closed; the
+      // handlers are still drained before the database closes, so a request that was
+      // merely slow still gets to finish its durable writes.
+      let graceTimer;
+      const settled = await Promise.race([
+        listenerClosed.then(() => true),
+        new Promise((resolve) => { graceTimer = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS); }),
+      ]);
+      clearTimeout(graceTimer);
+      if (!settled) {
+        process.stderr.write('[ugk-cockpit] shutdown: forcing remaining connections closed after the grace period\n');
+        server.closeAllConnections();
+      }
+      await listenerClosed;
       // Disconnected clients can leave an asynchronous write handler running.
-      // Keep the database open until these handlers have finished as well.
-      await Promise.allSettled([...activeRequests]);
-      if (folderPicker === selectFolder) {
-        try { await closeFolderPicker(); } catch {}
-      } else if (typeof folderPicker?.close === 'function') {
-        try { await folderPicker.close(); } catch {}
+      // Keep the database open until these handlers have finished as well — but only
+      // up to a bounded wait, because a handler that never settles would otherwise
+      // leave the process alive holding service.lock with the port already gone. The
+      // command journal and the workspace lifecycle fence are what make an
+      // interrupted operation recoverable; this must not pretend a drain completed.
+      const handlers = [...activeRequests];
+      let drainTimer;
+      const drained = await Promise.race([
+        Promise.allSettled(handlers).then(() => true),
+        new Promise((resolve) => { drainTimer = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS); }),
+      ]);
+      clearTimeout(drainTimer);
+      if (!drained) {
+        process.stderr.write(`[ugk-cockpit] shutdown: ${activeRequests.size} request handler(s) still running after the grace period; closing the database anyway\n`);
       }
       db.close();
+      if (listenerError) throw listenerError;
     })();
     return closing;
   }
@@ -4983,7 +5032,11 @@ export async function createCockpitHttpServer({
         const result = recordProgress(db, { ...body, ...gitEvidence });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
-          extra: { session_id: body.sessionId, revision: result.revision ?? null },
+          extra: {
+            session_id: body.sessionId,
+            revision: result.revision ?? null,
+            ...(result.code === 'PROGRESS_DUPLICATE_CONTENT' ? { retryable: false } : {}),
+          },
         });
         return;
       }

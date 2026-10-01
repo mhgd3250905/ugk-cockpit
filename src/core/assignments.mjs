@@ -10,6 +10,7 @@ import {
   parseCommandResponse,
   readCommand,
 } from './command-journal.mjs';
+import { PROGRESS_STATUSES } from './assignments-contract.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { checkWorkspaceWriteAdmission } from './workspace-lifecycle.mjs';
 
@@ -1225,6 +1226,26 @@ export function appendProgressEvent(db, request = {}, options = {}) {
         revision: assignment.revision,
         runRevision: run?.revision ?? null,
       });
+    }
+
+    if (PROGRESS_STATUSES.includes(status)) {
+      const content = summary ?? note.trim();
+      const duplicate = db.prepare(`
+        SELECT id FROM progress_events
+        WHERE assignment_id = ? AND session_id = ?
+          AND status IN ('working', 'in_progress')
+          AND COALESCE(summary, TRIM(note)) = ?
+        LIMIT 1
+      `).get(assignmentId, sessionId, content);
+      if (duplicate) {
+        return failCommand(db, commandId, {
+          ok: false,
+          code: 'PROGRESS_DUPLICATE_CONTENT',
+          assignmentId,
+          sessionId,
+          revision: assignment.revision,
+        });
+      }
     }
 
     const nextRevision = expectedRevision + 1;

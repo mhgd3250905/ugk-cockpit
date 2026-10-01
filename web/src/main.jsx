@@ -1865,6 +1865,7 @@ function App() {
             diagnostics={sessionDiagnostics?.projectId === activeDetailProjectId ? sessionDiagnostics : null}
             diagnosticsLoading={sessionDiagnosticsLoading}
             onEdit={(projectToEdit) => setEditingProject(projectToEdit)}
+            onConfirmProjectLocation={(projectToConfirm) => confirmProjectLocationFlow(projectToConfirm)}
           />
         ) : (
           <>
@@ -2120,7 +2121,7 @@ function ProjectCard({ project, onAction, onOpen }) {
   );
 }
 
-function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions, workspaceActionStorageError, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit }) {
+function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions, workspaceActionStorageError, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit, onConfirmProjectLocation }) {
   const titleRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     id: projectId,
@@ -2231,6 +2232,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             onLoadDiagnostics={onLoadDiagnostics}
             diagnostics={diagnostics}
             diagnosticsLoading={diagnosticsLoading}
+            onConfirmProjectLocation={onConfirmProjectLocation}
           />
         ) : (
           <DetailErrorState
@@ -2299,7 +2301,7 @@ function SubmitHelp() {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions = [], workspaceActionStorageError = null, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading }) {
+function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions = [], workspaceActionStorageError = null, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onConfirmProjectLocation }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const projectPendingWorkspaceActions = pendingWorkspaceActions.filter((item) => item.projectId === project.id);
   const [activeTab, setActiveTab] = useState('timeline');
@@ -2406,7 +2408,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                 key={focusedLaneKey || 'main'}
                 context={selectedContext}
                 closed={selectedLineState?.status === 'closed'}
-                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} onConfirmLocation={() => confirmProjectLocationFlow(project)} />}
+                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} onConfirmLocation={() => onConfirmProjectLocation(project)} />}
                 label={focusedLaneKey ? (timelineLanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选工作线') : '项目总览'}
                 overview={focusedLaneKey ? null : {
                   lineCount: timelineLanes.filter((lane) => ['development_space', 'delivery_source'].includes(lane.role)).length,

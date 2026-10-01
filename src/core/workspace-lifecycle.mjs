@@ -4,6 +4,23 @@ import { canonicalJson, beginCommand, parseCommandResponse } from './command-jou
 import { withImmediateTransaction } from './database.mjs';
 
 const ACTIVE_ASSIGNMENT_STATES = ['pending', 'accepted', 'active'];
+
+// One definition of the exception this product makes: on a *closed* work line an
+// invitation that was never accepted holds no session and no run, so it is not work
+// a workspace operation has to wait for. It is read by the removal gate, by the
+// durable fence checks in this module, and by the operator's abandon path — the
+// invitation itself is only retired when a removal actually commits, never on a
+// refused attempt. Bind it to the eligible project, or to NULL to keep every row.
+// Each query also rechecks the durable closed marker: an earlier observation must
+// not keep excluding invitations after the line has reopened.
+export const NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL =
+  `AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?
+    AND EXISTS (
+      SELECT 1 FROM work_line_states AS invitation_line
+      WHERE invitation_line.project_id = assignments.project_id
+        AND invitation_line.worktree_id = assignments.worktree_id
+        AND invitation_line.status = 'closed'
+    ))`;
 const RESERVATION_STATES = new Set(['executing', 'unknown']);
 
 function nowMillis(options = {}) {
@@ -210,7 +227,10 @@ function conflictFromActiveWork(worktreeId, lease, assignment) {
   return null;
 }
 
-function checkLifecycleTarget(db, request, { allowedStatuses = [] } = {}) {
+function checkLifecycleTarget(db, request, {
+  allowedStatuses = [],
+  ignoreNeverAcceptedInvitationsForProject = null,
+} = {}) {
   const project = db.prepare(`
     SELECT id, archived_at, archive_revision, status
     FROM projects WHERE id = ?
@@ -299,8 +319,10 @@ function checkLifecycleTarget(db, request, { allowedStatuses = [] } = {}) {
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
-  `).get(request.worktreeId, ...ACTIVE_ASSIGNMENT_STATES);
+  `).get(request.worktreeId, ...ACTIVE_ASSIGNMENT_STATES,
+    ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   const activeWork = conflictFromActiveWork(request.worktreeId, lease, assignment);
   if (activeWork) return activeWork;
 
@@ -398,7 +420,10 @@ export function reserveWorkspaceLifecycle(db, request = {}, options = {}) {
     const legacy = legacyFence(db, request);
     if (!legacy.ok) return legacy;
 
-    const target = checkLifecycleTarget(db, request, { allowedStatuses });
+    const target = checkLifecycleTarget(db, request, {
+      allowedStatuses,
+      ignoreNeverAcceptedInvitationsForProject: options.ignoreNeverAcceptedInvitationsForProject ?? null,
+    });
     if (!target.ok) return target;
 
     const epoch = Number(target.worktree.lifecycle_epoch ?? 0) + 1;
@@ -490,6 +515,7 @@ export function revalidateWorkspaceLifecycle(db, request = {}, options = {}) {
     if (!sameOwner(row, request)) return ownershipFailure(row, request);
     const target = checkLifecycleTarget(db, request, {
       allowedStatuses: request.allowedStatuses ?? [],
+      ignoreNeverAcceptedInvitationsForProject: options.ignoreNeverAcceptedInvitationsForProject ?? null,
     });
     if (!target.ok) {
       db.prepare(`
@@ -575,6 +601,43 @@ export function releaseWorkspaceLifecycleExecutor(db, request = {}, options = {}
     );
     return { ok: true, released: true };
   });
+}
+
+/**
+ * Reopening a manual work-line marker must not invalidate the closed-line
+ * exception during an unsettled workspace operation. Closing remains available
+ * to retire old invitations and recover an interrupted command. Call inside the
+ * reopening transaction so the fence check and state change are atomic.
+ * Unlike write admission, this only fences this worktree and imposes no archive
+ * or Git-observation requirements on a records-only action.
+ */
+export function checkWorkLineLifecycleAdmission(db, { worktreeId } = {}) {
+  const worktree = db.prepare('SELECT repository_identity FROM worktrees WHERE id = ?').get(worktreeId);
+  if (!worktree) return { ok: true };
+  const repositoryIdentity = worktree.repository_identity;
+  const reservation = readReservationRow(db, repositoryIdentity);
+  if (reservation?.worktree_id === worktreeId) return inProgress(reservation);
+
+  const legacy = readLegacyPendingCommands(db, { repositoryIdentity, worktreeId });
+  if (legacy.length > 1) {
+    return {
+      ok: false,
+      code: 'WORKSPACE_LIFECYCLE_AMBIGUOUS',
+      pendingCommands: legacy.map(({ commandId, operation, state }) => ({ commandId, operation, state })),
+      outcome: 'unknown',
+      state: 'received',
+      retryable: true,
+    };
+  }
+  if (legacy.length === 1) {
+    return inProgress({
+      command_id: legacy[0].commandId,
+      operation: legacy[0].operation,
+      state: legacy[0].state,
+      epoch: null,
+    });
+  }
+  return { ok: true };
 }
 
 /** Shared admission fence for every path that can acquire a write lease. */
@@ -732,13 +795,29 @@ function commitCommand(db, commandId, response, timestamp) {
   return response;
 }
 
-function activeWorkOnWorktree(db, worktreeId) {
+/**
+ * The project whose never-accepted invitations should stop counting as work for this
+ * worktree, or NULL when no exception applies. Fail-closed: without both a space and
+ * a worktree, or unless that work line is actually closed, nothing is excluded.
+ */
+function neverAcceptedInvitationScope(db, spaceId, worktreeId) {
+  if (!spaceId || !worktreeId) return null;
+  const space = db.prepare('SELECT project_id FROM development_spaces WHERE id = ?').get(spaceId);
+  if (!space) return null;
+  return db.prepare(
+    "SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'",
+  ).get(space.project_id, worktreeId) ? space.project_id : null;
+}
+
+function activeWorkOnWorktree(db, worktreeId, ignoreNeverAcceptedInvitationsForProject = null) {
   const lease = db.prepare('SELECT run_id FROM write_leases WHERE worktree_id = ?').get(worktreeId);
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN (${ACTIVE_ASSIGNMENT_STATES.map(() => '?').join(', ')})
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
-  `).get(worktreeId, ...ACTIVE_ASSIGNMENT_STATES);
+  `).get(worktreeId, ...ACTIVE_ASSIGNMENT_STATES,
+    ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   return conflictFromActiveWork(worktreeId, lease, assignment);
 }
 
@@ -1010,7 +1089,15 @@ export function abandonWorkspaceLifecycle(db, request = {}, options = {}) {
     const spaceId = row?.space_id ?? journalTarget?.spaceId ?? null;
 
     if (worktreeId) {
-      const activeWork = activeWorkOnWorktree(db, worktreeId);
+      // Abandon is the operator's only way out of a wedged fence. It must apply the
+      // same definition of "work" as the paths it is unwinding, or a closed work
+      // line's stale invitation walls off the escape hatch while the receipt tells
+      // the operator to go finish a handoff nobody was ever asked to accept.
+      const activeWork = activeWorkOnWorktree(
+        db,
+        worktreeId,
+        neverAcceptedInvitationScope(db, spaceId, worktreeId),
+      );
       if (activeWork) {
         return transient(activeWork.code, {
           worktreeId,

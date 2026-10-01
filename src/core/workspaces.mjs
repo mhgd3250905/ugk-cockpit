@@ -27,6 +27,7 @@ import {
   releaseWorkspaceLifecycle,
   releaseWorkspaceLifecycleExecutor,
   reserveWorkspaceLifecycle,
+  NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL,
 } from './workspace-lifecycle.mjs';
 import { EmptyFolderGrantStore } from './folder-grants.mjs';
 import {
@@ -679,7 +680,9 @@ function branchMatches(observedBranch, expectedBranch) {
   return observedBranch === expectedBranch || observedBranch === `refs/heads/${expectedBranch}`;
 }
 
-function readActiveWorkspaceWork(db, worktreeId) {
+function readActiveWorkspaceWork(db, worktreeId, {
+  ignoreNeverAcceptedInvitationsForProject = null,
+} = {}) {
   const lease = db.prepare(`
     SELECT write_leases.run_id AS run_id
     FROM write_leases
@@ -691,8 +694,9 @@ function readActiveWorkspaceWork(db, worktreeId) {
   const assignment = db.prepare(`
     SELECT id, status FROM assignments
     WHERE worktree_id = ? AND status IN ('pending', 'accepted', 'active')
+      ${NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL}
     ORDER BY updated_at DESC, id DESC LIMIT 1
-  `).get(worktreeId);
+  `).get(worktreeId, ignoreNeverAcceptedInvitationsForProject, ignoreNeverAcceptedInvitationsForProject);
   return assignment ? { kind: 'assignment', assignmentId: assignment.id, status: assignment.status } : null;
 }
 
@@ -976,6 +980,11 @@ function finalizeWorkspaceRemoval(db, {
           revision = ?, updated_at = ?, archived_at = ?
       WHERE id = ? AND revision = ?
     `).run(revision, timestamp, timestamp, spaceId, expectedRevision);
+
+    // This is the commit point: the removal is durable from here, so retiring the
+    // closed work line's never-accepted invitations happens in the same
+    // transaction as the archival and never on a refused attempt.
+    cancelClosedWorkLineInvitations(db, projectId, reservation.worktreeId);
 
     const space = readDevelopmentSpace(db, spaceId);
     const response = {
@@ -1321,14 +1330,29 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     };
     return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
-  withImmediateTransaction(db, () => cancelClosedWorkLineInvitations(db, request.projectId, space.worktreeId));
-  const activeWork = readActiveWorkspaceWork(db, space.worktreeId);
+  const closedLine = db.prepare("SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'")
+    .get(request.projectId, space.worktreeId);
+  // On a closed work line an invitation nobody ever accepted holds no session and
+  // no run, so it is not work that can block removal; it is retired when the
+  // removal commits (see finalizeWorkspaceRemoval). Reading that rule here rather
+  // than cancelling first is the point: cancelling before these gates let a later
+  // refusal — repository lock, identity drift, ignored-content confirmation, a Git
+  // failure — destroy the invitation while the receipt told the operator the
+  // operation had not run.
+  const activeWork = readActiveWorkspaceWork(db, space.worktreeId, {
+    ignoreNeverAcceptedInvitationsForProject: closedLine ? request.projectId : null,
+  });
   if (activeWork) {
-    const closed = db.prepare("SELECT 1 FROM work_line_states WHERE project_id = ? AND worktree_id = ? AND status = 'closed'")
-      .get(request.projectId, space.worktreeId);
-    const result = { ok: false, code: closed ? 'SPACE_CLOSED_HAS_ACTIVE_WORK' : 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
+    const result = { ok: false, code: closedLine ? 'SPACE_CLOSED_HAS_ACTIVE_WORK' : 'SPACE_HAS_ACTIVE_WORK', spaceId: space.spaceId, ...activeWork };
     return unresolvedReplay ? unknownWorkspaceResult(result) : failWorkspaceCommand(db, request.commandId, result);
   }
+  // The same read-side rule has to hold at the durable fence layers too, or the
+  // reservation would refuse the removal the gate above just allowed. It travels in
+  // the runtime options, never in the journaled request shape.
+  const lifecycleOptions = {
+    ...options,
+    ignoreNeverAcceptedInvitationsForProject: closedLine ? request.projectId : null,
+  };
 
   const lockHolder = request.commandId;
   const lock = acquireRepositoryLock(db, {
@@ -1368,7 +1392,7 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
   let finalized = false;
   try {
     const reservationBase = lifecycleRequest(project, space, request, 'remove');
-    const reserved = reserveWorkspaceLifecycle(db, reservationBase, options);
+    const reserved = reserveWorkspaceLifecycle(db, reservationBase, lifecycleOptions);
     if (!reserved.ok) {
       const blocked = failIfBlockedByOtherLifecycle(
         db,
@@ -1391,7 +1415,7 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
       : applyPreEffectLifecycleResult(db, request.commandId, result);
 
     const finish = (afterEffect = false) => {
-      const valid = revalidateWorkspaceLifecycle(db, reservation, options);
+      const valid = revalidateWorkspaceLifecycle(db, reservation, lifecycleOptions);
       if (!valid.ok) {
         return afterEffect || preserveReservation
           ? unknownWorkspaceResult({ ...valid, spaceId: space.spaceId })
@@ -1492,7 +1516,7 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
       });
     }
 
-    const preEffect = revalidateWorkspaceLifecycle(db, reservation, options);
+    const preEffect = revalidateWorkspaceLifecycle(db, reservation, lifecycleOptions);
     if (!preEffect.ok) return failOrUnknown(preEffect);
 
     try {
