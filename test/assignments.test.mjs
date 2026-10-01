@@ -295,6 +295,19 @@ test('structured progress records summary, details, and git evidence with idempo
   assert.equal(prog1.git.shortHead, 'abcdef1');
   assert.equal(prog1.git.coherence, 'coherent');
 
+  const duplicateSummary = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-duplicate-summary',
+    expectedRevision: 2,
+    status: 'in_progress',
+    summary: '  完成数据层设计与迁移  ',
+  });
+  assert.equal(duplicateSummary.ok, false);
+  assert.equal(duplicateSummary.code, 'PROGRESS_DUPLICATE_CONTENT');
+  assert.equal(duplicateSummary.revision, 2);
+  assert.equal(readSessionContext(db, accepted.sessionId).revision, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM progress_events WHERE session_id = ?').get(accepted.sessionId).count, 1);
+
   // 2. Idempotent replay of same request returns original event and same revision
   const replay1 = appendProgressEvent(db, {
     sessionId: accepted.sessionId,
@@ -339,6 +352,28 @@ test('structured progress records summary, details, and git evidence with idempo
   assert.equal(prog2.summary, null);
   assert.deepEqual(prog2.details, []);
   assert.equal(prog2.git, null);
+
+  const duplicateNote = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-duplicate-note',
+    expectedRevision: 3,
+    status: 'working',
+    note: ' Legacy note only progress event ',
+  });
+  assert.equal(duplicateNote.ok, false);
+  assert.equal(duplicateNote.code, 'PROGRESS_DUPLICATE_CONTENT');
+  assert.equal(readSessionContext(db, accepted.sessionId).revision, 3);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM progress_events WHERE session_id = ?').get(accepted.sessionId).count, 2);
+
+  const earlierSummary = appendProgressEvent(db, {
+    sessionId: accepted.sessionId,
+    clientRequestId: 'prog-req-earlier-summary',
+    expectedRevision: 3,
+    status: 'working',
+    summary: '完成数据层设计与迁移',
+  });
+  assert.equal(earlierSummary.code, 'PROGRESS_DUPLICATE_CONTENT');
+  assert.equal(readSessionContext(db, accepted.sessionId).revision, 3);
 
   // 5. Validation failures
   // Missing both summary and note

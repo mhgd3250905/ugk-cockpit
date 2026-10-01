@@ -226,6 +226,11 @@ const PUBLIC_ERRORS = {
     status: 409, message: '进展记录与平台当前状态冲突。', impact: '代码没有被修改；本次进展没有入账。',
     requiredAction: '查询最新 revision 后用同一 clientRequestId 重试或放弃本次记录。',
   },
+  PROGRESS_DUPLICATE_CONTENT: {
+    status: 409, message: '当前 AI 工作会话已经记录过相同的进展内容。',
+    impact: '本次没有新增进展，revision 没有变化；Cockpit 没有修改代码。',
+    requiredAction: '请检查是否误触发了重复发送。不要换请求号或仅改写措辞重试；如果没有新完成的工作，请停止调用并继续原任务。',
+  },
   HANDOFF_REQUEST_CONFLICT: {
     status: 409, message: '交接请求与平台当前状态冲突。', impact: '代码没有被修改；本次交接没有生效。',
     requiredAction: '查询当前会话状态与 revision，再决定重试或取消交接。',
@@ -5027,7 +5032,11 @@ export async function createCockpitHttpServer({
         const result = recordProgress(db, { ...body, ...gitEvidence });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
-          extra: { session_id: body.sessionId, revision: result.revision ?? null },
+          extra: {
+            session_id: body.sessionId,
+            revision: result.revision ?? null,
+            ...(result.code === 'PROGRESS_DUPLICATE_CONTENT' ? { retryable: false } : {}),
+          },
         });
         return;
       }

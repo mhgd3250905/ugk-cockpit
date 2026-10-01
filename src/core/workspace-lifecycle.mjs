@@ -10,11 +10,17 @@ const ACTIVE_ASSIGNMENT_STATES = ['pending', 'accepted', 'active'];
 // a workspace operation has to wait for. It is read by the removal gate, by the
 // durable fence checks in this module, and by the operator's abandon path — the
 // invitation itself is only retired when a removal actually commits, never on a
-// refused attempt. Bind it to the project whose closed line is in scope, or to NULL
-// to keep every row (SQL's `IS NOT NULL` yields 0, never NULL, so NULL can only
-// widen the result).
+// refused attempt. Bind it to the eligible project, or to NULL to keep every row.
+// Each query also rechecks the durable closed marker: an earlier observation must
+// not keep excluding invitations after the line has reopened.
 export const NEVER_ACCEPTED_INVITATION_EXCLUSION_SQL =
-  "AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?)";
+  `AND NOT (? IS NOT NULL AND status = 'pending' AND session_id IS NULL AND project_id = ?
+    AND EXISTS (
+      SELECT 1 FROM work_line_states AS invitation_line
+      WHERE invitation_line.project_id = assignments.project_id
+        AND invitation_line.worktree_id = assignments.worktree_id
+        AND invitation_line.status = 'closed'
+    ))`;
 const RESERVATION_STATES = new Set(['executing', 'unknown']);
 
 function nowMillis(options = {}) {
@@ -595,6 +601,42 @@ export function releaseWorkspaceLifecycleExecutor(db, request = {}, options = {}
     );
     return { ok: true, released: true };
   });
+}
+
+/**
+ * A manual work-line marker may change historical or archived records, but must
+ * not change the target of an unsettled workspace operation. Call inside the
+ * marker's write transaction so the fence check and state change are atomic.
+ * Unlike write admission, this only fences this worktree and imposes no archive
+ * or Git-observation requirements on a records-only action.
+ */
+export function checkWorkLineLifecycleAdmission(db, { worktreeId } = {}) {
+  const worktree = db.prepare('SELECT repository_identity FROM worktrees WHERE id = ?').get(worktreeId);
+  if (!worktree) return { ok: true };
+  const repositoryIdentity = worktree.repository_identity;
+  const reservation = readReservationRow(db, repositoryIdentity);
+  if (reservation?.worktree_id === worktreeId) return inProgress(reservation);
+
+  const legacy = readLegacyPendingCommands(db, { repositoryIdentity, worktreeId });
+  if (legacy.length > 1) {
+    return {
+      ok: false,
+      code: 'WORKSPACE_LIFECYCLE_AMBIGUOUS',
+      pendingCommands: legacy.map(({ commandId, operation, state }) => ({ commandId, operation, state })),
+      outcome: 'unknown',
+      state: 'received',
+      retryable: true,
+    };
+  }
+  if (legacy.length === 1) {
+    return inProgress({
+      command_id: legacy[0].commandId,
+      operation: legacy[0].operation,
+      state: legacy[0].state,
+      epoch: null,
+    });
+  }
+  return { ok: true };
 }
 
 /** Shared admission fence for every path that can acquire a write lease. */

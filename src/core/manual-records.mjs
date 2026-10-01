@@ -6,6 +6,7 @@ import {
   readCommand,
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
+import { checkWorkLineLifecycleAdmission } from './workspace-lifecycle.mjs';
 
 export const MANUAL_RECORD_ERROR_CODES = Object.freeze({
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
@@ -478,6 +479,19 @@ export function setWorkLineClosed(db, request = {}) {
         state,
       };
       return commitCommand(db, commandId, response, state.updatedAt ?? now());
+    }
+
+    const lifecycleAdmission = checkWorkLineLifecycleAdmission(db, { worktreeId });
+    if (!lifecycleAdmission.ok) {
+      // Keep this command received: the unchanged request can succeed once the
+      // lifecycle operation settles. A failed journal row could not be retried.
+      return {
+        ...lifecycleAdmission,
+        commandId,
+        blockedCommandId: lifecycleAdmission.commandId ?? null,
+        projectId,
+        worktreeId,
+      };
     }
 
     const timestamp = now();
