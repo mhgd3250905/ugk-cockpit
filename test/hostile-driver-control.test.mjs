@@ -135,7 +135,7 @@ test('the attribute control does not accept a longer driver name as a match', as
 });
 
 // The rule itself, so the next fixture cannot quietly reintroduce the shape that
-// failed 5 of 40 builds on this machine.
+// failed to write its marker in 5 of 40 fixture builds on this machine.
 test('a driver body is one command and never relies on a second binary', async (t) => {
   const base = container(t, 'ugk-driver-body-');
   const marker = path.join(base, 'sub', 'dir', 'marker.txt');

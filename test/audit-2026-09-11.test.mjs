@@ -61,7 +61,7 @@ async function post(service, pathname, body) {
 // Whether Git runs a clean filter while it is only *reading* (status, or the
 // index refresh a commit performs) is a stat-cache decision, not a requirement:
 // measured on this machine, driving the real `probeGitWorktree` over this fixture
-// produced the sentinel in only 35 of 40 attempts. That is what made this file an
+// produced the sentinel in only 74 of 80 attempts. That is what made this file an
 // intermittent red on main, and it is why nothing here asserts "this read ran the
 // filter". Two things that are certain are asserted instead, both through the
 // shared helper: the sentinel body really runs in this repository when Git has no
@@ -152,7 +152,7 @@ test('hostile repository: createDevelopmentWorkspace gates before its first prob
 
   // Setup runs one probe only to register the project. Whether that read runs
   // the clean filter is a Git stat-cache decision, not a guarantee: measured on
-  // this machine, 5 of 40 probes of this exact repository produced no sentinel.
+  // this machine, 6 of 80 probes of this exact repository produced no sentinel.
   // Nothing is asserted about it, because the ordering proof below is the
   // injected probe seam, which answers the question every time, and
   // createHostileRepo already proved this sentinel body runs in this repository
