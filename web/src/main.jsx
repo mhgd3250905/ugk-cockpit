@@ -61,6 +61,9 @@ import {
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
+import { WorkbenchIcon } from './icons.jsx';
+import { AgentPlatformBadge } from './agent-platform-badge.jsx';
+import { readProjectView, saveProjectView } from './project-view.mjs';
 import { SkillGuide } from './skill-guide.jsx';
 import { WorkContext } from './work-context.jsx';
 import { ManualRecordAction } from './manual-record-action.jsx';
@@ -536,29 +539,15 @@ function ProjectAvatar({ project, avatarUrl, size, className }) {
 }
 
 function SunIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M19.1 4.9l-1.5 1.5M6.4 17.6l-1.5 1.5" />
-    </svg>
-  );
+  return <WorkbenchIcon name="sun" />;
 }
 
 function MoonIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
-    </svg>
-  );
+  return <WorkbenchIcon name="moon" />;
 }
 
 function SystemIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="2" y="4" width="20" height="13" rx="2" />
-      <path d="M8 21h8M12 17v4" />
-    </svg>
-  );
+  return <WorkbenchIcon name="system" />;
 }
 
 function ThemeSwitch({ mode, onChange }) {
@@ -701,6 +690,8 @@ function workspaceActionPath(record) {
 
 function App() {
   const route = useAppRoute();
+  const [projectView, setProjectView] = useState(readProjectView);
+  useEffect(() => { saveProjectView(projectView); }, [projectView]);
   const [dashboard, setDashboard] = useState(null);
   const [isStale, setIsStale] = useState(false);
   const [selection, setSelection] = useState(null);
@@ -1870,9 +1861,15 @@ function App() {
         ) : (
           <>
             <header className="overview-heading">
-              <div><p className="page-eyebrow">我的项目</p><h1>项目工作台</h1></div>
-              {dashboard && <p className="overview-summary">{stats.total} 个项目 · {stats.attentionCount} 个待确认 · {stats.activeCount} 个会话接入或未交接</p>}
+              <div><h1>项目工作台</h1>{dashboard && <p className="overview-summary">{stats.total} 个项目{stats.attentionCount > 0 ? ` · ${stats.attentionCount} 个待确认` : ''}</p>}</div>
             </header>
+            <div className="overview-toolbar">
+              <span className="overview-toolbar-label">我的项目</span>
+              <div className="project-view-switch" role="group" aria-label="项目显示方式">
+                <button type="button" aria-pressed={projectView === 'cards'} onClick={() => setProjectView('cards')}><WorkbenchIcon name="grid" /><span>卡片</span></button>
+                <button type="button" aria-pressed={projectView === 'list'} onClick={() => setProjectView('list')}><WorkbenchIcon name="list" /><span>列表</span></button>
+              </div>
+            </div>
 
             {!dashboard ? (
               <LoadingState notice={notice} />
@@ -1880,7 +1877,7 @@ function App() {
               <EmptyState busy={busy} onChoose={() => chooseFolder()} />
             ) : (
               groups.length > 0 && (
-                <section className="projects-section" aria-label="项目列表">
+                <section className={`projects-section is-${projectView}`} aria-label="项目列表">
                   <div className="groups-container">
                     {groups.map((group) => (
                       <div key={group.key} className="status-group">
@@ -1893,6 +1890,7 @@ function App() {
                             <ProjectCard
                               key={project.id}
                               project={project}
+                              view={projectView}
                               onAction={handleProjectAction}
                               onOpen={openProjectDetail}
                             />
@@ -2044,7 +2042,7 @@ function EmptyState({ busy, onChoose }) {
   );
 }
 
-function ProjectCard({ project, onAction, onOpen }) {
+function ProjectCard({ project, view = 'cards', onAction, onOpen }) {
   const statusReason = getProjectStatusReason(project);
   const copy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const actionLabel = getActionLabel(statusReason);
@@ -2080,16 +2078,17 @@ function ProjectCard({ project, onAction, onOpen }) {
         type="button"
         className="card-open"
         onClick={() => onOpen(project)}
-        aria-label={`查看 ${project.name} 的运行详情`}
+        aria-label={`查看 ${project.name} 的项目详情`}
+        aria-describedby={`project-status-${project.id} project-platform-${project.id}`}
       >
         <div className="card-eyebrow">
-          <span className="card-status-badge">{copy.eyebrow}</span>
+          <span id={`project-status-${project.id}`} className="card-status-badge">{isDisabled ? actionLabel : copy.eyebrow}</span>
           <time className="card-time">{formatTime(confirmedAt)}</time>
         </div>
 
         <div className="card-name-row">
-          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={40} />
-          <h4 className="card-name">{project.name}</h4>
+          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={view === 'list' ? 36 : 40} />
+          <div className="card-title-line"><h4 className="card-name" title={project.name}>{project.name}</h4><AgentPlatformBadge agent={agent} id={`project-platform-${project.id}`} /></div>
         </div>
         {showStage && (
           <Badge variant="soft" size="sm" className="stat-neutral card-stage-badge">
@@ -2098,12 +2097,12 @@ function ProjectCard({ project, onAction, onOpen }) {
         )}
         <p className="card-what">{(progressSummary || copy.title).split(/\r?\n/)[0]}</p>
         {theme === 'attention' && <p className="card-impact">{copy.detail}</p>}
+        <WorkbenchIcon name="chevron" className="card-open-chevron" />
       </button>
 
       <footer className="card-foot">
-        <span className="card-agent">{agent ? `${agent}` : '暂无 AI 会话'}</span>
         {isDisabled ? (
-          <span className="read-only-action">{actionLabel}</span>
+          <button type="button" className="card-view-action" onClick={() => onOpen(project)}>打开项目<WorkbenchIcon name="arrow" size={16} /></button>
         ) : (
           <Button
             variant="soft"
@@ -2183,7 +2182,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
                     编辑项目
                   </Button>
                 )}
-                {state?.data && <details className="project-more-actions"><summary>更多操作 ···</summary><div>
+                {state?.data && <details className="project-more-actions"><summary>更多操作<WorkbenchIcon name="more" size={16} /></summary><div>
                   <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />
                   <RemoveProjectAction project={project} api={api} disabled={busy} onRemoved={async () => { onBack(); await onRecordsChanged(); }} />
                 </div></details>}
@@ -2572,9 +2571,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                                 重新开始
                               </Button>
                               <Button variant="soft" size="sm" className="workspace-remove-button space-delete-action" aria-label={`删除开发空间：${space.name}`} title="删除开发空间" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                  <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
-                                </svg>
+                                <WorkbenchIcon name="trash" />
                               </Button>
                             </>
                           )}
@@ -3350,7 +3347,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
           <button type="button" className="timeline-summary-toggle" aria-expanded={expanded}
             aria-controls={`timeline-content-${item.kind}-${item.id}`} onClick={onToggle}>
             <span className="timeline-summary-text">{item.summary || item.note || kind.label}</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+            <WorkbenchIcon name="chevron" />
           </button>
         </h4>
         <div className="timeline-expanded-content" id={`timeline-content-${item.kind}-${item.id}`} hidden={!expanded}>

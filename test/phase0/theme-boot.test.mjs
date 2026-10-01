@@ -145,7 +145,7 @@ test('theme boot applies stored light theme on boot', () => {
   assert.equal(env.document.documentElement.style.colorScheme, 'light');
   assert.equal(env.document.documentElement.classList.contains('light'), true);
   assert.equal(env.document.documentElement.classList.contains('dark'), false);
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 });
 
 test('theme boot applies stored dark theme on boot', () => {
@@ -168,7 +168,7 @@ test('theme boot resolves stored system mode with prefers-color-scheme', () => {
   runThemeBoot(envLight);
   assert.equal(envLight.document.documentElement.dataset.theme, 'light');
   assert.equal(envLight.document.documentElement.style.colorScheme, 'light');
-  assert.equal(envLight.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(envLight.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 });
 
 test('theme boot falls back to dark mode when stored value is invalid', () => {
@@ -199,7 +199,7 @@ test('__ugkSetTheme persists manual choice and updates DOM attributes and theme-
   assert.equal(env.storageMap.get('ugk-cockpit-theme'), 'light');
   assert.equal(env.document.documentElement.dataset.theme, 'light');
   assert.equal(env.document.documentElement.style.colorScheme, 'light');
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 
   env.window.__ugkSetTheme('dark');
   assert.equal(env.storageMap.get('ugk-cockpit-theme'), 'dark');
@@ -224,7 +224,7 @@ test('__ugkSetTheme handles storage write failure gracefully without throwing', 
   assert.doesNotThrow(() => env.window.__ugkSetTheme('light'));
   assert.equal(env.document.documentElement.dataset.theme, 'light');
   assert.equal(env.document.documentElement.style.colorScheme, 'light');
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 });
 
 test('system mode dynamically responds to prefers-color-scheme changes', () => {
@@ -232,7 +232,7 @@ test('system mode dynamically responds to prefers-color-scheme changes', () => {
   runThemeBoot(env);
 
   assert.equal(env.document.documentElement.dataset.theme, 'light');
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 
   env.triggerSystemChange(true);
   assert.equal(env.document.documentElement.dataset.theme, 'dark');
@@ -242,7 +242,7 @@ test('system mode dynamically responds to prefers-color-scheme changes', () => {
   env.triggerSystemChange(false);
   assert.equal(env.document.documentElement.dataset.theme, 'light');
   assert.equal(env.document.documentElement.style.colorScheme, 'light');
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 });
 
 test('manual mode does not change active theme when prefers-color-scheme changes', () => {
@@ -252,7 +252,7 @@ test('manual mode does not change active theme when prefers-color-scheme changes
   assert.equal(env.document.documentElement.dataset.theme, 'light');
   env.triggerSystemChange(true);
   assert.equal(env.document.documentElement.dataset.theme, 'light');
-  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#f4f5f7');
+  assert.equal(env.document.querySelector('meta[name="theme-color"]').content, '#fcfcfb');
 
   env.window.__ugkSetTheme('dark');
   assert.equal(env.document.documentElement.dataset.theme, 'dark');

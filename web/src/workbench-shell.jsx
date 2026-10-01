@@ -3,20 +3,7 @@ import { Button } from '@appica/ui-react/button';
 import { projectAvatarUrl } from './avatar-color.mjs';
 import './workbench-shell.css';
 import { ServiceStatus } from './service-status.jsx';
-
-function ShellIcon({ name, ...props }) {
-  const paths = {
-    search: <><circle cx="10.5" cy="10.5" r="6" /><path d="m15 15 4 4" /></>,
-    grid: <><rect x="3.5" y="3.5" width="6" height="6" rx="1.5" /><rect x="14.5" y="3.5" width="6" height="6" rx="1.5" /><rect x="3.5" y="14.5" width="6" height="6" rx="1.5" /><rect x="14.5" y="14.5" width="6" height="6" rx="1.5" /></>,
-    plus: <path d="M12 5v14M5 12h14" />,
-    refresh: <><path d="M19.5 9a8 8 0 0 0-13-3L3.5 9m0-5v5h5M4.5 15a8 8 0 0 0 13 3l3-3m0 5v-5h-5" /></>,
-    chevron: <path d="m9 5 7 7-7 7" />,
-    back: <path d="m11 5-7 7 7 7M4 12h16" />,
-    menu: <path d="M4 6h16M4 12h16M4 18h16" />,
-    book: <><path d="M12 5v15M3 4h5a4 4 0 0 1 4 2 4 4 0 0 1 4-2h5v15h-5a4 4 0 0 0-4 2 4 4 0 0 0-4-2H3z" /></>,
-  };
-  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name]}</svg>;
-}
+import { WorkbenchIcon as ShellIcon } from './icons.jsx';
 
 function ProjectAvatar({ project }) {
   const url = projectAvatarUrl(project);
@@ -117,20 +104,23 @@ export function WorkbenchShell({
               <span className={`wb-service-dot${isStale ? ' is-stale' : !refreshedAt ? ' is-pending' : ''}`} aria-hidden="true" />
               <div><span>{isStale ? '同步暂时中断' : refreshedAt ? '本地服务已同步' : '正在连接本地服务'}</span><small>{refreshLabel}</small></div>
             </div>
+            <details className="wb-service-details">
+              <summary>本地服务详情</summary>
+              <ServiceStatus api={serviceApi} />
+            </details>
           </div>
         </div>
       </aside>
 
       <div className="wb-workspace">
-        <header className="wb-topbar">
+        <header className={`wb-topbar${!activeProjectId && !guideActive ? ' is-overview' : ''}`}>
           <nav className="wb-breadcrumb" aria-label="页面位置">
             {(activeProjectId || guideActive) && <button type="button" className="wb-back" onClick={selectOverview} aria-label="返回项目总览" title="返回项目总览"><ShellIcon name="back" /></button>}
             <span className="wb-breadcrumb-parent">工作台</span><ShellIcon name="chevron" /><span className="wb-breadcrumb-current" title={guideActive ? '使用指南' : activeProject?.name || activeProjectName}>{guideActive ? '使用指南' : activeProject?.name || activeProjectName || '项目工作台'}</span>
           </nav>
-          <ServiceStatus api={serviceApi} />
           <div className="wb-topbar-actions">
             <button className="wb-icon-button wb-refresh" type="button" onClick={onRefresh} disabled={busy} title="刷新项目数据" aria-label="刷新项目数据"><ShellIcon name="refresh" /></button>
-            <Button type="button" variant="soft" className="wb-add-project" onClick={onAddProject} disabled={busy}><ShellIcon name="plus" /><span>添加项目</span></Button>
+            <Button type="button" variant="primary" className="wb-add-project" onClick={onAddProject} disabled={busy}><ShellIcon name="plus" /><span>添加项目</span></Button>
           </div>
         </header>
         <div className="wb-content" ref={contentRef}>{children}</div>

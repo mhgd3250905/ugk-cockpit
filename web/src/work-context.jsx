@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody } from '@appica/ui-react/dialog';
 import './work-context.css';
+import { WorkbenchIcon } from './icons.jsx';
 
 function fileStatus(git) {
   if (git?.available === false) return '未采集版本状态';
@@ -27,7 +28,7 @@ export function WorkContext({ context, label, formatTime, overview, closed, oper
   return (
     <>
       <button ref={triggerRef} type="button" className="work-context-summary" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-label={`查看${label}的完整工作信息`}>
-        <span className="work-context-label"><span className="work-context-name">{label}</span><span className="work-context-more">查看完整信息 ›</span></span>
+        <span className="work-context-label"><span className="work-context-name">{label}</span><span className="work-context-more">查看完整信息<WorkbenchIcon name="chevron" size={16} /></span></span>
         {overview && <span className="work-context-facts">{overview.lineCount} 条分支工作线 · {overview.closedCount} 条已手动结束</span>}
         <span className="work-context-goal"><strong>{overview ? '主项目工作' : closed ? '最后工作 · 已结束' : '当前工作'}</strong>{context?.currentGoal || '尚未记录工作目标'}</span>
         <span className="work-context-facts">
