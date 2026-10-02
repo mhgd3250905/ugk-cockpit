@@ -30,7 +30,7 @@
 
 **未证实项**（合并前应跑的命令见审查报告）：真实 git 在单个工作副本内产出超过 4MB 的 `status`/`ls-files` 输出这一形状未在本机端到端复现；`PATH_CHANGED` 的端到端触发需要外部进程在 `authorizeExistingPath` 与 `revalidateAuthorizedPath` 之间的异步窗口内改动目录，本机没有可稳定复现的并发夹具，登记为按调用链可达、按执行未证实。
 
-截至本时点的门禁与全量数字在本节末的「验证」行，取自分支上最后一次独占全量运行；该行之后若只有文档提交，差值在那里声明。
+- 验证（Windows 10.0.26200 + Git Bash / Node **v24.15.0**，PATH 上的 node 而非 CLI 运行时；全量按项目入口 `npm test`，即 `node --test --test-concurrency=1` 串行，另加 `--test-reporter=tap` 以保留 worker 退出码与信号）：全量 **912 项 / 905 通过 / 0 失败 / 7 平台跳过**，`# duration_ms 1240098`（1240.1 秒），`EXIT=0`。这是本轮唯一一次**独占**取数运行，`TREE_BEFORE` 与 `TREE_AFTER` 同为被审提交 `a6dab61496cadf3a58f79f3a96bdf6cb27071e38`，取数期间未改 `src/` 或 `test/`，本机无第二套全量并发（复核线程在该运行期间只读不跑测试）。`npm run test:quick` **147 项 / 146 通过 / 0 失败 / 1 跳过**（6.47 秒）；`npm run build:web` **2613 模块 / 422 ms**，保留既有大 chunk 提示；门禁 `node scripts/check-test-suite.mjs .` 报 **140** 份测试文件且全部有声明；`npm run test:phase0` 97/97 仅作诊断入口（Phase 0 已包含在全量内，未重复计入）。CI 分片按免执行枚举复测为 **70 + 70**、交集 **0**、并集与不分片自动发现的 140 份一致。`git diff --check origin/main...HEAD`（三点式）无命中。取证日志都在本机被 gitignore 的 `auditlogs/`（`r35-authoritative-full.log`、`r35-authoritative-quick.log`、`r35-authoritative-aux.log`、`r35-authoritative-phase0.log`、`r35-mutation-matrix-run4.log`、`r35-baseline-red-final2.log`、`r35-pr30-conflict-surface.log`），未随 PR 提交。差值声明：以上数字取自 `a6dab61` 的树；其后只有一笔纯文档提交（写入本行），不含任何 `src/` 或 `test/` 改动，因此不构成新的源码树。
 
 
 ### alpha.64：简约总览与详情功能分组收束（2026-10-02，无版本变更）
