@@ -110,6 +110,51 @@ test('没有码的探测失败仍然只能得到通用回执，且不回显原�
   assert.doesNotMatch(JSON.stringify(refreshed.body), /private marker leaked/);
 });
 
+test('通用回执的 reason 永远等于通用码，不带出内部码名或子进程退出码', async (t) => {
+  // 本轮把「末尾 catch 先塌一次码」删掉时引入过一个真实回归：sendError 的 `code`
+  // 字段仍然收束，但 `reason` 的回退用的是**原始**参数，于是 /refresh 会把
+  // `GIT_WORKTREE_SWITCH_FAILED` 甚至数字退出码 128 直接写进响应。这一条在主干上
+  // 即绿（主干那层重复塌码恰好挡住了它），在本轮中间提交上判红，因此它是本轮
+  // 自造回归的钉，不是旧缺陷的复现。
+  const cases = [
+    ['worktree switch failed', 'GIT_WORKTREE_SWITCH_FAILED', 'named'],
+    ['git rev-parse exited with code 128', 128, 'numeric'],
+  ];
+  for (const [message, code, label] of cases) {
+    let armed = false;
+    const f = await startedService(t, {
+      probe: async (candidate, options) => {
+        if (armed) throw Object.assign(new Error(message), { code });
+        return probeGitWorktree(candidate, options);
+      },
+    });
+    armed = true;
+    const refreshed = await f.request(`/api/v1/projects/${f.projectId}/refresh`, {
+      commandId: `refresh-reason-${label}`,
+    });
+    const text = JSON.stringify(refreshed.body);
+    assert.equal(refreshed.body.code, 'REQUEST_FAILED', text);
+    assert.equal(refreshed.body.reason, 'REQUEST_FAILED', `reason leaked ${String(code)}: ${text}`);
+    assert.doesNotMatch(text, /GIT_WORKTREE_SWITCH_FAILED/, 'raw internal code name reached the client');
+    assert.doesNotMatch(text, /\b128\b/, 'raw child-process exit status reached the client');
+  }
+});
+
+test('已登记的码把 reason 也带着走（不许只改 code 字段）', async (t) => {
+  let armed = false;
+  const f = await startedService(t, {
+    probe: async (candidate, options) => {
+      if (armed) await git(candidate, ['status', '--porcelain'], { maxBuffer: 8 });
+      return probeGitWorktree(candidate, options);
+    },
+  });
+  writeFileSync(path.join(f.folder, 'untracked-reason.txt'), 'more\n');
+  armed = true;
+  const refreshed = await f.request(`/api/v1/projects/${f.projectId}/refresh`, { commandId: 'refresh-reason-curated' });
+  assert.equal(refreshed.body.code, 'GIT_BUFFER_LIMIT_EXCEEDED', JSON.stringify(refreshed.body));
+  assert.equal(refreshed.body.reason, 'GIT_BUFFER_LIMIT_EXCEEDED');
+});
+
 test('已经登记的码不会触发 uncurated 告警（误红面）', async (t) => {  // 误红的守卫会被人删掉，比没守卫更糟：登记过的码走完整条 sendError 路径也不许
   // 留下一行告警。这里用 PROJECT_NOT_FOUND——它是回执链路上最常走的一类码。
   const f = await startedService(t);
@@ -133,11 +178,11 @@ test('确实未登记的产品错误码在降级时被点名告警（接线面�
   // 上一条款件证明「登记过的不告警」，这一条证明「没登记的会告警」，两者都要走过
   // 真实的 sendError 才算钉住了接线：只把 sendError 里那一行删掉，本用例必须变红，
   // 而 helper 自己的用例仍会全绿（那是假覆盖）。
-  // 用的码必须是产品里真实存在的常量：GIT_WORKTREE_SWITCH_FAILED 由
-  // `src/git/workspace-ops.mjs` 的 switchGitWorktreeToNewBranch 抛出，且经核对在
-  // `reuseDevelopmentWorkspace` 内就被换成 WORKSPACE_SWITCH_FAILED，所以它故意
-  // 不进 HTTP 白名单——正因为它拿不到登记，才是这一款的合格样本。
-  const UNCURATION_SAMPLE = 'GIT_WORKTREE_SWITCH_FAILED';
+  // 用的码必须是产品里真实存在、且刻意不进 HTTP 白名单的常量：`LOCK_ID_MISMATCH`
+  // 由 `src/core/integrations.mjs` 的 releaseRepositoryLock 返回，其结果在
+  // `mergeApprovedSubmission` / `reuseDevelopmentWorkspace` 的 finally 里被丢弃，
+  // 所以它拿不到登记——正是这一款用例要的样本。
+  const UNCURATION_SAMPLE = 'LOCK_ID_MISMATCH';
   let armed = false;
   const f = await startedService(t, {
     probe: async (candidate, options) => {

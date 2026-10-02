@@ -338,13 +338,16 @@ export const PUBLIC_ERRORS = {
   PATH_OUTSIDE_SCOPE: {
     status: 403,
     message: '所选路径跳出了已授权的文件夹，已停止访问。',
-    impact: 'Cockpit 没有读取或修改这个文件夹里的任何内容。',
+    impact: 'Cockpit 没有读取这个文件夹里的文件内容，也没有修改任何文件。',
     requiredAction: '请在项目页重新选择该项目的文件夹并确认授权；项目确实搬了位置请使用「确认新代码位置」，不要把路径改成链接或别的目录。',
   },
   PATH_CHANGED: {
     status: 409,
     message: '路径在确认后发生变化，已停止访问。',
-    impact: '这次访问在读到任何内容之前就停止了，Cockpit 没有修改任何文件。',
+    // 复核顺序：observeRegisteredProject 先 authorizeExistingPath，再 await
+    // observeProjectFolder（这一步已经读过 Git 状态），然后才是这里抛出的
+    // revalidateAuthorizedPath。所以不能写「读到任何内容之前就停止了」。
+    impact: 'Cockpit 已停止这次操作，没有修改、切换或删除任何文件，已登记的项目记录保持原样。',
     requiredAction: '请确认这个项目目录此刻是否被移动、改名或换成了链接；恢复原位置后刷新项目页重试，位置确实变了请走「确认新代码位置」。',
   },
   // Two git-layer failures that reach the HTTP layer with their own code: the
@@ -1088,8 +1091,16 @@ export const PUBLIC_ERRORS = {
     impact: '平台没有自动清理、回退或覆盖代码。',
     requiredAction: '请查看开发空间状态并重试；若持续失败，请人工核对 Git 状态。',
   },
-  SUBMISSION_NOT_FOUND: {
-    status: 404,
+  // `/api/v1/mcp/integration/begin` hands the same core result code to
+  // sendError; the sibling `/review` and `/merge` codes were registered this
+  // round and this one was first missed, which is the shape of the defect.
+  SUBMISSION_PROJECT_MISMATCH: {
+    status: 409,
+    message: '这条送审记录不属于当前项目。',
+    impact: '没有领取审核，也没有修改任何项目的代码。',
+    requiredAction: '请从当前项目页重新复制待办的审核指令；不要拿另一个项目的送审编号领取审核。',
+  },
+  SUBMISSION_NOT_FOUND: {    status: 404,
     message: '找不到这条送审记录。',
     impact: '没有领取审核，也没有修改代码。',
     requiredAction: '请核对送审编号后重试。',
@@ -1571,8 +1582,14 @@ function sendJson(response, statusCode, body) {
 }
 
 function sendError(response, code, { commandId = null, extra = {}, context = null } = {}) {
-  if (PUBLIC_ERRORS[code] === undefined) noteUncuratedErrorCode('PUBLIC_ERRORS', code);
-  const definition = PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.REQUEST_FAILED;
+  // One lookup, one downgrade. `code` is the raw producer's value and may be a
+  // number (an execFile exit code), a Node errno string, or undefined; only the
+  // curated name is ever put on the wire, including in `reason`.
+  const curated = code !== undefined && code !== null && PUBLIC_ERRORS[code] !== undefined
+    && Object.hasOwn(PUBLIC_ERRORS, code);
+  if (!curated) noteUncuratedErrorCode('PUBLIC_ERRORS', code);
+  const definition = curated ? PUBLIC_ERRORS[code] : PUBLIC_ERRORS.REQUEST_FAILED;
+  const effectiveCode = curated ? code : 'REQUEST_FAILED';
   const contextFields = normalizeConversationErrorContext(context);
   if (context?.sessionValidated === true && contextFields.sessionId) {
     response.__ugkDiagnosticContext = {
@@ -1585,9 +1602,9 @@ function sendError(response, code, { commandId = null, extra = {}, context = nul
   const requestedReason = extra?.reason;
   const reason = typeof requestedReason === 'string' && SAFE_BINDING_REASON_PATTERN.test(requestedReason)
     ? requestedReason
-    : contextReason ?? code;
+    : contextReason ?? effectiveCode;
   sendJson(response, definition.status, {
-    code: PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED',
+    code: effectiveCode,
     message: definition.message,
     impact: definition.impact,
     required_action: definition.requiredAction,

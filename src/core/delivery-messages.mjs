@@ -48,6 +48,20 @@ export const DELIVERY_ERROR_MESSAGES = {
   DELIVERY_DIRECTORY_MISMATCH: ['当前会话目录与本次送审对象不一致。', '请回到对应代码目录，不能拿另一份代码的检查结果送审。'],
   DELIVERY_INTEGRATION_BUSY: ['同一交付正在执行合并。', '请等待该操作结果后重新检查，不要替换它正在处理的版本。'],
   DELIVERY_CONTENT_TOO_LARGE: ['选中的送审文件超出大小安全限制。', '请从送审范围移除超限文件，或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。'],
+  // Reached from the preflight/submit route-level catch, which feeds every
+  // escaped error into deliveryResponse — including path-authorisation and
+  // probe failures, which is why the same codes are curated twice rather than
+  // once (each renderer only ever consults its own table).
+  DELIVERY_CHECK_FAILED: ['送审前的检查没有完成。', '平台没有保存或上传任何内容；请刷新项目页后重新预检，不要手工清理仓库或重置暂存区。'],
+  DELIVERY_SOURCE_NOT_FOUND: ['平台里找不到这份代码对应的送审来源。', '请先在项目页确认代码位置仍然在册；需要时重新选择文件夹，不要重新 init。'],
+  SOURCE_STATE_CHANGED: ['这份代码在检查之后又发生了变化。', '请保留当前文件并重新预检，不要用旧的预检结果继续送审。'],
+  TREE_MISMATCH: ['要保存的内容与预检时核对的成果不一致。', '平台没有创建提交；请重新预检并按新的文件清单送审，不要手工重置暂存区。'],
+  REMOTE_BRANCH_NOT_FOUND: ['远端还没有这条工作线，无法核对它的最新状态。', '本地成果保持不变；请确认远端分支名或使用新的预检结果，不要强推创建。'],
+  UNSAFE_REMOTE_NAME: ['这个远端名称不能安全地用于自动送审。', '平台没有连接该远端；请在仓库里改用普通的远端名称后重新预检。'],
+  GIT_BUFFER_LIMIT_EXCEEDED: ['本地 Git 返回的内容超出安全读取上限，送审前检查未能完成。', '平台没有依据这份不完整的结果保存或上传；请检查该工作副本是否产生了异常巨大的 Git 输出后重新预检。'],
+  PATH_OUTSIDE_SCOPE: ['送审用的路径跳出了已授权的文件夹，已停止访问。', '平台没有读取该文件夹里的文件内容，也没有上传任何代码。'],
+  PATH_CHANGED: ['送审用的路径在确认后发生变化，已停止访问。', '平台没有修改、切换或删除任何文件，已登记的送审记录保持原样。'],
+  REPARSE_POINT: ['送审用的路径经过了链接或 junction，无法安全确认实际位置。', '平台已停止读取；请选择项目的真实文件夹而不是快捷方式后重新预检。'],
 };
 
 export function deliveryResponse(result) {
