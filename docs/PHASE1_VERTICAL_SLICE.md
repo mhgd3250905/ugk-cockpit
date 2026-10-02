@@ -6,6 +6,23 @@
 
 ## 实施状态
 
+### alpha.66：第 35 轮审计——未登记错误码不再静默塌成通用回执（2026-10-03）
+
+**基线与版本让位**：本轮基线为 `origin/main` 的 `a0b0ec8d72d99c874d8a1b4f1dea3bfeecd75ff5`（alpha.64 树 + `codex/minimal-project-views` 合入的 7 笔）。开工时 `gh pr list --state open` 为 1 条：PR #30（alpha.65，head `0323f9e`，OPEN、未合并、未部署）占用 alpha.65；本机正式服务树 `E:\AII\ugk-cockpit` 的 `VERSION` 为 alpha.64 且 `origin/main..HEAD` 为空（第 34 轮记录的 5 笔未推送提交已随 `ae8bf12` 等合入主干）。两处齐查后本轮取 alpha.66，与 PR #30 的改动面交集仅 `README.md`、`docs/PHASE1_VERTICAL_SLICE.md`、`VERSION`、`package.json`、`package-lock.json` 五个版本锚点文件，源码与测试文件不相交。
+
+- `0.1.0-alpha.66`：一项以执行证据支撑的修复族（错误码登记闭合），基线为本轮开始时的 pristine main `a0b0ec8`。其一，`PUBLIC_ERRORS` 里漏登记 **8 个确实会走到 HTTP 回执的码**：`path-guard` 同族里 `REPARSE_POINT`、`NOT_A_DIRECTORY`、`DIRECTORY_NOT_EMPTY`、`DIRECTORY_IDENTITY_CHANGED` 四个都有登记，唯独同模块抛出的 `PATH_CHANGED` 与构造器默认码 `PATH_OUTSIDE_SCOPE` 没有；`sendError` 查不到就把响应写成 `code:'REQUEST_FAILED'` + 「本地操作没有完成。/ Cockpit 没有确认保存成功，代码不会被自动清理或覆盖。/ 请刷新状态后重试」，把「路径复核失败、已停止访问」说成「刷新重试」。其二，`src/git/delivery-ops.mjs` 的注释写着「Public wording is curated in the error maps」，而第二张表 `delivery-messages` 里 `UNSAFE_REMOTE_URL` 已登记、同一个 `validateRemoteUrlSecurity` 里隔几个分支就抛出的 `CREDENTIALS_IN_REMOTE_URL` 没有——带账号/令牌的远程地址因此拿到的是「请核对错误代码、远端连接与分支状态」这句通用送审兜底，而真实原因是凭据本身。其三（P0 形状），`MERGE_UNVERIFIED` 的抛点紧跟在 `fastForwardMain` 之后：本地主项目分支可能已经前进，塌成通用回执却写着「代码不会被自动清理或覆盖」，且 `required_action` 让「刷新后重试」，等于鼓励换一个操作编号再合并一次；`integration/merge` 路由明明已经把 `localIntegrated`/`pushed`/`integratedCommit` 三个事实字段放进 `extra`，回执文案却与它们矛盾。其四（假绿的门禁），本轮之前 `git grep PUBLIC_ERRORS test/` 零命中：没有任何东西守着「新增一个错误码就必须登记」，兜底方向又是静默降级，所以下一个漏登记的码不会让任何东西变红——注释把把关者说成已经存在，比不写更糟。其五，请求处理末尾的 `catch` 自己先做一次 `PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED'` 塌码，`sendError` 因此永远看不见真实码；本轮去掉这层重复映射，把降级点收敛成唯一一处，并在两处兜底（`sendError`、`deliveryResponse`）查不到时向 stderr 点名该码（只回显严格形状的大写常量，不回显 `err.message`、路径或库报错）。
+
+**兄弟落点与不修清单**：可达性逐条核对后登记为**已核查不可达**、本轮不为其编造文案：`COMMIT_UNVERIFIED`、`PROJECT_BINDING_CHANGED`、`SOURCE_BRANCH_CHANGED`（`submission-service` 在 `src/` 内零引用，只有测试直接调用）、`UNSUPPORTED_SCHEMA_VERSION`（`openCockpitDatabase` 在监听前抛出，走进程启动失败）、`INSTANCE_ALREADY_RUNNING`（`single-instance` 无 `src/` 读取方）、`RELAY_TRANSPORT_UNCERTAIN`、`CONVERSATION_TAKEOVER_TRANSPORT_UNCERTAIN`（MCP 桥进程内的返回值，不经 HTTP）、`GIT_WORKTREE_REMOVE_FAILED`、`GIT_WORKTREE_SWITCH_FAILED`、`INVALID_BASE_COMMIT`、`LOCK_HOLDER_MISMATCH`、`LOCK_ID_MISMATCH`、`TAKEOVER_CONFLICT`、`USER_CONFIRMATION_REQUIRED`（均已在上游被换成登记过的码，或所在函数不被 http-server 引用）。`DELIVERY_*`/`REMOTE_*`/`HEAD_MOVED`/`TREE_MISMATCH` 等由 `deliveryResponse` 的 `messages` 表策展，不重复进 `PUBLIC_ERRORS`。客户端分支里 `WORKSPACE_ACTION_RECOVERY_CONFLICT` 曾被怀疑是「引用服务器永远不会发的码」，实测由 `web/src/workspace-action-recovery.mjs` 自己构造，从未跨进程，判为已核查不成立。
+
+**证据与判别**：`test/audit-2026-10-03-error-code-registry.test.mjs` 与 `test/audit-2026-10-03-error-code-surfacing.test.mjs` 共 12 项。端到端项用真实服务与真实 Git 夹具走 `POST /api/v1/projects/:id/refresh`，错误对象由生产产生者 `src/git/probe.mjs` 的 `git()` 在 `maxBuffer` 超限时真实构造（被替换的只有 `createCockpitHttpServer` 已有的 `probe` 注入点；「真实 git 在一个工作副本里产出 >4MB 输出」这一步未端到端证明，见未证实条目）。主干基线复跑（仅补 `export` 关键字、不加任何登记项）为 10 项中 7 红 3 绿，红项逐条点出缺失的码：`actual: ['PATH_CHANGED','PATH_OUTSIDE_SCOPE']`、`actual: ['CREDENTIALS_IN_REMOTE_URL']`、`actual:'REQUEST_FAILED' expected:'GIT_BUFFER_LIMIT_EXCEEDED'`；一条红是 `ERR_MODULE_NOT_FOUND`（新增模块在主干不存在），不作为缺陷复现证据。三条反向对照在主干即绿：同族已登记的四个路径码、无码错误仍降级且不回显 `err.message`、`UNSAFE_REMOTE_URL` 的专属文案。族断言写成对提取结果的整体折叠，并先断言提取集合本身的形状（path-guard 六码、远程地址两码），防止扫描式退化成只看一种写法。逐落点变异矩阵 11 行（8 个 `PUBLIC_ERRORS` 条目 + 1 个 `delivery-messages` 条目 + 2 处告警接线）全部判红，CONTROL 12/12 绿；矩阵第一轮曾因副本缺 `VERSION` 文件而 CONTROL 不成立，整轮判废后重跑（登记为过程失败）。
+
+**本轮修复自己引入并已抓到的缺陷**：第一次实现把告警只挂在 `sendError`，而请求末尾的 `catch` 自己先塌了码，导致「未登记码被点名」这条用例即使删掉接线也全绿——是变异矩阵的 `wire-sendError` 行判绿暴露了这层假覆盖，随后才去掉重复映射并补上接线用例。
+
+**未证实项**（合并前应跑的命令见审查报告）：真实 git 在单个工作副本内产出超过 4MB 的 `status`/`ls-files` 输出这一形状未在本机端到端复现；`PATH_CHANGED` 的端到端触发需要外部进程在 `authorizeExistingPath` 与 `revalidateAuthorizedPath` 之间的异步窗口内改动目录，本机没有可稳定复现的并发夹具，登记为按调用链可达、按执行未证实。
+
+截至本时点的门禁与全量数字在本节末的「验证」行，取自分支上最后一次独占全量运行；该行之后若只有文档提交，差值在那里声明。
+
+
 ### alpha.64：简约总览与详情功能分组收束（2026-10-02，无版本变更）
 
 阶段基线为上一轮 alpha.64 收尾 `e0d7b038b020258be535976a3d448223bf8b52aa`。分支 `codex/minimal-project-views` 的运行时代码候选为 `ae8bf1228ed7c86bb26188c0baae5dbcfb8e28cf`，连同纯文档审核收尾 `67e54f867ffca80626935f8388d02718de959487` 已快进合入本地 `main`。版本元数据保持 `0.1.0-alpha.64`，本次收束后按用户授权普通推送 `origin/main`；这不是发布标签或 Release。
