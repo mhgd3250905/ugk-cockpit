@@ -49,25 +49,32 @@ export const DELIVERY_ERROR_MESSAGES = {
   DELIVERY_INTEGRATION_BUSY: ['同一交付正在执行合并。', '请等待该操作结果后重新检查，不要替换它正在处理的版本。'],
   DELIVERY_CONTENT_TOO_LARGE: ['选中的送审文件超出大小安全限制。', '请从送审范围移除超限文件，或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。'],
   // Reached from the preflight/submit route-level catch, which feeds every
-  // escaped error into deliveryResponse — including path-authorisation and
-  // probe failures, which is why the same codes are curated twice rather than
-  // once (each renderer only ever consults its own table).
-  // This is the catch-all of BOTH the preflight and the submit path, and the
-  // submit path's catch is reachable *after* `recordDelivery` has already
-  // created and pushed the local result. So the wording must not claim nothing
-  // was saved: `deliveryResponse` derives the truthful `impact` from
-  // `result.localSaved` / `result.pushed`, and this sentence has to stay
-  // compatible with either branch.
+  // escaped error into deliveryResponse.
+  //
+  // Wording rule for this whole table: `deliveryResponse` derives the truthful
+  // `impact` from `result.localSaved` / `result.pushed`, and on the save path
+  // the guard that throws into that catch runs AFTER `commit-tree` +
+  // `update-ref` (delivery-ops: revalidateAuthorizedPath(indexScope) follows
+  // afterRefUpdate, and the catch marks error.localSaved). So no entry that is
+  // reachable there may deny that a local result exists — each sentence has to
+  // stay readable under either value of those two flags.
+  // This is the catch-all of BOTH the preflight and the submit path.
   DELIVERY_CHECK_FAILED: ['送审检查或保存没有完成，本次结果未经确认。', '请在项目页确认这次是否已经留下本地成果，再决定重新预检还是用原操作号恢复；平台没有清理、重置或覆盖任何文件。'],
   DELIVERY_SOURCE_NOT_FOUND: ['平台里找不到这份代码对应的送审来源。', '请先在项目页确认代码位置仍然在册；需要时重新选择文件夹，不要重新 init。'],
-  SOURCE_STATE_CHANGED: ['这份代码在检查之后又发生了变化。', '请保留当前文件并重新预检，不要用旧的预检结果继续送审。'],
+  SOURCE_STATE_CHANGED: ['这份代码在核验期间仍在变化，两次读取没有对上。', '请等当前修改结束后重新预检，不要用这份未经确认的状态继续送审。'],
   TREE_MISMATCH: ['要保存的内容与预检时核对的成果不一致。', '平台没有把这份不一致的成果记为已送审；请按当前文件重新预检后再送审，不要手工重置暂存区。'],
   REMOTE_BRANCH_NOT_FOUND: ['远端还没有这条工作线，无法核对它的最新状态。', '本地成果保持不变；请确认远端分支名或使用新的预检结果，不要强推创建。'],
   UNSAFE_REMOTE_NAME: ['这个远端名称不能安全地用于自动送审。', '平台没有连接该远端；请在仓库里改用普通的远端名称后重新预检。'],
-  GIT_BUFFER_LIMIT_EXCEEDED: ['本地 Git 返回的内容超出安全读取上限，送审前检查未能完成。', '平台没有依据这份不完整的结果保存或上传；请检查该工作副本是否产生了异常巨大的 Git 输出后重新预检。'],
-  PATH_OUTSIDE_SCOPE: ['送审用的路径跳出了已授权的文件夹，已停止访问。', '平台没有读取该文件夹里的文件内容，也没有上传任何代码。'],
-  PATH_CHANGED: ['送审用的路径在确认后发生变化，已停止访问。', '平台没有修改、切换或删除任何文件，已登记的送审记录保持原样。'],
-  REPARSE_POINT: ['送审用的路径经过了链接或 junction，无法安全确认实际位置。', '平台已停止读取；请选择项目的真实文件夹而不是快捷方式后重新预检。'],
+  GIT_BUFFER_LIMIT_EXCEEDED: ['本地 Git 返回的内容超出安全读取上限，送审状态未能核验。', '平台没有依据这份不完整的结果继续判断；请按回执确认本地成果，再重新预检或用原操作号恢复。'],
+  PATH_OUTSIDE_SCOPE: ['送审用的路径跳出了已授权的文件夹，已停止访问。', '平台没有继续读取该文件夹，也没有连接远端；请在项目页重新确认代码位置的授权后重新预检。'],
+  PATH_CHANGED: ['送审用的路径在确认后发生变化，已停止访问。', '平台已停止这条路径上的后续动作；请按回执确认本地成果，恢复原位置或走「确认新代码位置」后再重新预检。'],
+  REPARSE_POINT: ['送审用的路径经过了链接或 junction，已停止访问。', '平台已停止这条路径上的后续动作；请选择项目的真实文件夹而不是快捷方式后重新预检。'],
+  WORKTREE_IDENTITY_CHANGED: ['这份代码已经不是登记时的那份工作副本。', '平台没有把这份成果记为已送审；请先在项目页确认代码位置，需要时由你确认重绑后再重新预检。'],
+  PATH_NOT_AUTHORIZED: ['这个代码位置还没有获得访问授权。', '平台没有读取该文件夹；请在项目页重新选择并确认授权后重试。'],
+  PUSH_REMOTE_AMBIGUOUS: ['这份代码有多个可用的推送目的地，无法确定送审给谁。', '平台没有推送任何内容；请先在仓库里收敛 origin/推送地址或在项目页确认归属，再重新预检。'],
+  SOURCE_COMMIT_MISMATCH: ['要保存的提交与预检时核对的成果不是同一个。', '平台没有把它记为已送审；请用新的预检结果重新送审，不要手工填入提交号。'],
+  GIT_ALTERNATE_UNRESOLVED: ['这份代码的 Git 对象指向了无法解析的 alternates 位置。', '平台没有读取对象内容也没有推送；请先在仓库外确认该 objects 目录，再重新预检。'],
+  GIT_METADATA_TOO_LARGE: ['这份代码的 Git 元数据超出可安全读取的上限。', '平台没有依据未经核验的状态送审；请先处理异常膨胀的 Git 元数据（例如超长提交信息或巨型 packed 文件）再重新预检。'],
 };
 
 export function deliveryResponse(result) {

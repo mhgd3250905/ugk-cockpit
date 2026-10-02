@@ -72,14 +72,62 @@ const RENDERED_BY = {
     'PATH_OUTSIDE_SCOPE', 'PATH_CHANGED', 'GIT_BUFFER_LIMIT_EXCEEDED', 'GIT_ERROR',
     'INVALID_VERDICT', 'CLAIM_SUBMISSION_MISMATCH', 'INVALID_SOURCE_COMMIT',
     'MERGE_UNVERIFIED', 'SUBMISSION_PROJECT_MISMATCH',
+    // 由集成路由转手出来的送审码：`sendError` 只查这张表。
+    'DELIVERY_CHECK_FAILED', 'DELIVERY_REMOTE_CHANGED', 'DELIVERY_REVIEW_REF_UNAVAILABLE',
+    'DELIVERY_SOURCE_UPDATED',
   ],
   'delivery-messages': [
     'CREDENTIALS_IN_REMOTE_URL', 'DELIVERY_CHECK_FAILED', 'DELIVERY_SOURCE_NOT_FOUND',
     'SOURCE_STATE_CHANGED', 'TREE_MISMATCH', 'REMOTE_BRANCH_NOT_FOUND',
     'UNSAFE_REMOTE_NAME', 'GIT_BUFFER_LIMIT_EXCEEDED',
     'PATH_OUTSIDE_SCOPE', 'PATH_CHANGED', 'REPARSE_POINT',
+    'WORKTREE_IDENTITY_CHANGED', 'PATH_NOT_AUTHORIZED', 'PUSH_REMOTE_AMBIGUOUS',
+    'SOURCE_COMMIT_MISMATCH', 'GIT_ALTERNATE_UNRESOLVED', 'GIT_METADATA_TOO_LARGE',
   ],
 };
+
+// 两个渲染器都会拿到的码：必须在**两张**表里都有，否则其中一个仍在降级。
+// 这张清单是人工维护的（机械推导「哪条链能产出哪个码」需要近似一个解释器，本轮
+// 不做），所以它只保证已审计过的成员不掉队——登记为已实测局限。
+const BOTH_TABLES = [
+  'DELIVERY_CHECK_FAILED', 'GIT_BUFFER_LIMIT_EXCEEDED', 'PATH_OUTSIDE_SCOPE', 'PATH_CHANGED',
+  'REPARSE_POINT', 'WORKTREE_IDENTITY_CHANGED', 'PATH_NOT_AUTHORIZED', 'PROJECT_NOT_FOUND',
+];
+
+test('跨两个渲染表面的码在两张表里都有登记（不许只堵一个表面）', () => {
+  for (const code of BOTH_TABLES) {
+    assert.ok(curatedInPublic(code), `${code} missing from PUBLIC_ERRORS`);
+    assert.ok(curatedInDelivery(code), `${code} missing from DELIVERY_ERROR_MESSAGES`);
+  }
+  // 提取式形状钉：这张清单本身不许空转。
+  assert.ok(BOTH_TABLES.length >= 6);
+});
+
+test('送审表里凡是保存路径之后还能抛出的码，文案都不许否认本地成果存在', () => {
+  // `deliveryResponse` 用 result.localSaved / result.pushed 派生 impact；而
+  // delivery-ops 在 commit-tree + update-ref + afterRefUpdate **之后**才做
+  // revalidateAuthorizedPath(indexScope)，其 catch 又把 error.localSaved 置真。
+  // 所以这些码的文案若断言「没有修改/没有保存」，就会与同一份响应里的 impact
+  // 自相矛盾——本轮修的那个形状的复发面。
+  const savePathCodes = ['PATH_CHANGED', 'REPARSE_POINT', 'GIT_BUFFER_LIMIT_EXCEEDED',
+    'DELIVERY_CHECK_FAILED', 'WORKTREE_IDENTITY_CHANGED', 'PATH_OUTSIDE_SCOPE'];
+  const denials = /没有保存|没有上传任何|没有修改、切换或删除任何文件|未保存/;
+  for (const code of savePathCodes) {
+    const [message, action] = DELIVERY_ERROR_MESSAGES[code];
+    assert.ok(message && action, `${code} missing from DELIVERY_ERROR_MESSAGES`);
+    assert.doesNotMatch(`${message} ${action}`, denials,
+      `${code} denies a local result that its own save path can already have produced`);
+    // 两条真值分支都要读得通。
+    for (const flags of [{ localSaved: true, pushed: false }, { localSaved: false, pushed: false }]) {
+      const rendered = deliveryResponse({ ok: false, code, ...flags });
+      assert.equal(rendered.message, message);
+      assert.equal(rendered.required_action, action);
+    }
+  }
+  // 反向对照：这条判据不能只会红——被忽略内容确认挡下的删除用的就是这种全称否认，
+  // 而那条路径上确实还没有任何本地成果。
+  assert.match(DELIVERY_ERROR_MESSAGES.DELIVERY_CONTENT_TOO_LARGE[1], /平台保留现有文件/);
+});
 
 test('本轮登记的每个码都出现在真正会渲染它的那张表里，且文案不是通用兜底的复读', () => {
   const generic = PUBLIC_ERRORS.REQUEST_FAILED;
@@ -273,6 +321,14 @@ test('告警只点名码本身：大写常量原样、其它形状只报种类�
     const numeric = drain().join('');
     assert.match(numeric, /number-code/);
     assert.doesNotMatch(numeric, /128/, 'echoed the raw exit status');
+    // 大写 errno 名与产品常量同形状，但它是「文件/网络出错」而不是「表里缺一项」；
+    // 说成后者会把调查方向带到不存在的缺失上。允许带出名字，因为名字是 OS 常量。
+    assert.equal(noteUncuratedErrorCode('PUBLIC_ERRORS', 'ENOENT'), true);
+    const errnoLine = drain().join('');
+    assert.match(errnoLine, /errno\(ENOENT\)/);
+    assert.doesNotMatch(errnoLine, /uncurated error code "ENOENT"/, 'errno reported as a table miss');
+    assert.equal(noteUncuratedErrorCode('PUBLIC_ERRORS', 'EACCES'), true);
+    assert.match(drain().join(''), /errno\(EACCES\)/, 'each errno name stays individually diagnosable');
     // 不许把任意文本当码回显，也不许把「根本没有码」说成表里缺一项。
     for (const junk of ['C:\\temp\\x', 'a'.repeat(200), '错误码', undefined, null, {}, '']) {
       const shaped = /^[A-Z][A-Z0-9_]{2,63}$/.test(String(junk ?? ''));

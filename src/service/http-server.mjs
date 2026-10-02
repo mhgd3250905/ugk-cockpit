@@ -1100,7 +1100,39 @@ export const PUBLIC_ERRORS = {
     impact: '没有领取审核，也没有修改任何项目的代码。',
     requiredAction: '请从当前项目页重新复制待办的审核指令；不要拿另一个项目的送审编号领取审核。',
   },
-  SUBMISSION_NOT_FOUND: {    status: 404,
+  // `/api/v1/mcp/integration/{begin,review,merge}` return
+  // `error.code ?? 'DELIVERY_CHECK_FAILED'` from the delivery import/verify
+  // step, so these delivery-side codes arrive at sendError, which reads only
+  // this table. Double registration is deliberate (the delivery table already
+  // carries PROJECT_NOT_FOUND and GIT_FILTER_UNSUPPORTED the same way): a code
+  // rendered by two renderers needs wording in both, and until now these four
+  // collapsed to REQUEST_FAILED while also firing the uncurated-code warning.
+  DELIVERY_CHECK_FAILED: {
+    status: 409,
+    message: '接入主项目前核对送审成果没有完成，本次结果未经确认。',
+    impact: '主项目代码没有被合并；远端推送状态未经确认。',
+    requiredAction: '请保留这次的操作编号继续接入，平台会重新核对成果；不要换一个操作编号重复接入，也不要手工重置主项目分支。',
+  },
+  DELIVERY_REMOTE_CHANGED: {
+    status: 409,
+    message: '这份代码的远端来源或目标与核对时不一致。',
+    impact: '平台没有合并主项目代码，也没有推送远端。',
+    requiredAction: '请先核对仓库的 origin 与推送地址、项目归属，再让开发会话重新送审。',
+  },
+  DELIVERY_REVIEW_REF_UNAVAILABLE: {
+    status: 503,
+    message: '暂时读取不到本次审核对应的远端代码。',
+    impact: '平台没有写入审核结论，也没有修改任何项目的代码。',
+    requiredAction: '请确认网络与已有 Git 登录配置后，用同一个操作编号继续；不要凭旧状态判定审核结果。',
+  },
+  DELIVERY_SOURCE_UPDATED: {
+    status: 409,
+    message: '这条工作线在送审之后又有了更新。',
+    impact: '本次没有接入旧成果，主项目代码没有被修改。',
+    requiredAction: '请让开发会话重新送审当前成果；新版本需要重新审核，不要用旧待办继续接入。',
+  },
+  SUBMISSION_NOT_FOUND: {
+    status: 404,
     message: '找不到这条送审记录。',
     impact: '没有领取审核，也没有修改代码。',
     requiredAction: '请核对送审编号后重试。',

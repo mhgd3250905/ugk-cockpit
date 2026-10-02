@@ -14,10 +14,20 @@
 // not an echo of whatever a child process printed.
 const NOTED = new Set();
 const CODE_NAME = /^[A-Z][A-Z0-9_]{2,63}$/;
+// Node/fs errno names share the constant shape (`ENOENT`, `EACCES`, `EPERM`),
+// but they are not a gap in the wording table — describing them as one sends
+// the reader looking for a missing entry instead of a missing file.
+const ERRNO_NAME = /^E[0-9A-Z]{2,9}$/;
 
+// Deliberate limit, stated rather than implied: this warns **once per map per
+// shape** for the life of the process. That is what keeps a hot fallback from
+// flooding stderr, and it costs frequency information — a code seen 4 000 times
+// looks the same as one seen once. `service.diagnostics` is the place that
+// would have to grow a counter if this ever needs volumes, not this module.
 export function noteUncuratedErrorCode(mapName, code) {
   let shape;
-  if (typeof code === 'string' && CODE_NAME.test(code)) shape = code;
+  if (typeof code === 'string' && CODE_NAME.test(code) && !ERRNO_NAME.test(code)) shape = code;
+  else if (typeof code === 'string' && ERRNO_NAME.test(code)) shape = `errno(${code})`;
   else if (typeof code === 'string') shape = 'lowercase-or-punctuated(string-code)';
   else if (typeof code === 'number') shape = 'child-process-exit-status(number-code)';
   // An absent code is not a gap in the wording table; saying so once per
