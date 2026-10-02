@@ -108,6 +108,25 @@ test('本轮登记的每个码都出现在真正会渲染它的那张表里，�
   }
 });
 
+test('兜底码的文案必须与它自己那两条真值字段兼容（不许再说「没有保存」）', () => {
+  // DELIVERY_CHECK_FAILED 是 preflight 与 submit 两条路径共同的 catch-all，而
+  // submit 的 catch 在 recordDelivery 已经建好并推上本地成果之后仍会到达（例如
+  // after_delivery_receipt 注入点抛出）。同一份响应里 localSaved/pushed 是真值、
+  // impact 由它们派生，所以文案若断言「没有保存或上传」就会与自己的字段矛盾——
+  // 这正是本轮在修的那类谎，只不过这次是我自己写进去的。
+  const [message, action] = DELIVERY_ERROR_MESSAGES.DELIVERY_CHECK_FAILED;
+  const denial = /没有保存|没有上传任何|未保存/;
+  assert.doesNotMatch(message, denial, 'DELIVERY_CHECK_FAILED denies a save it cannot rule out');
+  assert.doesNotMatch(action, denial, 'DELIVERY_CHECK_FAILED action denies a save it cannot rule out');
+  // 两条分支都要读得通：impact 由 localSaved/pushed 派生，文案不得与之一致性相反。
+  const saved = deliveryResponse({ ok: false, code: 'DELIVERY_CHECK_FAILED', localSaved: true, pushed: true });
+  const notSaved = deliveryResponse({ ok: false, code: 'DELIVERY_CHECK_FAILED', localSaved: false, pushed: false });
+  assert.match(saved.impact, /代码已上传/);
+  assert.match(notSaved.impact, /尚未确认新的保存/);
+  assert.equal(saved.message, message);
+  assert.match(action, /确认这次是否已经留下本地成果|原操作号/);
+});
+
 test('没有出现在任何一张表里的码，端到端仍只能得到通用回执（不许发明第三处兜底）', () => {
   const absent = 'DEFINITELY_NOT_CURATED_ANYWHERE_R35';
   assert.equal(curatedInPublic(absent), false);

@@ -52,10 +52,16 @@ export const DELIVERY_ERROR_MESSAGES = {
   // escaped error into deliveryResponse — including path-authorisation and
   // probe failures, which is why the same codes are curated twice rather than
   // once (each renderer only ever consults its own table).
-  DELIVERY_CHECK_FAILED: ['送审前的检查没有完成。', '平台没有保存或上传任何内容；请刷新项目页后重新预检，不要手工清理仓库或重置暂存区。'],
+  // This is the catch-all of BOTH the preflight and the submit path, and the
+  // submit path's catch is reachable *after* `recordDelivery` has already
+  // created and pushed the local result. So the wording must not claim nothing
+  // was saved: `deliveryResponse` derives the truthful `impact` from
+  // `result.localSaved` / `result.pushed`, and this sentence has to stay
+  // compatible with either branch.
+  DELIVERY_CHECK_FAILED: ['送审检查或保存没有完成，本次结果未经确认。', '请在项目页确认这次是否已经留下本地成果，再决定重新预检还是用原操作号恢复；平台没有清理、重置或覆盖任何文件。'],
   DELIVERY_SOURCE_NOT_FOUND: ['平台里找不到这份代码对应的送审来源。', '请先在项目页确认代码位置仍然在册；需要时重新选择文件夹，不要重新 init。'],
   SOURCE_STATE_CHANGED: ['这份代码在检查之后又发生了变化。', '请保留当前文件并重新预检，不要用旧的预检结果继续送审。'],
-  TREE_MISMATCH: ['要保存的内容与预检时核对的成果不一致。', '平台没有创建提交；请重新预检并按新的文件清单送审，不要手工重置暂存区。'],
+  TREE_MISMATCH: ['要保存的内容与预检时核对的成果不一致。', '平台没有把这份不一致的成果记为已送审；请按当前文件重新预检后再送审，不要手工重置暂存区。'],
   REMOTE_BRANCH_NOT_FOUND: ['远端还没有这条工作线，无法核对它的最新状态。', '本地成果保持不变；请确认远端分支名或使用新的预检结果，不要强推创建。'],
   UNSAFE_REMOTE_NAME: ['这个远端名称不能安全地用于自动送审。', '平台没有连接该远端；请在仓库里改用普通的远端名称后重新预检。'],
   GIT_BUFFER_LIMIT_EXCEEDED: ['本地 Git 返回的内容超出安全读取上限，送审前检查未能完成。', '平台没有依据这份不完整的结果保存或上传；请检查该工作副本是否产生了异常巨大的 Git 输出后重新预检。'],
