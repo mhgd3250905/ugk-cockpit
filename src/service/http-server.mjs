@@ -68,6 +68,7 @@ import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { deliveryResponse } from '../core/delivery-messages.mjs';
+import { noteUncuratedErrorCode } from '../core/uncurated-error-code.mjs';
 import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
 import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
@@ -160,7 +161,9 @@ const WORKSPACE_PENDING_ERROR = {
   requiredAction: '请在开发空间区域使用“恢复并核对”，沿原请求继续核对，不要新建删除或重新开始请求。',
 };
 
-const PUBLIC_ERRORS = {
+// Exported only so the registration gate in `test/` can enumerate the same key
+// set `sendError` consults. Nothing outside this repository renders it.
+export const PUBLIC_ERRORS = {
   CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED: {
     status: 409, message: '需要项目所有者在工作台授权转交。',
     impact: '代码与现有会话归属没有改变。',
@@ -328,6 +331,35 @@ const PUBLIC_ERRORS = {
     message: '这个文件夹还没有获得访问授权。',
     impact: 'Cockpit 没有读取或修改该文件夹。',
     requiredAction: '请重新选择项目文件夹并确认授权。',
+  },
+  // `src/core/path-guard.mjs` throws four other PathScopeError codes and all of
+  // them were curated; these two were the ones left out, so the guard's own
+  // user-facing sentence was discarded and replaced by the generic receipt.
+  PATH_OUTSIDE_SCOPE: {
+    status: 403,
+    message: '所选路径跳出了已授权的文件夹，已停止访问。',
+    impact: 'Cockpit 没有读取或修改这个文件夹里的任何内容。',
+    requiredAction: '请在项目页重新选择该项目的文件夹并确认授权；项目确实搬了位置请使用「确认新代码位置」，不要把路径改成链接或别的目录。',
+  },
+  PATH_CHANGED: {
+    status: 409,
+    message: '路径在确认后发生变化，已停止访问。',
+    impact: '这次访问在读到任何内容之前就停止了，Cockpit 没有修改任何文件。',
+    requiredAction: '请确认这个项目目录此刻是否被移动、改名或换成了链接；恢复原位置后刷新项目页重试，位置确实变了请走「确认新代码位置」。',
+  },
+  // Two git-layer failures that reach the HTTP layer with their own code: the
+  // probe output cap and a git command that answered with something unusable.
+  GIT_BUFFER_LIMIT_EXCEEDED: {
+    status: 503,
+    message: '本地 Git 返回的内容超出安全读取上限，代码状态未能核验。',
+    impact: 'Cockpit 没有依据这份不完整的结果修改代码或记录。',
+    requiredAction: '请检查这个工作副本是否产生了异常巨大的 Git 输出（例如未被忽略的巨型日志目录）；处理前不要结束会话或送审，刷新后重新核验。',
+  },
+  GIT_ERROR: {
+    status: 503,
+    message: '本地 Git 命令返回了无法处理的结果。',
+    impact: 'Cockpit 没有依据这次失败创建、切换或删除任何代码工作线。',
+    requiredAction: '请先刷新项目页的代码状态；持续失败时确认该目录仍是可访问的 Git 仓库，不要在结果未知时重复创建同名工作线。',
   },
   RUN_NOT_FOUND: {
     status: 404,
@@ -1104,6 +1136,34 @@ const PUBLIC_ERRORS = {
     impact: '没有写入审核结论，也没有替换当前审核者。',
     requiredAction: '请回到当前审核会话继续；更换处理人必须由用户明确撤回后再领取。',
   },
+  // `/api/v1/mcp/integration/review` and `/merge` hand the core result code
+  // straight to sendError, so these four were reaching the client as
+  // REQUEST_FAILED — whose generic receipt tells the reader to retry, which is
+  // exactly the wrong instruction once the local main line may have moved.
+  INVALID_VERDICT: {
+    status: 400,
+    message: '审核结论不是平台认识的值。',
+    impact: '没有写入审核结论，也没有修改代码。',
+    requiredAction: '请使用项目页生成的审核指令，结论只能是 approved、changes_requested 或 rejected 之一；不要自行改写结论措辞。',
+  },
+  CLAIM_SUBMISSION_MISMATCH: {
+    status: 409,
+    message: '这次回执指向的送审记录与当前领取记录不是同一条。',
+    impact: '没有写入回执，也没有修改主项目代码。',
+    requiredAction: '请从项目页重新复制当前待办的审核指令；不要拿另一条送审的编号继续这次合并。',
+  },
+  INVALID_SOURCE_COMMIT: {
+    status: 409,
+    message: '要接入主项目的提交号无法作为完整 Git 对象号核验。',
+    impact: '平台没有合并、改写或推送主项目代码。',
+    requiredAction: '请让开发会话重新送审当前成果并使用它给出的提交号；不要手工填入或截短提交号。',
+  },
+  MERGE_UNVERIFIED: {
+    status: 409,
+    message: '本地主项目已完成合并动作，但合并后的复核没有通过。',
+    impact: '主项目分支可能已经前进；平台没有把这次合并记为完成，也没有推送远端。',
+    requiredAction: '请保留这次的操作编号继续合并，平台会重新复核后再决定；不要换一个操作编号重复合并，也不要手工重置或回退主项目分支。',
+  },
   MAIN_HAS_CHANGES: {
     status: 409,
     message: '主项目当前有尚未保存的本地改动。',
@@ -1511,6 +1571,7 @@ function sendJson(response, statusCode, body) {
 }
 
 function sendError(response, code, { commandId = null, extra = {}, context = null } = {}) {
+  if (PUBLIC_ERRORS[code] === undefined) noteUncuratedErrorCode('PUBLIC_ERRORS', code);
   const definition = PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.REQUEST_FAILED;
   const contextFields = normalizeConversationErrorContext(context);
   if (context?.sessionValidated === true && contextFields.sessionId) {
@@ -5513,7 +5574,10 @@ export async function createCockpitHttpServer({
       const code = error instanceof SyntaxError
         ? 'INVALID_REQUEST'
         : (sqliteBusy ? 'DATABASE_BUSY' : error?.code);
-      sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED', {
+      // `sendError` is the single place that maps an unknown code onto the
+      // generic receipt; collapsing here too would hide the code from its
+      // uncurated-code warning.
+      sendError(response, code, {
         context: error?.context,
         // Curated guidance (e.g. the declaredWorkspace fallback hint) may
         // replace the generic whitelist text for its own code.

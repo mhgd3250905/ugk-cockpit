@@ -1,4 +1,8 @@
-const messages = {
+import { noteUncuratedErrorCode } from './uncurated-error-code.mjs';
+
+// Exported so the registration gate can assert coverage over the same key set
+// `deliveryResponse` consults; a private literal cannot be gated.
+export const DELIVERY_ERROR_MESSAGES = {
   COMMIT_IDENTITY_MISSING: ['尚未配置可用于保存的 Git 作者信息。', '请先配置 user.name 和 user.email；平台不会冒用其他人的身份。'],
   DELIVERY_CACHE_INVALID: ['预检临时数据已失效。', '已有代码会保留，请重新预检；不要手动清理项目文件。'],
   DELIVERY_PUSH_FAILED: ['未能确认普通推送成功。', '本地保存会保留；请核对已有 Git 登录和网络后使用原请求恢复，不要强推。'],
@@ -23,6 +27,9 @@ const messages = {
   UNFINISHED_GIT_OPERATION: ['这份代码还有未处理完的 Git 操作。', '请先完成当前冲突或操作，再重新送审；平台不会自行中止它。'],
   GIT_FILTER_UNSUPPORTED: ['这份代码使用了暂不支持的内容转换配置。', '请在原开发工具中完成保存上传后核对兼容性；不要关闭转换规则强行提交。'],
   UNSAFE_REMOTE_URL: ['远程地址或重定向配置不能安全用于自动送审。', '请核对仓库配置；平台不会运行自定义传输命令。'],
+  // Thrown by the same validator as UNSAFE_REMOTE_URL, a few branches away, for
+  // the case where the URL itself carries an account or token.
+  CREDENTIALS_IN_REMOTE_URL: ['远程地址里带着账号或令牌，这次送审已被拒绝。', '请把凭据从远程地址中移除，改用 Git 自身的凭据管理器或 SSH 配置，然后用新的请求号重新预检；平台不会代你改写远程地址，也没有上传任何代码。'],
   DELIVERY_INDEX_LOCKED: ['另一个 Git 操作正在使用暂存区。', '请等该操作完成后恢复送审，不要删除锁文件。'],
   DELIVERY_INDEX_CHANGED: ['成果已保存，但暂存区随后发生了变化。', '平台保留了当前暂存内容；请核对选中文件后重新预检，不要重置。'],
   DELIVERY_MERGE_CONFLICT: ['这次交付仍有合并冲突，不能记录为审核通过。', '请记录需要修改的意见，并由开发会话解决后重新送审。'],
@@ -45,7 +52,10 @@ const messages = {
 
 export function deliveryResponse(result) {
   if (result.ok) return result;
-  const known = messages[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
+  if (DELIVERY_ERROR_MESSAGES[result.code] === undefined) {
+    noteUncuratedErrorCode('delivery-messages', result.code);
+  }
+  const known = DELIVERY_ERROR_MESSAGES[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
   let required_action = known[1];
   if (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file) {
     required_action = `请从送审范围移除超限文件（${result.details.file}），或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。`;
