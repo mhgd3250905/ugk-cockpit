@@ -67,8 +67,13 @@ test('push through submit path refuses a self-authorized ext:: remote without ex
   gitSync(repo, ['config', 'protocol.ext.allow', 'always']);
   gitSync(repo, ['config', 'remote.origin.url', helperUrl]);
 
+  // The rejection must be the URL policy's own code. Without a predicate any
+  // throw at all passed here — a missing remote, an invalid remote name, a
+  // timeout — and the test still reported that a self-authorized ext:: remote
+  // was refused.
   await assert.rejects(
     () => pushSubmissionBranch(repo, { remote: 'origin', branch: 'main' }),
+    (error) => error.code === 'UNSAFE_REMOTE_URL',
   );
   assert.equal(existsSync(marker), false,
     'repo-local protocol.ext.allow must not survive the hardened git prefix');
@@ -77,6 +82,7 @@ test('push through submit path refuses a self-authorized ext:: remote without ex
   gitSync(repo, ['config', 'remote.origin.url', helperUrl]);
   await assert.rejects(
     () => pushIntegratedMain(repo, { remote: 'origin', branch: 'main' }),
+    (error) => error.code === 'UNSAFE_REMOTE_URL',
   );
   assert.equal(existsSync(marker), false,
     'integration push must validate the resolved remote URL before any network op');

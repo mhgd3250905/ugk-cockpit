@@ -24,7 +24,21 @@ import {
 } from '../src/git/workspace-ops.mjs';
 import { createCockpitHttpServer } from '../src/service/http-server.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
+import {
+  assertCleanDriverRunsHere,
+  assertDriverAttributeBound,
+  hostileDriverBody,
+} from '../scripts/test-support/hostile-driver.mjs';
 import { inspectZcodeLegacy } from '../scripts/setup-zcode.mjs';
+
+// Fixture git must observe the same config contract as the product
+// (safeGitEnvironment strips system/global git config): these fixtures build
+// repository state with ambient git and then assert what the product's
+// no-config git sees, so an ambient setting that changes hashing or line
+// endings would be a phantom change only the product view cannot reproduce.
+// Same convention as test/submission-service.test.mjs.
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 // POSIX 的系统临时目录本身是符号链接；路径授权按契约拒绝穿越链接。
 function fixtureTempRoot() {
@@ -42,11 +56,18 @@ async function post(service, pathname, body) {
 }
 
 // A repository whose local config declares a clean filter whose command writes
-// a sentinel file. `git status` hashes the dirty tracked file through the
-// filter, so the sentinel proves attacker-controlled code ran. The fixture
-// itself triggers the filter once while committing .gitattributes, so it
-// deletes the sentinel before returning: callers assert on absence AFTER the
-// operation under test.
+// a sentinel file, and whose `.gitattributes` binds that driver to `*.txt`.
+//
+// Whether Git runs a clean filter while it is only *reading* (status, or the
+// index refresh a commit performs) is a stat-cache decision, not a requirement:
+// measured on this machine, driving the real `probeGitWorktree` over this fixture
+// produced the sentinel in only 74 of 80 attempts. That is what made this file an
+// intermittent red on main, and it is why nothing here asserts "this read ran the
+// filter". Two things that are certain are asserted instead, both through the
+// shared helper: the sentinel body really runs in this repository when Git has no
+// choice but to invoke it, and this repository really binds that body to a tracked
+// path. The sentinel is deleted before returning: callers assert on absence AFTER
+// the operation under test.
 function createHostileRepo(parent, name, sentinelPath) {
   const repo = path.join(parent, name);
   mkdirSync(repo, { recursive: true });
@@ -56,17 +77,13 @@ function createHostileRepo(parent, name, sentinelPath) {
   writeFileSync(path.join(repo, 'file.txt'), 'hello\n');
   execFileSync('git', ['add', 'file.txt'], { cwd: repo });
   execFileSync('git', ['commit', '-qm', 'init'], { cwd: repo });
-  // `printf` needs no stdin, so the filter child can never linger waiting for
-  // input that git may not close promptly; it just writes and exits.
-  const command = process.platform === 'win32'
-    ? `touch "${sentinelPath}"; printf x`
-    : `touch '${sentinelPath}'; printf x`;
-  execFileSync('git', ['config', 'filter.evil.clean', command], { cwd: repo });
+  execFileSync('git', ['config', 'filter.evil.clean', hostileDriverBody(sentinelPath)], { cwd: repo });
   writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=evil\n');
   execFileSync('git', ['add', '.gitattributes'], { cwd: repo });
   execFileSync('git', ['commit', '-qm', 'attr'], { cwd: repo });
   writeFileSync(path.join(repo, 'file.txt'), 'changed\n');
-  rmSync(sentinelPath, { force: true });
+  assertCleanDriverRunsHere(repo, sentinelPath);
+  assertDriverAttributeBound(repo, 'file.txt', 'evil');
   return repo;
 }
 
@@ -133,11 +150,15 @@ test('hostile repository: createDevelopmentWorkspace gates before its first prob
   const sentinel = path.join(container, 'sentinel-create.txt');
   const hostileRepo = createHostileRepo(container, 'hostile-create', sentinel);
 
-  // Setup runs one probe to register the project; remove the sentinel it
-  // creates so the assertion afterwards only detects the flow under test.
+  // Setup runs one probe only to register the project. Whether that read runs
+  // the clean filter is a Git stat-cache decision, not a guarantee: measured on
+  // this machine, 6 of 80 probes of this exact repository produced no sentinel.
+  // Nothing is asserted about it, because the ordering proof below is the
+  // injected probe seam, which answers the question every time, and
+  // createHostileRepo already proved this sentinel body runs in this repository
+  // when Git has no choice about it.
   const observation = await probeGitWorktree(hostileRepo);
-  assert.equal(existsSync(sentinel), true, 'fixture sanity: status itself runs the filter');
-  rmSync(sentinel);
+  rmSync(sentinel, { force: true });
 
   const dbPath = path.join(container, 'cockpit.db');
   const db = openCockpitDatabase(dbPath);

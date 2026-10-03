@@ -15,6 +15,11 @@ import {
 } from '../src/core/submission-service.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushSubmissionBranch } from '../src/git/submit-ops.mjs';
+import {
+  assertCleanDriverRunsHere,
+  assertDriverAttributeBound,
+  hostileDriverBody,
+} from '../scripts/test-support/hostile-driver.mjs';
 
 // Fixture git must observe the same config contract as the product
 // (safeGitEnvironment strips system/global git config): a runner whose
@@ -376,15 +381,25 @@ test('a workspace without a write lease is not blocked by the ownership check', 
   assert.equal(retry.ok, true, JSON.stringify(retry));
 });
 
-// 真实调用链验证：探针里的 `git status` 足以触发 clean 过滤器，因此送审必须在
-// 探测之前就拒绝敌意仓库，而不是等到 rejectUnsupportedSubmitFeatures。
+// 真实调用链验证：敌意仓库必须在探测之前就被拒绝，而不是等到
+// rejectUnsupportedSubmitFeatures。探针的那次 `git status` 会不会重清洗跟踪文件
+// 属于 Git 的 stat 缓存判断（见 scripts/test-support/hostile-driver.mjs），所以
+// 本用例的能力证明走 `git add` 这个无法回避的触发点。
 // 开发空间是主项目的链接工作副本，二者共享 common 目录的配置与属性来源。
 test('a hostile repository is refused before the first probe of the real submit chain', async (t) => {
   const f = await fixture(t);
   const marker = path.join(f.root, 'pwned-by-submit-probe.txt');
   writeFileSync(path.join(f.mainPath, '.git', 'info', 'attributes'), '* filter=evil\n');
-  git(f.mainPath, ['config', '--local', 'filter.evil.clean',
-    `node -e "require('fs').writeFileSync('${marker.split(path.sep).join('/')}','pwned')"`]);
+  git(f.mainPath, ['config', '--local', 'filter.evil.clean', hostileDriverBody(marker)]);
+  // Two controls, and deliberately no third. Asserted: this repository binds the
+  // driver to a tracked path, and this repository's own body really writes its
+  // marker when Git has to run it. Not asserted: whether a read-only
+  // `git status` re-cleans a tracked file — that is a Git stat-cache decision,
+  // measured unreliable here, and claiming it is what made audit-2026-09-11 an
+  // intermittent red on main. Ordering rests on the refusal code plus the marker
+  // check below.
+  assertDriverAttributeBound(f.mainPath, 'README.md', 'evil');
+  assertCleanDriverRunsHere(f.mainPath, marker);
 
   const result = await submitDevelopmentSpace(f.db, {
     commandId: 'submit-hostile-probe',

@@ -15,6 +15,7 @@ import { openCockpitDatabase, SUPPORTED_SCHEMA_VERSION } from '../src/core/datab
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { registerProject, refreshProject } from '../src/core/projects.mjs';
 import { statIdentityPair } from '../src/core/identity-migration.mjs';
+import { hostileDriverBody } from '../scripts/test-support/hostile-driver.mjs';
 
 // 阻塞式短睡眠：不能用 while(Date.now()) 忙等，那在共享 CPU 的 CI 上会拖满整秒。
 function sleepMs(ms) {
@@ -174,7 +175,12 @@ test('a hostile configuration removed later converges the row instead of strandi
   db.close();
 
   // 敌意仓库永远不允许被迁移探测（既有安全契约），因此这一次开库什么也不改。
-  gitSync(repo, ['config', '--local', 'filter.evil.clean', 'touch /tmp/ugk-pwned']);
+  // 这里只让配置本身成为敌意来源：夹具仓库没有任何被跟踪文件，也没有把
+  // `filter=evil` 绑到路径上，所以驱动不可能被调用——闸门决定才是本用例的对象，
+  // 没有副作用断言。驱动体按 scripts/test-support/hostile-driver.mjs 收进容器，
+  // 取代原来 Windows 上取不到、且会写到夹具之外的 `touch /tmp/ugk-pwned`。
+  gitSync(repo, ['config', '--local', 'filter.evil.clean',
+    hostileDriverBody(path.join(container, 'never-pwned-by-removed-hostile-config.txt'))]);
   db = openCockpitDatabase(dbPath);
   assert.deepEqual(
     await identities(db, probe.canonicalPath),
@@ -272,8 +278,10 @@ test('a settled row is skipped outright, not re-probed, on later opens', async (
 
   // 观察缝隙：真漂移行原本每次开库都要过一次敌意配置闸门。事后给仓库加上敌意
   // 配置，如果实现仍去重新判定这一行，闸门会抛错并把行送回 retry 台账；跳过它
-  // 才说明「已判定」真的省掉了重复探测。
-  gitSync(repo, ['config', '--local', 'filter.evil.clean', 'touch /tmp/ugk-pwned']);
+  // 才说明「已判定」真的省掉了重复探测。驱动同样只是配置来源（该仓库没有可清洗
+  // 的跟踪文件），判据是台账与库存值，不是任何副作用。
+  gitSync(repo, ['config', '--local', 'filter.evil.clean',
+    hostileDriverBody(path.join(container, 'never-pwned-by-settled-row-skip.txt'))]);
   db = openCockpitDatabase(dbPath);
   assert.deepEqual(
     identityMigrationBacklog(db).filter((entry) => entry.canonicalPath === probe.canonicalPath),
