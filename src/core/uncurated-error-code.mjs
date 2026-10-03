@@ -24,6 +24,25 @@ const ERRNO_NAME = /^E[0-9A-Z]{2,9}$/;
 // flooding stderr, and it costs frequency information — a code seen 4 000 times
 // looks the same as one seen once. `service.diagnostics` is the place that
 // would have to grow a counter if this ever needs volumes, not this module.
+// A caught error's `code` is not necessarily a product code. `git()` rethrows
+// the raw execFile error, whose `code` is a numeric exit status, and Node errnos
+// arrive the same way. Such a value must never be handed on as the public code:
+// neither wording table can curate it, so the client silently gets the generic
+// receipt while the command journal and `last_error_code` persist the garbage and
+// replay it on every retry. Collapse to the caller's own family code and let
+// `message` keep the diagnostic detail.
+export function isProductErrorCode(value) {
+  return typeof value === 'string' && CODE_NAME.test(value) && !ERRNO_NAME.test(value);
+}
+
+export function publicErrorCode(value, fallback) {
+  if (isProductErrorCode(value)) return value;
+  if (!isProductErrorCode(fallback)) {
+    throw new TypeError('publicErrorCode fallback must itself be a product code.');
+  }
+  return fallback;
+}
+
 export function noteUncuratedErrorCode(mapName, code) {
   let shape;
   if (typeof code === 'string' && CODE_NAME.test(code) && !ERRNO_NAME.test(code)) shape = code;

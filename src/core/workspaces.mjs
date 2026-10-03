@@ -8,6 +8,7 @@ import {
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { singleFlight } from './single-flight.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
 import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import {
@@ -1168,7 +1169,7 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
     } catch (error) {
       return failOrUnknown({
         ok: false,
-        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        code: publicErrorCode(error.code, 'WORKSPACE_PROBE_FAILED'),
         spaceId: space.spaceId,
         message: error.message,
       });
@@ -1468,7 +1469,7 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     } catch (error) {
       return failOrUnknown({
         ok: false,
-        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        code: publicErrorCode(error.code, 'WORKSPACE_PROBE_FAILED'),
         spaceId: space.spaceId,
         message: error.message,
       });

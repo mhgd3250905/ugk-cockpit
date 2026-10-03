@@ -4,6 +4,7 @@ import {
   parseCommandResponse,
 } from './command-journal.mjs';
 import { singleFlight } from './single-flight.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { verifyReviewDelivery, importReviewedDelivery } from './delivery-review.mjs';
 import { discardDeliveryCache } from './delivery-cache.mjs';
@@ -179,12 +180,12 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
     await assertMainAllowed(binding.project, options);
     main = await probeMain(binding.project, options);
   } catch (error) {
-    return { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' };
+    return { ok: false, code: publicErrorCode(error.code, 'INTEGRATION_PROBE_FAILED') };
   }
   let deliveryReview = null;
   if (submission.delivery?.sourceId) {
     try { deliveryReview = await verifyReviewDelivery(submission, binding.project); }
-    catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+    catch (error) { return { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED') }; }
   }
   if (!deliveryReview && main.after.hasChanges) return { ok: false, code: 'MAIN_HAS_CHANGES' };
   if (!deliveryReview) {
@@ -217,7 +218,7 @@ export async function beginIntegrationReview(db, request = {}, options = {}) {
       options.assertSessionWrite?.(sessionId);
       db.prepare('UPDATE submissions SET delivery_json = ? WHERE id = ?').run(
         JSON.stringify({ ...refreshed.delivery, reviewCache: deliveryReview.cache }), submissionId);
-    } catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED', claimId: claimed.claimId }; }
+    } catch (error) { return { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED'), claimId: claimed.claimId }; }
   }
   return {
     ok: true,
@@ -333,7 +334,7 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
     await assertMainAllowed(binding.project, options);
     main = await probeMain(binding.project, options);
   } catch (error) {
-    return failCommand(db, commandId, { ok: false, code: error.code ?? 'INTEGRATION_PROBE_FAILED' }, options);
+    return failCommand(db, commandId, { ok: false, code: publicErrorCode(error.code, 'INTEGRATION_PROBE_FAILED') }, options);
   }
   if (submission.delivery?.sourceId) {
     if (verdict === 'approved' && submission.delivery.relation === 'conflict') {
@@ -341,7 +342,7 @@ export async function recordSessionIntegrationReview(db, request = {}, options =
     }
     try { await verifyReviewDelivery(submission, binding.project); }
     catch (error) {
-      return failCommand(db, commandId, { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }, options);
+      return failCommand(db, commandId, { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED') }, options);
     }
   } else {
     if (main.after.branch !== submission.targetBranch) {
@@ -507,7 +508,9 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
     try {
       remoteName = choosePushRemote(await (options.listGitRemotes ?? listGitRemotes)(binding.project.canonical_path));
     } catch (error) {
-      return failCommand(db, commandId, { ok: false, code: error.code, message: error.message }, options);
+      return failCommand(db, commandId, {
+        ok: false, code: publicErrorCode(error.code, 'INTEGRATION_FAILED'), message: error.message,
+      }, options);
     }
     const createdAt = timestamp(options);
     db.prepare(`
@@ -595,7 +598,7 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
         // the fast-forward and the push.
         assertLockHeld();
         try { await (options.importReviewedDelivery ?? importReviewedDelivery)(latestSubmission, binding.project); }
-        catch (error) { return { ok: false, code: error.code ?? 'DELIVERY_CHECK_FAILED' }; }
+        catch (error) { return { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED') }; }
       }
       if (main.after.branch !== attempt.targetBranch) {
         updateAttempt(db, commandId, { state: 'attention', last_error_code: 'MAIN_BRANCH_CHANGED' }, options);
@@ -716,7 +719,8 @@ async function mergeApprovedSubmissionOnce(db, request = {}, options = {}) {
     }, options);
   } catch (error) {
     if (error?.simulateCrash) throw error;
-    return retryableMergeError(db, readIntegrationAttempt(db, commandId), error.code ?? 'INTEGRATION_FAILED', error.message, options);
+    return retryableMergeError(db, readIntegrationAttempt(db, commandId),
+      publicErrorCode(error.code, 'INTEGRATION_FAILED'), error.message, options);
   } finally {
     releaseRepositoryLock(db, {
       repositoryIdentity: binding.project.repository_identity,

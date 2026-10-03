@@ -1285,6 +1285,24 @@ export const PUBLIC_ERRORS = {
     impact: '本地主项目的新保存点保持完整；平台没有回退或重写历史。',
     requiredAction: '请检查网络或远端权限后，用完全相同的合并请求重试。',
   },
+  // 第 36 轮：这两个码是接入链路上「拿不到产品码」时的收束点（见
+  // src/core/uncurated-error-code.mjs 的 publicErrorCode）。收束点必须自带回执，
+  // 否则修完数字码只是把 128 换成一个同样没登记的常量名。措辞按同族规则不否认任何
+  // 真值字段：INTEGRATION_FAILED 既可能来自快进之前，也可能来自主项目已经前进、
+  // 甚至推送之后落库之前的位置，而 localIntegrated/pushed 由 integration/merge 路由
+  // 随本次响应一并给出（见 integrationErrorExtra），所以这两句必须在两种取值下都读得通。
+  INTEGRATION_FAILED: {
+    status: 409,
+    message: '这次合并没有完成，结果未经确认。',
+    impact: '本地主项目与远端是否已被这次操作前进，以本次回执里的「本地已接入」「已推送」为准；平台没有回退、清理或覆盖任何内容。',
+    requiredAction: '请先在项目页核对主项目当前状态，再用完全相同的合并请求继续；平台会重新复核后再决定，不要换一个操作编号重复合并。',
+  },
+  INTEGRATION_PROBE_FAILED: {
+    status: 503,
+    message: '还没能读到主项目的当前状态，审核或合并已停止。',
+    impact: '这次调用没有改动主项目、开发分支或审核记录；平台不会用读不到的状态代替检查。',
+    requiredAction: '请确认主项目文件夹仍在原位置且没有其它 Git 操作占用它，然后刷新项目状态并重试本次操作。',
+  },
   MAIN_CHANGED_AFTER_INTEGRATION: {
     status: 409,
     message: '本地接入完成后，主项目又发生了变化。',

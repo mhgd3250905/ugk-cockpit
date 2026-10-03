@@ -19,6 +19,7 @@ import { submitDevelopmentSpace } from '../src/core/submission-service.mjs';
 import { probeGitWorktree } from '../src/git/probe.mjs';
 import { pushIntegratedMain } from '../src/git/integration-ops.mjs';
 import { appendProgressEvent } from '../src/core/assignments.mjs';
+import { PUBLIC_ERRORS } from '../src/service/http-server.mjs';
 import { createRelay, resumeRelay } from '../src/core/relays.mjs';
 
 const git = (cwd, args) => execFileSync('git', args, {
@@ -177,6 +178,59 @@ test('transfer freeze prevents merge and subsequent push at write boundaries', a
     else assert.equal(git(f.mainPath, ['rev-parse', 'HEAD']), f.sourceCommit);
     assert.equal(git(f.remotePath, ['rev-parse', 'refs/heads/main']), before);
   }
+});
+
+// 第 36 轮审计（2026-10-04）· 接入路径的公开码收束。
+//
+// `mergeApprovedSubmissionOnce` 末尾的 catch 写成 `error.code ?? 'INTEGRATION_FAILED'`，
+// 而 `src/git/probe.mjs` 的 `git()` 对失败的 git 子进程**原样重抛** execFile 错误：
+// 其 `code` 是数字退出码（本机实测 128）。这个数字因此同时变成
+// ① HTTP 回执里的 `code`（`PUBLIC_ERRORS` 查不到 → 降级为通用回执，真实码丢失），
+// ② 命令流水与 `integration_attempts.last_error_code` 的持久值，重放时原样再发一次。
+// 「固定公开码 + 原始信息只进 message」是同族已有的收束姿势。
+test('git 子进程的原始退出码不得成为接入回执码与流水里的持久码', async (t) => {
+  const f = await fixture(t);
+  const { begun, reviewed } = await approve(f);
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'merge-raw-exit-code', sessionId: 'session-main', submissionId: f.submissionId,
+    claimId: begun.claimId, expectedRevision: 2, expectedSubmissionRevision: reviewed.submissionRevision,
+    expectedClaimRevision: reviewed.claimRevision, summary: '快进失败',
+  }, {
+    // 错误形状取自 `git()` 的真实产物，不是手抄常量：`fastForwardMain` 是这段里
+    // 唯一没有被内层 catch 收束的 git 调用，git 子进程失败（本机实测退出码 128）
+    // 会带着数字 `code` 直接落进外层 catch。
+    fastForwardMain: async () => {
+      throw Object.assign(new Error("fatal: unable to read tree: git merge --ff-only exited with code 128"), { code: 128 });
+    },
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(typeof result.code, 'string', `public code was ${JSON.stringify(result.code)}`);
+  assert.ok(Object.hasOwn(PUBLIC_ERRORS, result.code),
+    `${JSON.stringify(result.code)} is not curated, so the receipt degrades and the real code is dropped`);
+  const attempt = readIntegrationAttempt(f.db, 'merge-raw-exit-code');
+  assert.equal(typeof attempt.lastErrorCode, 'string',
+    `persisted last_error_code was ${JSON.stringify(attempt.lastErrorCode)}`);
+  assert.match(String(attempt.lastErrorMessage), /128/, 'the git exit status vanished from the diagnostic');
+});
+
+// 反向对照（主干上即绿）：收束只针对拿不到产品码的失败。同一个未被内层 catch
+// 收束的落点上，带产品码的兄弟形状必须继续原样呈现，否则这条修复会把已经登记好
+// 的回执也一起塌成通用码。
+test('反向对照：带产品码的接入失败仍原样成为回执码与持久码', async (t) => {
+  const f = await fixture(t);
+  const { begun, reviewed } = await approve(f);
+  const result = await mergeApprovedSubmission(f.db, {
+    commandId: 'merge-curated-code', sessionId: 'session-main', submissionId: f.submissionId,
+    claimId: begun.claimId, expectedRevision: 2, expectedSubmissionRevision: reviewed.submissionRevision,
+    expectedClaimRevision: reviewed.claimRevision, summary: '输出超限',
+  }, {
+    fastForwardMain: async () => {
+      throw Object.assign(new Error('git output exceeded maxBuffer'), { code: 'GIT_BUFFER_LIMIT_EXCEEDED' });
+    },
+  });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.code, 'GIT_BUFFER_LIMIT_EXCEEDED');
+  assert.equal(readIntegrationAttempt(f.db, 'merge-curated-code').lastErrorCode, 'GIT_BUFFER_LIMIT_EXCEEDED');
 });
 
 test('main session claims, reviews, fast-forwards, pushes, receipts, and replays idempotently', async (t) => {

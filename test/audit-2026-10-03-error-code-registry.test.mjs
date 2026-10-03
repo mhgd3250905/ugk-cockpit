@@ -14,7 +14,7 @@
 // 的整体折叠，并先断言提取结果本身的形状；只点名已知成员的话，新增一个形状就会
 // 被静默漏掉。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { PUBLIC_ERRORS } from '../src/service/http-server.mjs';
 import { DELIVERY_ERROR_MESSAGES, deliveryResponse } from '../src/core/delivery-messages.mjs';
@@ -341,4 +341,116 @@ test('告警只点名码本身：大写常量原样、其它形状只报种类�
   assert.match(all.join(''), /A_FRESH_CODE/);
   assert.match(all.join(''), /PUBLIC_ERRORS/);
   assert.ok(!all.some((line) => /eACCES|128/.test(line)), `echoed a raw value: ${JSON.stringify(all)}`);
+});
+
+// 第 36 轮审计（2026-10-04）· caught-error 收束族。
+//
+// `mergeApprovedSubmissionOnce` 的外层 catch 原先写成 `error.code ?? 'INTEGRATION_FAILED'`，
+// 而 `git()` 对失败的 git 子进程原样重抛 execFile 错误：其 `code` 是数字退出码
+// （本机实测 128）。`128 ?? x` 取的是 128，于是这个数字同时成为 HTTP 回执里的 `code`
+// （表里查不到 → 降级成通用回执，真实码丢失）与 `integration_attempts.last_error_code`
+// 及命令流水里的持久值，重放时原样再发一次。`publicErrorCode` 把「什么才算产品码」
+// 收在一处，判据沿用本文件上面那条告警的同一形状。
+//
+// 兜底字面量按文件核对到**渲染它的那张表**：本族的文件清单与表面归属是人工维护的
+// （和上面 RENDERED_BY 同一款已实测局限），但「新增一个收束点却忘了登记兜底码」
+// 与「把兜底写成变量/模板串从而绕过提取」这两类都会立刻判红。
+const COLLAPSE_SITES = [
+  { file: 'src/core/integration-service.mjs', tables: ['PUBLIC_ERRORS'] },
+  { file: 'src/core/workspaces.mjs', tables: ['PUBLIC_ERRORS'] },
+  // 送审结果的码可能同时被两张表读到，因此这里的兜底要求两边都在。
+  { file: 'src/core/delivery-service.mjs', tables: ['PUBLIC_ERRORS', 'delivery-messages'] },
+];
+
+const COLLAPSE_FILES = COLLAPSE_SITES.map((site) => site.file);
+
+function collapseFallbacks(source) {
+  return [...source.matchAll(/publicErrorCode\(\s*[\w.]+\s*,\s*'([A-Z][A-Z0-9_]+)'\s*\)/g)].map((m) => m[1]);
+}
+
+test('publicErrorCode 的每个兜底字面量都在渲染它的表里登记', () => {
+  let sites = 0;
+  for (const { file, tables } of COLLAPSE_SITES) {
+    const source = readRepositoryFile(file);
+    const calls = (source.match(/publicErrorCode\(/g) ?? []).length;
+    const fallbacks = collapseFallbacks(source);
+    // 消费计数钉：调用了 N 次就必须提取到 N 个字面量兜底。写成变量、模板串或
+    // 漏参数都会在这里断开，而不是静默少审一个落点。
+    assert.equal(fallbacks.length, calls, `${file}: ${calls} collapse sites but extraction consumed ${fallbacks.length}`);
+    sites += calls;
+    for (const code of new Set(fallbacks)) {
+      for (const table of tables) {
+        const curated = table === 'PUBLIC_ERRORS' ? curatedInPublic(code) : curatedInDelivery(code);
+        assert.ok(curated, `${file}: fallback ${code} is not curated in ${table}, so collapsing only renames the miss`);
+      }
+    }
+  }
+  // 形状钉：提取式退化成一个也不匹配时，上面每条断言都会空转。
+  assert.ok(sites >= 9, `expected the whole collapse family, extracted ${sites} sites`);
+});
+
+test('收束规则本身双向可判：数字与 errno 塌、产品码原样、坏兜底响亮失败', async () => {
+  const { publicErrorCode, isProductErrorCode } = await import(
+    `../src/core/uncurated-error-code.mjs?collapse-case=${process.pid}-${Date.now()}`
+  );
+  // 应被抓到的违规形状：`git()` 的真实产物。
+  assert.equal(publicErrorCode(128, 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED', 'numeric exit status passed through');
+  assert.equal(publicErrorCode('ENOENT', 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED', 'errno passed through');
+  assert.equal(publicErrorCode('eACCES', 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED', 'lowercase errno passed through');
+  assert.equal(publicErrorCode('git exited', 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED', 'free text passed through');
+  assert.equal(publicErrorCode(undefined, 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED');
+  assert.equal(publicErrorCode(null, 'INTEGRATION_FAILED'), 'INTEGRATION_FAILED');
+  // 合法写法（误红面）：产品码必须原样，否则这条守卫会把已登记的回执也塌成通用码。
+  assert.equal(publicErrorCode('GIT_BUFFER_LIMIT_EXCEEDED', 'INTEGRATION_FAILED'), 'GIT_BUFFER_LIMIT_EXCEEDED');
+  assert.equal(isProductErrorCode('PATH_CHANGED'), true);
+  assert.equal(isProductErrorCode('ENOENT'), false, 'errno must not be mistaken for a product code');
+  // 守卫自己不许带着一个没登记的兜底上线：那样只是把 128 换成另一个静默缺失。
+  assert.throws(() => publicErrorCode(128, 128), TypeError);
+  assert.throws(() => publicErrorCode(128, 'definitely_not_curated'), TypeError);
+});
+
+// 上一条款件只保证「已经收束的落点兜底是登记的」。把某个落点整体退回
+// `error.code ?? 'X'` 时，调用次数与提取次数会**一起**少一，上面的消费钉仍然全绿
+// ——第 36 轮变异矩阵实测如此（M1、M4 退回原写法后本文件的判据都没红）。所以再加
+// 一条形状禁令：本族文件里不许再出现「把 caught error 的 code 直接当公开码/持久码」。
+const COLLAPSE_FORBIDDEN = [
+  [/code\s*:\s*error\.code\b(?!\s*\))/g, 'code: error.code'],
+  [/,error\.code\s*\?\?|,\s*error\.code\s*\?\?/g, ', error.code ??'],
+  [/retryableMergeError\([^)]*error\.code/gs, 'retryableMergeError(..., error.code'],
+  [/failCommand\([^)]*code:\s*error\.code/gs, 'failCommand(... code: error.code'],
+];
+
+test('接入与开发空间族文件里不再出现把 caught-error 码直接当公开码的写法', () => {
+  for (const file of COLLAPSE_FILES) {
+    const source = readRepositoryFile(file);
+    for (const [pattern, label] of COLLAPSE_FORBIDDEN) {
+      const hits = [...source.matchAll(pattern)];
+      assert.deepEqual(hits, [], `${file}: ${label} escaped the collapse rule again`);
+    }
+  }
+});
+
+// 豁免必须自带前提，并且前提本身每次重查：`submission-service.mjs` 有同形状的写法
+// 却按「src/ 内零引用 = 不可达」登记不修（第 35 轮实测）。那种结论有保质期——
+// 一旦有人接上它，本条就会红，而不是等到用户在回执里看到数字退出码。
+const COLLAPSE_EXEMPTIONS = {
+  'src/core/submission-service.mjs': 'code: error.code',
+};
+
+test('不可达豁免的前提仍然成立（被接上就必须收束）', () => {
+  const srcFiles = readdirSync(new URL('../src/', import.meta.url), { recursive: true, encoding: 'utf8' })
+    .filter((name) => name.endsWith('.mjs'))
+    .map((name) => `src/${name.replaceAll('\\', '/')}`);
+  assert.ok(srcFiles.length > 40, `src walk only produced ${srcFiles.length} modules`);
+  for (const [file, label] of Object.entries(COLLAPSE_EXEMPTIONS)) {
+    // 前提一：该文件确实还带着这种写法（否则豁免对象已消失，应删除本条）。
+    assert.ok(readRepositoryFile(file).includes(label), `${file} no longer needs the exemption`);
+    // 前提二：src/ 里没有任何模块 import 它。按 import 位置匹配，注释里提一句
+    // 不算被接上。
+    const base = file.split('/').pop();
+    const importShape = new RegExp(`from\\s+'[^']*${base}'`);
+    const referrers = srcFiles.filter((candidate) => candidate !== file
+      && importShape.test(readRepositoryFile(candidate)));
+    assert.deepEqual(referrers, [], `${file} is now imported by ${referrers.join(', ')}: collapse its codes too`);
+  }
 });

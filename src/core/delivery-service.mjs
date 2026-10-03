@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { beginCommand, canonicalJson, parseCommandResponse } from './command-journal.mjs';
 import { singleFlight } from './single-flight.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { acquireRepositoryLock, releaseRepositoryLock, readSubmission } from './integrations.mjs';
@@ -154,7 +155,8 @@ async function submitDeliveryOnce(db, request, options = {}) {
   const prepared = db.prepare('SELECT * FROM delivery_preflights WHERE id = ?').get(preflightId);
   if (!prepared) return { ok: false, code: 'DELIVERY_PREFLIGHT_REQUIRED', localSaved: false, pushed: false };
   const source = readDeliverySource(db, prepared.source_id);
-  try { assertDeliveryCwd(source, mcpWorkingDirectory); } catch (error) { return { ok: false, code: error.code }; }
+  try { assertDeliveryCwd(source, mcpWorkingDirectory); }
+  catch (error) { return { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED') }; }
   const begun = beginCommand(db, { commandId, kind: 'delivery.submit', request });
   if (['committed', 'failed'].includes(begun.command.state)) return parseCommandResponse(begun.command);
   let attempt = db.prepare('SELECT * FROM delivery_attempts WHERE command_id = ?').get(commandId);
