@@ -53,11 +53,21 @@ function normalizeRequest(kind, request) {
     return null;
   }
 
+  // Read tolerance, not write shape. A record whose *required* fields are
+  // missing really is unreadable, and rejecting it loudly is the point:
+  // `readRawStrict` guards every mutation so a corrupt store can never be
+  // silently replaced by an empty list. An *extra* key is a different fact, and
+  // treating it as corruption was a self-inflicted outage: one unknown key threw
+  // for the whole store, so the pending 删除/重新开始 record disappeared from the
+  // UI (there is no discard affordance), every mutation — upsert, mark, remove —
+  // then threw WORKSPACE_ACTION_RECOVERY_INVALID_DATA, and no later workspace
+  // action could be recorded at all. Unknown keys are therefore dropped here;
+  // the canonical body is the fields below, and `workspaceActionRequestBody`
+  // re-derives the removal confirmation at send time, so the dropped
+  // `userConfirmedIgnoredRemoval` (written by an intermediate bundle) has no
+  // reader to disagree with.
   if (kind === 'reuse') {
     if (!isNonEmptyString(request.expectedBaseHead)) return null;
-    if (Object.keys(request).some((key) => !['commandId', 'expectedRevision', 'expectedBaseHead'].includes(key))) {
-      return null;
-    }
     return {
       commandId: request.commandId,
       expectedRevision: request.expectedRevision,
@@ -65,20 +75,6 @@ function normalizeRequest(kind, request) {
     };
   }
 
-  // Read tolerance, not write shape: a record stored by an intermediate bundle
-  // carried the confirmation inside the body, and rejecting an unknown key here
-  // throws for the whole store — the pending record disappears (there is no
-  // other discard affordance) and every later workspace action fails. Unknown
-  // keys are therefore dropped on read; the canonical body is two fields, and
-  // workspaceActionRequestBody re-derives the confirmation at send time.
-  const allowedKeys = ['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'];
-  if (Object.keys(request).some((key) => !allowedKeys.includes(key))) {
-    return null;
-  }
-  if (request.userConfirmedIgnoredRemoval !== undefined
-    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
-    return null;
-  }
   return {
     commandId: request.commandId,
     expectedRevision: request.expectedRevision,
