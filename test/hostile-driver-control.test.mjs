@@ -9,10 +9,12 @@
 // repository-config-guard could go green while proving nothing, and how main's CI
 // became intermittently red on the one assertion that could still notice.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { gitText } from '../src/git/probe.mjs';
 import {
@@ -22,6 +24,7 @@ import {
   hostileDriverBody,
   initFixtureRepo,
   maskedDriverBody,
+  nodeDriverBody,
 } from '../scripts/test-support/hostile-driver.mjs';
 
 // POSIX 的系统临时目录本身可能是符号链接；夹具必须建立在真实路径下。
@@ -138,22 +141,29 @@ test('the attribute control does not accept a longer driver name as a match', as
   assert.equal(assertDriverAttributeBound(repo, 'file.txt', 'evil2'), 'evil2');
 });
 
-// The rule that actually holds, pinned so the next fixture cannot quietly
-// reintroduce the shape that failed 5 of 40 builds on this machine: the body must
-// not depend on a second binary, and must not be a chain whose last command
-// fabricates output. A single command is *not* a safety net: measured, a lone
-// clean-filter command exiting 3 also leaves `git add` at exit 0, and Git only
-// reports `external filter ... failed` when `filter.<name>.required = true`
-// (that case is pinned below).
-test('a driver body relies on no second binary and on no trailing command', async (t) => {
+// Ask Git what the command actually ran and what its filter returned. Parsing
+// the command string would mistake a quoted semicolon for a second command or
+// reject the escaping required by an apostrophe in the interpreter's path.
+test('a driver body runs the current interpreter without fabricating filter output', async (t) => {
   const base = container(t, 'ugk-driver-body-');
-  const marker = path.join(base, 'sub', 'dir', 'marker.txt');
-  const body = hostileDriverBody(marker);
-  assert.equal(body.split(';').length, 1, `chained body fabricates output: ${body}`);
-  assert.ok(body.includes('base64'),
-    'the marker path must reach the interpreter without passing through shell quoting');
-  assert.ok(body.startsWith(`'${process.execPath}'`),
-    `the interpreter must be addressed absolutely, not by whatever node is first on PATH: ${body}`);
+  const repo = initFixtureRepo(path.join(base, 'repo'));
+  writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=identity\n');
+  git(repo, ['add', '.gitattributes']);
+  git(repo, ['commit', '-qm', 'attributes']);
+  git(repo, ['config', '--local', 'filter.identity.clean',
+    nodeDriverBody('process.stdout.write(process.execPath)')]);
+  writeFileSync(path.join(repo, 'interpreter.txt'), 'control\n');
+  git(repo, ['add', '--', 'interpreter.txt']);
+  assert.equal(git(repo, ['show', ':interpreter.txt']), process.execPath,
+    'the driver must run this interpreter, including when another node is on PATH');
+
+  const marker = path.join(base, 'sentinel.txt');
+  git(repo, ['config', '--local', 'filter.identity.clean', hostileDriverBody(marker)]);
+  writeFileSync(path.join(repo, 'body.txt'), 'control\n');
+  git(repo, ['add', '--', 'body.txt']);
+  assert.equal(existsSync(marker), true, 'the driver must produce its marker');
+  assert.equal(git(repo, ['cat-file', '-s', ':body.txt']), '0',
+    'the marker command must not fabricate successful filter output');
   assert.throws(() => hostileDriverBody(''), /requires the marker path/);
 });
 
@@ -162,7 +172,7 @@ test('a driver body relies on no second binary and on no trailing command', asyn
 test('Git ignores a failing clean filter unless the driver is marked required', async (t) => {
   const base = container(t, 'ugk-driver-required-');
   const repo = initFixtureRepo(path.join(base, 'repo'));
-  const body = `'${process.execPath}' -e "process.exit(3)"`;
+  const body = nodeDriverBody('process.exit(3)');
   git(repo, ['config', '--local', 'filter.e.clean', body]);
   writeFileSync(path.join(repo, '.gitattributes'), '*.txt filter=e\n');
   git(repo, ['add', '.gitattributes']);
@@ -179,6 +189,47 @@ test('Git ignores a failing clean filter unless the driver is marked required', 
     () => git(repo, ['add', '--', 'mandatory.txt']),
     (error) => /external filter .* failed 3/.test(String(error.stderr ?? error.message)),
   );
+});
+
+// Re-run the real Git controls with the same Node binary at paths that broke
+// the old command-string assertions and the unescaped failing-driver command.
+// A copied executable is intentional: a symlink can make process.execPath
+// resolve back to its ordinary installation path and miss the regression.
+test('the Git controls work when the Node installation path needs shell quoting', async (t) => {
+  const base = container(t, 'ugk-driver-node-path-');
+  const selected = [
+    'the control accepts a driver body Git can run, and leaves the repository as it found it',
+    'a driver body runs the current interpreter without fabricating filter output',
+    'Git ignores a failing clean filter unless the driver is marked required',
+  ];
+  const selectedPattern = `^(${selected.join('|')})$`;
+  const testFile = fileURLToPath(import.meta.url);
+  const childEnvironment = { ...process.env };
+  // A nested --test invocation must start a new runner. The parent runner's
+  // private marker would otherwise make it act as an empty test-file child.
+  delete childEnvironment.NODE_TEST_CONTEXT;
+  for (const directoryName of ["o'brien Node", 'semicolon; Node']) {
+    await t.test(directoryName, () => {
+      const directory = path.join(base, directoryName);
+      mkdirSync(directory);
+      const executable = path.join(directory, path.basename(process.execPath));
+      copyFileSync(process.execPath, executable);
+      if (process.platform !== 'win32') chmodSync(executable, 0o755);
+      const output = execFileSync(executable, [
+        '--test', '--test-reporter=tap', `--test-name-pattern=${selectedPattern}`, testFile,
+      ], {
+        cwd: path.dirname(testFile),
+        env: childEnvironment,
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+        encoding: 'utf8',
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      assert.match(output, /^# pass 3\r?$/m,
+        'the child must execute all three selected controls, rather than succeed with no matches');
+    });
+  }
 });
 
 // Quoting is the failure mode, so quote it: a profile or temp path containing an

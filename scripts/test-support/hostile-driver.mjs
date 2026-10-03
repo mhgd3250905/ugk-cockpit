@@ -63,6 +63,12 @@ function shellSingleQuote(value) {
   return `'${String(value).split("'").join(`'\\''`)}'`;
 }
 
+// Git runs driver commands through sh, including on Windows. Keep the
+// executable and the program literal even when either contains shell syntax.
+export function nodeDriverBody(program) {
+  return `${shellSingleQuote(process.execPath)} -e ${shellSingleQuote(program)}`;
+}
+
 /**
  * A driver body that stays correct for hostile marker paths.
  *
@@ -85,8 +91,9 @@ export function hostileDriverBody(markerPath) {
     throw new Error('hostileDriverBody requires the marker path');
   }
   const encoded = Buffer.from(markerPath, 'utf8').toString('base64');
-  return `${shellSingleQuote(process.execPath)} -e `
-    + `"require('fs').writeFileSync(Buffer.from('${encoded}','base64').toString(),'pwned')"`;
+  return nodeDriverBody(
+    `require('fs').writeFileSync(Buffer.from('${encoded}','base64').toString(),'pwned')`,
+  );
 }
 
 // A body shaped the way this repository's fixtures used to be shaped: the marker

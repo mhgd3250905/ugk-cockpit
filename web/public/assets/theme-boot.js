@@ -3,7 +3,7 @@
   var MODES = ['light', 'dark', 'system'];
   var THEME_COLORS = {
     dark: '#191b20',
-    light: '#f4f5f7',
+    light: '#fcfcfb',
   };
   var mode = 'dark';
 

@@ -61,6 +61,9 @@ import {
   WORKSPACE_ACTION_RECOVERY_STORAGE_KEY,
 } from './workspace-action-recovery.mjs';
 import { WorkbenchShell } from './workbench-shell.jsx';
+import { WorkbenchIcon } from './icons.jsx';
+import { AgentPlatformBadge } from './agent-platform-badge.jsx';
+import { readProjectView, saveProjectView } from './project-view.mjs';
 import { SkillGuide } from './skill-guide.jsx';
 import { WorkContext } from './work-context.jsx';
 import { ManualRecordAction } from './manual-record-action.jsx';
@@ -536,29 +539,15 @@ function ProjectAvatar({ project, avatarUrl, size, className }) {
 }
 
 function SunIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.5 1.5M17.6 17.6l1.5 1.5M19.1 4.9l-1.5 1.5M6.4 17.6l-1.5 1.5" />
-    </svg>
-  );
+  return <WorkbenchIcon name="sun" />;
 }
 
 function MoonIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" />
-    </svg>
-  );
+  return <WorkbenchIcon name="moon" />;
 }
 
 function SystemIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="2" y="4" width="20" height="13" rx="2" />
-      <path d="M8 21h8M12 17v4" />
-    </svg>
-  );
+  return <WorkbenchIcon name="system" />;
 }
 
 function ThemeSwitch({ mode, onChange }) {
@@ -701,6 +690,8 @@ function workspaceActionPath(record) {
 
 function App() {
   const route = useAppRoute();
+  const [projectView, setProjectView] = useState(readProjectView);
+  useEffect(() => { saveProjectView(projectView); }, [projectView]);
   const [dashboard, setDashboard] = useState(null);
   const [isStale, setIsStale] = useState(false);
   const [selection, setSelection] = useState(null);
@@ -1870,9 +1861,15 @@ function App() {
         ) : (
           <>
             <header className="overview-heading">
-              <div><p className="page-eyebrow">我的项目</p><h1>项目工作台</h1></div>
-              {dashboard && <p className="overview-summary">{stats.total} 个项目 · {stats.attentionCount} 个待确认 · {stats.activeCount} 个会话接入或未交接</p>}
+              <div><h1>项目工作台</h1>{dashboard && <p className="overview-summary">{stats.total} 个项目{stats.attentionCount > 0 ? ` · ${stats.attentionCount} 个待确认` : ''}</p>}</div>
             </header>
+            <div className="overview-toolbar">
+              <span className="overview-toolbar-label">我的项目</span>
+              <div className="project-view-switch" role="group" aria-label="项目显示方式">
+                <button type="button" aria-pressed={projectView === 'cards'} onClick={() => setProjectView('cards')}><WorkbenchIcon name="grid" /><span>卡片</span></button>
+                <button type="button" aria-pressed={projectView === 'list'} onClick={() => setProjectView('list')}><WorkbenchIcon name="list" /><span>列表</span></button>
+              </div>
+            </div>
 
             {!dashboard ? (
               <LoadingState notice={notice} />
@@ -1880,7 +1877,7 @@ function App() {
               <EmptyState busy={busy} onChoose={() => chooseFolder()} />
             ) : (
               groups.length > 0 && (
-                <section className="projects-section" aria-label="项目列表">
+                <section className={`projects-section is-${projectView}`} aria-label="项目列表">
                   <div className="groups-container">
                     {groups.map((group) => (
                       <div key={group.key} className="status-group">
@@ -1893,6 +1890,7 @@ function App() {
                             <ProjectCard
                               key={project.id}
                               project={project}
+                              view={projectView}
                               onAction={handleProjectAction}
                               onOpen={openProjectDetail}
                             />
@@ -2044,7 +2042,7 @@ function EmptyState({ busy, onChoose }) {
   );
 }
 
-function ProjectCard({ project, onAction, onOpen }) {
+function ProjectCard({ project, view = 'cards', onAction, onOpen }) {
   const statusReason = getProjectStatusReason(project);
   const copy = STATUS[statusReason] ?? STATUS.ready_to_start;
   const actionLabel = getActionLabel(statusReason);
@@ -2080,16 +2078,17 @@ function ProjectCard({ project, onAction, onOpen }) {
         type="button"
         className="card-open"
         onClick={() => onOpen(project)}
-        aria-label={`查看 ${project.name} 的运行详情`}
+        aria-label={`查看 ${project.name} 的项目详情`}
+        aria-describedby={`project-status-${project.id} project-platform-${project.id}`}
       >
         <div className="card-eyebrow">
-          <span className="card-status-badge">{copy.eyebrow}</span>
+          <span id={`project-status-${project.id}`} className="card-status-badge">{isDisabled ? actionLabel : copy.eyebrow}</span>
           <time className="card-time">{formatTime(confirmedAt)}</time>
         </div>
 
         <div className="card-name-row">
-          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={40} />
-          <h4 className="card-name">{project.name}</h4>
+          <ProjectAvatar project={project} avatarUrl={avatarUrl} size={view === 'list' ? 36 : 40} />
+          <div className="card-title-line"><h4 className="card-name" title={project.name}>{project.name}</h4><AgentPlatformBadge agent={agent} id={`project-platform-${project.id}`} /></div>
         </div>
         {showStage && (
           <Badge variant="soft" size="sm" className="stat-neutral card-stage-badge">
@@ -2098,12 +2097,12 @@ function ProjectCard({ project, onAction, onOpen }) {
         )}
         <p className="card-what">{(progressSummary || copy.title).split(/\r?\n/)[0]}</p>
         {theme === 'attention' && <p className="card-impact">{copy.detail}</p>}
+        <WorkbenchIcon name="chevron" className="card-open-chevron" />
       </button>
 
       <footer className="card-foot">
-        <span className="card-agent">{agent ? `${agent}` : '暂无 AI 会话'}</span>
         {isDisabled ? (
-          <span className="read-only-action">{actionLabel}</span>
+          <button type="button" className="card-view-action" onClick={() => onOpen(project)}>打开项目<WorkbenchIcon name="arrow" size={16} /></button>
         ) : (
           <Button
             variant="soft"
@@ -2123,6 +2122,8 @@ function ProjectCard({ project, onAction, onOpen }) {
 
 function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, onLoadOlder, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions, workspaceActionStorageError, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onEdit, onConfirmProjectLocation }) {
   const titleRef = useRef(null);
+  const workContextRef = useRef(null);
+  const sessionTriggerRef = useRef(null);
   const project = state?.data?.project ?? state?.seed ?? {
     id: projectId,
     name: '项目详情',
@@ -2172,21 +2173,18 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
             />
             <div className="detail-title-group">
               <div className="detail-title-action-row">
-                <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
-                {onEdit && !invalidRoute && (
-                  <Button
-                    variant="soft"
-                    size="sm"
-                    onClick={() => onEdit({ ...project, id: effectiveProjectId })}
-                    disabled={busy}
-                  >
-                    编辑项目
-                  </Button>
-                )}
-                {state?.data && <details className="project-more-actions"><summary>更多操作 ···</summary><div>
-                  <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />
-                  <RemoveProjectAction project={project} api={api} disabled={busy} onRemoved={async () => { onBack(); await onRecordsChanged(); }} />
-                </div></details>}
+                <div className="detail-title-platform">
+                  <h2 id="project-detail-title" ref={titleRef} tabIndex="-1">{project.name}</h2>
+                  {state?.data?.workLineContexts?.find((context) => context.laneKey === 'main')?.currentAgent && <AgentPlatformBadge agent={state.data.workLineContexts.find((context) => context.laneKey === 'main').currentAgent} />}
+                </div>
+                <div className="detail-header-actions">
+                  {state?.data && <Button ref={sessionTriggerRef} variant="primary" size="sm" aria-haspopup="dialog" disabled={Boolean(state.loading)} onClick={() => workContextRef.current?.openSessions(sessionTriggerRef.current)}><WorkbenchIcon name="arrow" size={16} />会话与接手</Button>}
+                  {(state?.data || (onEdit && !invalidRoute)) && <details className="project-more-actions"><summary><WorkbenchIcon name="settings" size={16} />项目设置<WorkbenchIcon name="chevron" size={14} /></summary><div>
+                    {onEdit && !invalidRoute && <Button variant="soft" size="sm" onClick={() => onEdit({ ...project, id: effectiveProjectId })} disabled={busy}>编辑项目</Button>}
+                    {state?.data && <ManualRecordAction project={project} api={api} onSaved={onRecordsChanged} disabled={busy} />}
+                    {state?.data && <RemoveProjectAction project={project} api={api} disabled={busy} onRemoved={async () => { onBack(); await onRecordsChanged(); }} />}
+                  </div></details>}
+                </div>
               </div>
               <div className="detail-kicker-row">
                 {project.archivedAt && <Badge variant="soft" size="sm" className="stat-neutral">已归档</Badge>}
@@ -2213,6 +2211,7 @@ function ProjectDetailPage({ state, projectId, invalidRoute, onBack, onRetry, on
         ) : state.data ? (
           <ProjectDetailContent
             key={effectiveProjectId}
+            workContextRef={workContextRef}
             data={state.data}
             loadingMore={state.loadingMore}
             loadError={state.error}
@@ -2301,7 +2300,7 @@ function SubmitHelp() {
   );
 }
 
-function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions = [], workspaceActionStorageError = null, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onConfirmProjectLocation }) {
+function ProjectDetailContent({ data, workContextRef, loadingMore, loadError, onLoadOlder, actionNotice, busy, onCreateSpace, onAssignSpace, onReuseSpace, onRemoveSpace, pendingWorkspaceActions = [], workspaceActionStorageError = null, onRecoverWorkspaceAction, onCopyReviewPrompt, onNoteStatusChange, onRecordsChanged, onLoadDiagnostics, diagnostics, diagnosticsLoading, onConfirmProjectLocation }) {
   const { project, timeline, developmentSpaces = [], submissions = [] } = data;
   const projectPendingWorkspaceActions = pendingWorkspaceActions.filter((item) => item.projectId === project.id);
   const [activeTab, setActiveTab] = useState('timeline');
@@ -2406,9 +2405,11 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
 
               <WorkContext
                 key={focusedLaneKey || 'main'}
+                ref={workContextRef}
+                projectName={project.name}
                 context={selectedContext}
                 closed={selectedLineState?.status === 'closed'}
-                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} onConfirmLocation={() => onConfirmProjectLocation(project)} />}
+                operations={<ConversationControlPanel projectId={project.id} conversationState={conversationState} worktreeId={selectedLane?.worktreeId || selectedContext?.worktreeId} scopeLabel={selectedLane?.label || '主项目'} onConfirmLocation={() => onConfirmProjectLocation(project)} />}
                 label={focusedLaneKey ? (timelineLanes.find((lane) => lane.key === focusedLaneKey)?.label || '所选工作线') : '项目总览'}
                 overview={focusedLaneKey ? null : {
                   lineCount: timelineLanes.filter((lane) => ['development_space', 'delivery_source'].includes(lane.role)).length,
@@ -2572,9 +2573,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
                                 重新开始
                               </Button>
                               <Button variant="soft" size="sm" className="workspace-remove-button space-delete-action" aria-label={`删除开发空间：${space.name}`} title="删除开发空间" onClick={() => onRemoveSpace(space)} disabled={busy || Boolean(workspaceActionStorageError)}>
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                  <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
-                                </svg>
+                                <WorkbenchIcon name="trash" />
                               </Button>
                             </>
                           )}
@@ -2608,7 +2607,7 @@ function ProjectDetailContent({ data, loadingMore, loadError, onLoadOlder, actio
   );
 }
 
-function ConversationControlPanel({ projectId, worktreeId, conversationState, onConfirmLocation }) {
+function ConversationControlPanel({ projectId, worktreeId, scopeLabel, conversationState, onConfirmLocation }) {
   const [chains, setChains] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -2634,20 +2633,21 @@ function ConversationControlPanel({ projectId, worktreeId, conversationState, on
 
   return (
     <section className="context-section conversation-control" aria-label="会话接续与转交">
-      <h3>会话接续与转交</h3>
-      <p>查看这条工作线的会话，或授权其他聊天接手。</p>
-      <Button variant="soft" size="sm" onClick={refresh} disabled={loading}>
-        {loading ? '正在读取…' : '刷新会话接续情况'}
-      </Button>
+      <div className="conversation-heading">
+        <h3>当前工作会话</h3>
+        <Button variant="soft" size="sm" onClick={refresh} disabled={loading}>
+          <WorkbenchIcon name="refresh" size={16} />{loading ? '正在读取…' : '刷新会话状态'}
+        </Button>
+      </div>
       {error && <ConversationControlError error={error} />}
       {!worktreeId && <p>这条工作线尚未记录可操作的会话。</p>}
       {chains && !chains.some((chain) => chain.worktreeId === worktreeId) && <p>这条工作线暂无工作会话。</p>}
       {chains?.filter((chain) => chain.worktreeId === worktreeId && (['active', 'awaiting_resume', 'standby'].includes(chain.status) || chain.transfer)).map((chain) => (
-        <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} onConfirmLocation={onConfirmLocation} />
+        <ConversationControlChain key={chain.sessionId} chain={chain} scopeLabel={scopeLabel} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} onConfirmLocation={onConfirmLocation} />
       ))}
       {chains?.some((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer) && <details className="conversation-history">
         <summary>历史已结束会话</summary>
-        {chains.filter((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer).map((chain) => <ConversationControlChain key={chain.sessionId} chain={chain} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} />)}
+        {chains.filter((chain) => chain.worktreeId === worktreeId && !['active', 'awaiting_resume', 'standby'].includes(chain.status) && !chain.transfer).map((chain) => <ConversationControlChain key={chain.sessionId} chain={chain} scopeLabel={scopeLabel} path={path} onRefresh={refresh} sessionState={conversationState.session(chain.sessionId)} />)}
       </details>}
     </section>
   );
@@ -2661,7 +2661,7 @@ function ConversationControlError({ error }) {
   </div>;
 }
 
-function ConversationControlChain({ chain, path, onRefresh, sessionState, onConfirmLocation }) {
+function ConversationControlChain({ chain, scopeLabel, path, onRefresh, sessionState, onConfirmLocation }) {
   const [dialog, setDialog] = useState(null);
   const [targetHost, setTargetHost] = useState('');
   const [targetConversationId, setTargetConversationId] = useState('');
@@ -2742,21 +2742,26 @@ function ConversationControlChain({ chain, path, onRefresh, sessionState, onConf
   }
 
   return <article className="conversation-chain">
-    <h4>{chain.task || '未命名工作会话'}</h4>
-    <dl>
-      <div><dt>工作会话</dt><dd>{chain.sessionId}</dd></div>
-      <div><dt>当前接续</dt><dd>{waiting ? '等待用户授权的聊天接手' : chain.status === 'active' ? '进行中' : chain.status === 'awaiting_resume' ? '等待接力接收' : chain.status === 'standby' ? '待继续（当前不可转交）' : '已结束'}</dd></div>
-      <div><dt>持有人</dt><dd>{owner?.host || '此前连接'} / {owner?.conversationLocator || '无法定位具体聊天'}</dd></div>
-      <div><dt>最后节点</dt><dd>{node ? `${nodeLabels[node.type] || '工作流操作'} · ${node.actorHost || (node.actorKind === 'user' ? '项目所有者' : node.actorKind === 'system' ? '系统' : '历史身份未知')}${node.actorConversationId ? ` / ${node.actorConversationId}` : ''}` : '历史记录未提供节点信息'}</dd></div>
-      {node && <div><dt>节点内容</dt><dd>{node.summary || '未提供摘要'} · {formatTime(node.createdAt)}</dd></div>}
+    <div className="conversation-session-heading">
+      <AgentPlatformBadge agent={owner?.host || '平台未记录'} />
+      <span className="conversation-session-status">{waiting ? '等待授权接手' : chain.status === 'active' ? '会话已接入' : chain.status === 'awaiting_resume' ? '等待接力接收' : chain.status === 'standby' ? '待继续 · 当前不可转交' : '已结束'}</span>
+    </div>
+    <p className="conversation-task">{chain.task || '未命名工作会话'}</p>
+    <dl className="conversation-session-facts">
+      <div><dt>工作范围</dt><dd>{scopeLabel || '所选工作线'}</dd></div>
+      <div><dt>最近会话记录</dt><dd>{node ? formatTime(node.createdAt) : '尚未记录'}</dd></div>
     </dl>
-    {owner?.conversationLocator && <Button size="sm" variant="soft" onClick={() => copy(`${owner.host || '未知平台'} / ${owner.conversationLocator}`, '已复制持有人身份')}>复制平台与会话 ID</Button>}
     {waiting && <p>授权{chain.transfer.status === 'expired' ? '已过期' : `有效至 ${formatTime(chain.transfer.expiresAt)}`}。旧聊天已冻结；过期不会自动恢复旧聊天，也不会向其他聊天开放。</p>}
+    <div className="conversation-handoff">
+      <h4>{waiting ? '处理接手授权' : '接手与转交'}</h4>
+      <p>{actionable ? '把这项工作交给另一个聊天继续。' : waiting ? '核对授权状态，或恢复原聊天继续。' : chain.status === 'standby' ? '请先在原聊天继续这项工作，再按需要转交。' : '这段工作会话已结束，接手授权不可用。'}</p>
     <div className="conversation-control-actions">
-      {actionable && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('transfer'); }}>授权其他聊天接手</Button>}
+      {actionable && <Button className="conversation-transfer-primary" size="sm" variant="primary" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('transfer'); }}><WorkbenchIcon name="arrow" size={16} />授权其他聊天接手</Button>}
       {waiting && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); setDialog('cancel'); }}>取消转交并恢复原聊天</Button>}
       {waiting && onConfirmLocation && <Button size="sm" variant="soft" disabled={busy || Boolean(pendingRequest.current)} onClick={() => { setError(null); onConfirmLocation(); }} title="接手被“代码位置身份变化”拒绝时使用：重新选择同一文件夹完成确认；历史记录全部保留。">确认新代码位置</Button>}
       {pendingRequest.current && !busy && <Button size="sm" variant="soft" onClick={() => submit(true)}>以原请求核对 / 重试</Button>}
+    </div>
+    {actionable && <p className="work-context-caption">点击后先确认目标与影响；授权后原聊天失去推进权，代码保持原样。</p>}
     </div>
     {issued && <div className="conversation-transfer-result">
       <p>授权已签发，有效至 {formatTime(issued.expiresAt)}。请只交给你希望接手的聊天。指令仅在本次页面中显示，不保存到浏览器存储。</p>
@@ -2766,6 +2771,17 @@ function ConversationControlChain({ chain, path, onRefresh, sessionState, onConf
     {copied && <p role="status">{copied}</p>}
     {requestNotice && <p role="status">{requestNotice}</p>}
     {error && <ConversationControlError error={error} />}
+    <details className="conversation-identities">
+      <summary>当前聊天身份与会话详情</summary>
+      <dl>
+        <div><dt>工作会话</dt><dd>{chain.sessionId}</dd></div>
+        <div><dt>当前接续</dt><dd>{waiting ? '等待用户授权的聊天接手' : chain.status === 'active' ? '进行中' : chain.status === 'awaiting_resume' ? '等待接力接收' : chain.status === 'standby' ? '待继续（当前不可转交）' : '已结束'}</dd></div>
+        <div><dt>持有人</dt><dd>{owner?.host || '此前连接'} / {owner?.conversationLocator || '无法定位具体聊天'}</dd></div>
+        <div><dt>最后节点</dt><dd>{node ? `${nodeLabels[node.type] || '工作流操作'} · ${node.actorHost || (node.actorKind === 'user' ? '项目所有者' : node.actorKind === 'system' ? '系统' : '历史身份未知')}${node.actorConversationId ? ` / ${node.actorConversationId}` : ''}` : '历史记录未提供节点信息'}</dd></div>
+        {node && <div><dt>节点内容</dt><dd>{node.summary || '未提供摘要'} · {formatTime(node.createdAt)}</dd></div>}
+      </dl>
+      {owner?.conversationLocator && <Button size="sm" variant="soft" onClick={() => copy(`${owner.host || '未知平台'} / ${owner.conversationLocator}`, '已复制持有人身份')}>复制平台与会话 ID</Button>}
+    </details>
     <Dialog open={Boolean(dialog)} onOpenChange={createDialogCloseGuard(busy, () => setDialog(null))}>
       <DialogContent>
         <DialogHeader><DialogTitle>{dialog === 'cancel' ? '恢复原聊天的接续权限？' : '停止旧聊天推进并授权转交？'}</DialogTitle>
@@ -3350,7 +3366,7 @@ const TimelineNode = React.forwardRef(function TimelineNode({
           <button type="button" className="timeline-summary-toggle" aria-expanded={expanded}
             aria-controls={`timeline-content-${item.kind}-${item.id}`} onClick={onToggle}>
             <span className="timeline-summary-text">{item.summary || item.note || kind.label}</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+            <WorkbenchIcon name="chevron" />
           </button>
         </h4>
         <div className="timeline-expanded-content" id={`timeline-content-${item.kind}-${item.id}`} hidden={!expanded}>
