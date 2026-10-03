@@ -68,6 +68,7 @@ import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { deliveryResponse } from '../core/delivery-messages.mjs';
+import { noteUncuratedErrorCode } from '../core/uncurated-error-code.mjs';
 import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
 import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
@@ -160,7 +161,9 @@ const WORKSPACE_PENDING_ERROR = {
   requiredAction: '请在开发空间区域使用“恢复并核对”，沿原请求继续核对，不要新建删除或重新开始请求。',
 };
 
-const PUBLIC_ERRORS = {
+// Exported only so the registration gate in `test/` can enumerate the same key
+// set `sendError` consults. Nothing outside this repository renders it.
+export const PUBLIC_ERRORS = {
   CONVERSATION_PLATFORM_AUTHORIZATION_REQUIRED: {
     status: 409, message: '需要项目所有者在工作台授权转交。',
     impact: '代码与现有会话归属没有改变。',
@@ -328,6 +331,38 @@ const PUBLIC_ERRORS = {
     message: '这个文件夹还没有获得访问授权。',
     impact: 'Cockpit 没有读取或修改该文件夹。',
     requiredAction: '请重新选择项目文件夹并确认授权。',
+  },
+  // `src/core/path-guard.mjs` throws four other PathScopeError codes and all of
+  // them were curated; these two were the ones left out, so the guard's own
+  // user-facing sentence was discarded and replaced by the generic receipt.
+  PATH_OUTSIDE_SCOPE: {
+    status: 403,
+    message: '所选路径跳出了已授权的文件夹，已停止访问。',
+    impact: 'Cockpit 没有读取这个文件夹里的文件内容，也没有修改任何文件。',
+    requiredAction: '请在项目页重新选择该项目的文件夹并确认授权；项目确实搬了位置请使用「确认新代码位置」，不要把路径改成链接或别的目录。',
+  },
+  PATH_CHANGED: {
+    status: 409,
+    message: '路径在确认后发生变化，已停止访问。',
+    // 复核顺序：observeRegisteredProject 先 authorizeExistingPath，再 await
+    // observeProjectFolder（这一步已经读过 Git 状态），然后才是这里抛出的
+    // revalidateAuthorizedPath。所以不能写「读到任何内容之前就停止了」。
+    impact: 'Cockpit 已停止这次操作，没有修改、切换或删除任何文件，已登记的项目记录保持原样。',
+    requiredAction: '请确认这个项目目录此刻是否被移动、改名或换成了链接；恢复原位置后刷新项目页重试，位置确实变了请走「确认新代码位置」。',
+  },
+  // Two git-layer failures that reach the HTTP layer with their own code: the
+  // probe output cap and a git command that answered with something unusable.
+  GIT_BUFFER_LIMIT_EXCEEDED: {
+    status: 503,
+    message: '本地 Git 返回的内容超出安全读取上限，代码状态未能核验。',
+    impact: 'Cockpit 没有依据这份不完整的结果修改代码或记录。',
+    requiredAction: '请检查这个工作副本是否产生了异常巨大的 Git 输出（例如未被忽略的巨型日志目录）；处理前不要结束会话或送审，刷新后重新核验。',
+  },
+  GIT_ERROR: {
+    status: 503,
+    message: '本地 Git 命令返回了无法处理的结果。',
+    impact: 'Cockpit 没有依据这次失败创建、切换或删除任何代码工作线。',
+    requiredAction: '请先刷新项目页的代码状态；持续失败时确认该目录仍是可访问的 Git 仓库，不要在结果未知时重复创建同名工作线。',
   },
   RUN_NOT_FOUND: {
     status: 404,
@@ -1056,6 +1091,46 @@ const PUBLIC_ERRORS = {
     impact: '平台没有自动清理、回退或覆盖代码。',
     requiredAction: '请查看开发空间状态并重试；若持续失败，请人工核对 Git 状态。',
   },
+  // `/api/v1/mcp/integration/begin` hands the same core result code to
+  // sendError; the sibling `/review` and `/merge` codes were registered this
+  // round and this one was first missed, which is the shape of the defect.
+  SUBMISSION_PROJECT_MISMATCH: {
+    status: 409,
+    message: '这条送审记录不属于当前项目。',
+    impact: '没有领取审核，也没有修改任何项目的代码。',
+    requiredAction: '请从当前项目页重新复制待办的审核指令；不要拿另一个项目的送审编号领取审核。',
+  },
+  // `/api/v1/mcp/integration/{begin,review,merge}` return
+  // `error.code ?? 'DELIVERY_CHECK_FAILED'` from the delivery import/verify
+  // step, so these delivery-side codes arrive at sendError, which reads only
+  // this table. Double registration is deliberate (the delivery table already
+  // carries PROJECT_NOT_FOUND and GIT_FILTER_UNSUPPORTED the same way): a code
+  // rendered by two renderers needs wording in both, and until now these four
+  // collapsed to REQUEST_FAILED while also firing the uncurated-code warning.
+  DELIVERY_CHECK_FAILED: {
+    status: 409,
+    message: '接入主项目前核对送审成果没有完成，本次结果未经确认。',
+    impact: '主项目代码没有被合并；远端推送状态未经确认。',
+    requiredAction: '请保留这次的操作编号继续接入，平台会重新核对成果；不要换一个操作编号重复接入，也不要手工重置主项目分支。',
+  },
+  DELIVERY_REMOTE_CHANGED: {
+    status: 409,
+    message: '这份代码的远端来源或目标与核对时不一致。',
+    impact: '平台没有合并主项目代码，也没有推送远端。',
+    requiredAction: '请先核对仓库的 origin 与推送地址、项目归属，再让开发会话重新送审。',
+  },
+  DELIVERY_REVIEW_REF_UNAVAILABLE: {
+    status: 503,
+    message: '暂时读取不到本次审核对应的远端代码。',
+    impact: '平台没有写入审核结论，也没有修改任何项目的代码。',
+    requiredAction: '请确认网络与已有 Git 登录配置后，用同一个操作编号继续；不要凭旧状态判定审核结果。',
+  },
+  DELIVERY_SOURCE_UPDATED: {
+    status: 409,
+    message: '这条工作线在送审之后又有了更新。',
+    impact: '本次没有接入旧成果，主项目代码没有被修改。',
+    requiredAction: '请让开发会话重新送审当前成果；新版本需要重新审核，不要用旧待办继续接入。',
+  },
   SUBMISSION_NOT_FOUND: {
     status: 404,
     message: '找不到这条送审记录。',
@@ -1103,6 +1178,34 @@ const PUBLIC_ERRORS = {
     message: '当前 AI 会话不是这次审核领取的处理人。',
     impact: '没有写入审核结论，也没有替换当前审核者。',
     requiredAction: '请回到当前审核会话继续；更换处理人必须由用户明确撤回后再领取。',
+  },
+  // `/api/v1/mcp/integration/review` and `/merge` hand the core result code
+  // straight to sendError, so these four were reaching the client as
+  // REQUEST_FAILED — whose generic receipt tells the reader to retry, which is
+  // exactly the wrong instruction once the local main line may have moved.
+  INVALID_VERDICT: {
+    status: 400,
+    message: '审核结论不是平台认识的值。',
+    impact: '没有写入审核结论，也没有修改代码。',
+    requiredAction: '请使用项目页生成的审核指令，结论只能是 approved、changes_requested 或 rejected 之一；不要自行改写结论措辞。',
+  },
+  CLAIM_SUBMISSION_MISMATCH: {
+    status: 409,
+    message: '这次回执指向的送审记录与当前领取记录不是同一条。',
+    impact: '没有写入回执，也没有修改主项目代码。',
+    requiredAction: '请从项目页重新复制当前待办的审核指令；不要拿另一条送审的编号继续这次合并。',
+  },
+  INVALID_SOURCE_COMMIT: {
+    status: 409,
+    message: '要接入主项目的提交号无法作为完整 Git 对象号核验。',
+    impact: '平台没有合并、改写或推送主项目代码。',
+    requiredAction: '请让开发会话重新送审当前成果并使用它给出的提交号；不要手工填入或截短提交号。',
+  },
+  MERGE_UNVERIFIED: {
+    status: 409,
+    message: '本地主项目已完成合并动作，但合并后的复核没有通过。',
+    impact: '主项目分支可能已经前进；平台没有把这次合并记为完成，也没有推送远端。',
+    requiredAction: '请保留这次的操作编号继续合并，平台会重新复核后再决定；不要换一个操作编号重复合并，也不要手工重置或回退主项目分支。',
   },
   MAIN_HAS_CHANGES: {
     status: 409,
@@ -1510,8 +1613,41 @@ function sendJson(response, statusCode, body) {
   response.end(payload);
 }
 
-function sendError(response, code, { commandId = null, extra = {}, context = null } = {}) {
-  const definition = PUBLIC_ERRORS[code] ?? PUBLIC_ERRORS.REQUEST_FAILED;
+function sendError(response, code, { commandId = null, extra = {}, context = null, integrationPhase = null } = {}) {
+  // One lookup, one downgrade. `code` is the raw producer's value and may be a
+  // number (an execFile exit code), a Node errno string, or undefined; only the
+  // curated name is ever put on the wire, including in `reason`.
+  const curated = code !== undefined && code !== null && PUBLIC_ERRORS[code] !== undefined
+    && Object.hasOwn(PUBLIC_ERRORS, code);
+  if (!curated) noteUncuratedErrorCode('PUBLIC_ERRORS', code);
+  const effectiveCode = curated ? code : 'REQUEST_FAILED';
+  let definition = curated ? PUBLIC_ERRORS[code] : PUBLIC_ERRORS.REQUEST_FAILED;
+  // Review verification failures are durably failed requests, while merge
+  // verification failures leave a resumable attempt. The route supplies this
+  // rendering context; it is not a client field or a journal protocol change.
+  if (integrationPhase === 'review' && ['DELIVERY_CHECK_FAILED', 'DELIVERY_REVIEW_REF_UNAVAILABLE'].includes(effectiveCode)) {
+    definition = {
+      ...definition,
+      impact: '本次审核结论没有写入；项目代码和已领取的审核记录保留。',
+      requiredAction: '本次审核请求已记录为失败。请确认代码来源可读取、网络与已有 Git 登录配置正常后，使用新的 clientRequestId 重新提交审核结论；原请求号只会重放这次失败，不要凭旧状态判定审核结果。',
+    };
+  } else if (integrationPhase === 'merge' && [
+    'DELIVERY_CHECK_FAILED', 'DELIVERY_REMOTE_CHANGED',
+    'DELIVERY_REVIEW_REF_UNAVAILABLE', 'DELIVERY_SOURCE_UPDATED',
+  ].includes(effectiveCode)) {
+    // A prepared attempt can already have fast-forwarded before its state was
+    // persisted. Its next import/verification can fail before discovering that
+    // write, so neither the error code nor localIntegrated=false rules it out.
+    definition = {
+      ...definition,
+      impact: '接入操作尚未确认完成；主项目分支可能已经前进，本次没有继续推送远端。',
+      ...(effectiveCode === 'DELIVERY_REMOTE_CHANGED' ? {
+        requiredAction: '请先核对原远端配置和主项目现有成果；恢复原来源与目标后用原操作编号继续，无法恢复时回项目页确认下一步，不要重置或回退主项目分支。',
+      } : effectiveCode === 'DELIVERY_SOURCE_UPDATED' ? {
+        requiredAction: '请先核对主项目现有成果和本次操作记录，再让开发会话重新送审当前成果；新版本需要重新审核，不要重置或回退主项目分支。',
+      } : {}),
+    };
+  }
   const contextFields = normalizeConversationErrorContext(context);
   if (context?.sessionValidated === true && contextFields.sessionId) {
     response.__ugkDiagnosticContext = {
@@ -1524,9 +1660,9 @@ function sendError(response, code, { commandId = null, extra = {}, context = nul
   const requestedReason = extra?.reason;
   const reason = typeof requestedReason === 'string' && SAFE_BINDING_REASON_PATTERN.test(requestedReason)
     ? requestedReason
-    : contextReason ?? code;
+    : contextReason ?? effectiveCode;
   sendJson(response, definition.status, {
-    code: PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED',
+    code: effectiveCode,
     message: definition.message,
     impact: definition.impact,
     required_action: definition.requiredAction,
@@ -5176,7 +5312,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_begin', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result), integrationPhase: 'begin' });
         return;
       }
 
@@ -5189,7 +5325,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_review', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result), integrationPhase: 'review' });
         return;
       }
 
@@ -5203,6 +5339,7 @@ export async function createCockpitHttpServer({
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
+          integrationPhase: 'merge',
           extra: {
             ...integrationErrorExtra(body, result),
             localIntegrated: Boolean(result.localIntegrated),
@@ -5513,7 +5650,10 @@ export async function createCockpitHttpServer({
       const code = error instanceof SyntaxError
         ? 'INVALID_REQUEST'
         : (sqliteBusy ? 'DATABASE_BUSY' : error?.code);
-      sendError(response, PUBLIC_ERRORS[code] ? code : 'REQUEST_FAILED', {
+      // `sendError` is the single place that maps an unknown code onto the
+      // generic receipt; collapsing here too would hide the code from its
+      // uncurated-code warning.
+      sendError(response, code, {
         context: error?.context,
         // Curated guidance (e.g. the declaredWorkspace fallback hint) may
         // replace the generic whitelist text for its own code.

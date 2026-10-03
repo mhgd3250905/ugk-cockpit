@@ -1,4 +1,8 @@
-const messages = {
+import { noteUncuratedErrorCode } from './uncurated-error-code.mjs';
+
+// Exported so the registration gate can assert coverage over the same key set
+// `deliveryResponse` consults; a private literal cannot be gated.
+export const DELIVERY_ERROR_MESSAGES = {
   COMMIT_IDENTITY_MISSING: ['尚未配置可用于保存的 Git 作者信息。', '请先配置 user.name 和 user.email；平台不会冒用其他人的身份。'],
   DELIVERY_CACHE_INVALID: ['预检临时数据已失效。', '已有代码会保留，请重新预检；不要手动清理项目文件。'],
   DELIVERY_PUSH_FAILED: ['未能确认普通推送成功。', '本地保存会保留；请核对已有 Git 登录和网络后使用原请求恢复，不要强推。'],
@@ -23,6 +27,9 @@ const messages = {
   UNFINISHED_GIT_OPERATION: ['这份代码还有未处理完的 Git 操作。', '请先完成当前冲突或操作，再重新送审；平台不会自行中止它。'],
   GIT_FILTER_UNSUPPORTED: ['这份代码使用了暂不支持的内容转换配置。', '请在原开发工具中完成保存上传后核对兼容性；不要关闭转换规则强行提交。'],
   UNSAFE_REMOTE_URL: ['远程地址或重定向配置不能安全用于自动送审。', '请核对仓库配置；平台不会运行自定义传输命令。'],
+  // Thrown by the same validator as UNSAFE_REMOTE_URL, a few branches away, for
+  // the case where the URL itself carries an account or token.
+  CREDENTIALS_IN_REMOTE_URL: ['远程地址里带着账号或令牌，后续送审动作已停止。', '请把凭据从远程地址中移除，改用 Git 自身的凭据管理器或 SSH 配置；平台不会代你改写远程地址。'],
   DELIVERY_INDEX_LOCKED: ['另一个 Git 操作正在使用暂存区。', '请等该操作完成后恢复送审，不要删除锁文件。'],
   DELIVERY_INDEX_CHANGED: ['成果已保存，但暂存区随后发生了变化。', '平台保留了当前暂存内容；请核对选中文件后重新预检，不要重置。'],
   DELIVERY_MERGE_CONFLICT: ['这次交付仍有合并冲突，不能记录为审核通过。', '请记录需要修改的意见，并由开发会话解决后重新送审。'],
@@ -41,13 +48,55 @@ const messages = {
   DELIVERY_DIRECTORY_MISMATCH: ['当前会话目录与本次送审对象不一致。', '请回到对应代码目录，不能拿另一份代码的检查结果送审。'],
   DELIVERY_INTEGRATION_BUSY: ['同一交付正在执行合并。', '请等待该操作结果后重新检查，不要替换它正在处理的版本。'],
   DELIVERY_CONTENT_TOO_LARGE: ['选中的送审文件超出大小安全限制。', '请从送审范围移除超限文件，或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。'],
+  // Reached from the preflight/submit route-level catch, which feeds every
+  // escaped error into deliveryResponse.
+  //
+  // Wording rule for this whole table: `deliveryResponse` derives the truthful
+  // `impact` from `result.localSaved` / `result.pushed`, and on the save path
+  // the guard that throws into that catch runs AFTER `commit-tree` +
+  // `update-ref` (delivery-ops: revalidateAuthorizedPath(indexScope) follows
+  // afterRefUpdate, and the catch marks error.localSaved). So no entry that is
+  // reachable there may deny that a local result exists — each sentence has to
+  // stay readable under either value of those two flags.
+  // This is the catch-all of BOTH the preflight and the submit path.
+  DELIVERY_CHECK_FAILED: ['送审检查或保存没有完成，本次结果未经确认。', '请在项目页确认这次是否已经留下本地成果，再决定重新预检还是用原操作号恢复；平台没有清理、重置或覆盖任何文件。'],
+  DELIVERY_SOURCE_NOT_FOUND: ['平台里找不到这份代码对应的送审来源。', '请先在项目页确认代码位置仍然在册；需要时重新选择文件夹，不要重新 init。'],
+  SOURCE_STATE_CHANGED: ['这份代码在核验期间仍在变化，两次读取没有对上。', '请等当前修改结束后重新预检，不要用这份未经确认的状态继续送审。'],
+  TREE_MISMATCH: ['要保存的内容与预检时核对的成果不一致。', '平台没有把这份不一致的成果记为已送审；请按当前文件重新预检后再送审，不要手工重置暂存区。'],
+  REMOTE_BRANCH_NOT_FOUND: ['远端还没有这条工作线，无法核对它的最新状态。', '本地成果保持不变；请确认远端分支名或使用新的预检结果，不要强推创建。'],
+  UNSAFE_REMOTE_NAME: ['这个远端名称不能安全地用于自动送审。', '平台没有连接该远端；请在仓库里改用普通的远端名称后重新预检。'],
+  GIT_BUFFER_LIMIT_EXCEEDED: ['本地 Git 返回的内容超出安全读取上限，送审状态未能核验。', '平台没有依据这份不完整的结果继续判断；请按回执确认本地成果，再重新预检或用原操作号恢复。'],
+  PATH_OUTSIDE_SCOPE: ['送审用的路径跳出了已授权的文件夹，已停止访问。', '平台已停止这条路径上的后续动作；请先在项目页确认代码位置的授权。'],
+  PATH_CHANGED: ['送审用的路径在确认后发生变化，已停止访问。', '平台已停止这条路径上的后续动作；请按回执确认本地成果，恢复原位置或走「确认新代码位置」后再重新预检。'],
+  REPARSE_POINT: ['送审用的路径经过了链接或 junction，已停止访问。', '平台已停止这条路径上的后续动作；请选择项目的真实文件夹而不是快捷方式后重新预检。'],
+  WORKTREE_IDENTITY_CHANGED: ['这份代码已经不是登记时的那份工作副本。', '平台没有把这份成果记为已送审；请先在项目页确认代码位置，需要时由你确认重绑后再重新预检。'],
+  PATH_NOT_AUTHORIZED: ['这个代码位置还没有获得访问授权。', '平台没有读取该文件夹；请在项目页重新选择并确认授权后重试。'],
+  PUSH_REMOTE_AMBIGUOUS: ['无法确定这份代码的推送目的地。', '平台已停止后续送审动作；请先在仓库里确认 origin/推送地址或在项目页确认归属。'],
+  SOURCE_COMMIT_MISMATCH: ['要保存的提交与预检时核对的成果不是同一个。', '平台没有把它记为已送审；请用新的预检结果重新送审，不要手工填入提交号。'],
+  GIT_ALTERNATE_UNRESOLVED: ['这份代码的 Git 对象指向了无法解析的 alternates 位置。', '平台已停止后续对象核验；请先确认 Git 对象目录的真实位置。'],
+  GIT_METADATA_TOO_LARGE: ['这份代码的 Git 元数据超出可安全读取的上限。', '平台没有依据未经核验的状态送审；请先处理异常膨胀的 Git 元数据（例如超长提交信息或巨型 packed 文件）再重新预检。'],
 };
+
+// These guards also run after a save/push and on a partially completed replay.
+// Their code alone cannot establish whether this request has an attempt to
+// recover; use the same result fields that submitDelivery returns to callers.
+const RECOVERY_GUIDED_ERRORS = new Set([
+  'CREDENTIALS_IN_REMOTE_URL', 'PATH_OUTSIDE_SCOPE',
+  'PUSH_REMOTE_AMBIGUOUS', 'GIT_ALTERNATE_UNRESOLVED',
+]);
 
 export function deliveryResponse(result) {
   if (result.ok) return result;
-  const known = messages[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
+  if (DELIVERY_ERROR_MESSAGES[result.code] === undefined) {
+    noteUncuratedErrorCode('delivery-messages', result.code);
+  }
+  const known = DELIVERY_ERROR_MESSAGES[result.code] ?? ['送审检查或保存没有完成，不能确认已送达审核。', '请核对错误代码、远端连接与分支状态；保留已有改动，不要强推或重置。'];
   let required_action = known[1];
-  if (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file) {
+  if (RECOVERY_GUIDED_ERRORS.has(result.code)) {
+    required_action += result.retryable === true && result.requiresNewPreflight !== true
+      ? '确认上述条件恢复后，请用原请求恢复送审；已有保存和上传结果按本次回执核对。'
+      : '确认上述条件后，请用新的请求号重新预检；已有保存和上传结果按本次回执核对。';
+  } else if (result.code === 'DELIVERY_CONTENT_TOO_LARGE' && result.details?.file) {
     required_action = `请从送审范围移除超限文件（${result.details.file}），或分批交付；平台保留现有文件，不要清理构建产物或重置仓库。`;
   } else if (result.code === 'DELIVERY_INDEX_LOCKED' && result.details?.ownerState === 'unattributed') {
     // Waiting is the wrong instruction for a lock that no running operation

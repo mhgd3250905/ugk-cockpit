@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { realpathSync, mkdtempSync, rmSync, writeFileSync, readFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
+import { realpathSync, mkdtempSync, renameSync, rmSync, writeFileSync, readFileSync, openSync, closeSync, ftruncateSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,6 +14,9 @@ import { startWriteRun } from '../src/core/runs.mjs';
 import { verifyReviewDelivery } from '../src/core/delivery-review.mjs';
 import { readSubmission } from '../src/core/integrations.mjs';
 import { readProjectContext } from '../src/core/projects.mjs';
+import { appendProgressEvent } from '../src/core/assignments.mjs';
+import { deliveryResponse } from '../src/core/delivery-messages.mjs';
+import { discardDeliveryCache } from '../src/core/delivery-cache.mjs';
 
 // Fixture git must observe the same config contract as the product
 // (safeGitEnvironment strips system/global git config): a runner whose ambient
@@ -58,6 +61,71 @@ async function fixture(t) {
   return {root,main,source,remote,dbPath,db,projectId:registered.projectId,preflight,submit,register,closers};
 }
 
+// Reuse the intake fixture to exercise both the real HTTP renderer and the
+// durable core review/merge requests. Source availability is controlled only by
+// renaming a separate, script-owned local bare remote; the main remote stays up.
+async function integrationFixture(t, options = {}) {
+  const f = await fixture(t);
+  const fork = path.join(f.root, 'fork.git');
+  git(f.root, ['clone', '--bare', f.remote, fork]);
+  git(f.source, ['remote', 'set-url', 'origin', fork]);
+  git(f.source, ['remote', 'add', 'upstream', f.remote]);
+  writeFileSync(path.join(f.source, 'feature.txt'), 'feature\n');
+  const preflight = await f.preflight(['feature.txt']);
+  assert.equal(preflight.ready, true, JSON.stringify(preflight));
+  const submitted = await f.submit(preflight.preflightId);
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  assert.equal(git(fork, ['rev-parse', 'refs/heads/feature/external']), submitted.sourceCommit);
+
+  const observation = await probeGitWorktree(f.main);
+  const sessionId = 'session-main';
+  const worktreeId = worktreeIdFor(observation.worktreeIdentity);
+  const createdAt = new Date().toISOString();
+  f.db.prepare(`INSERT INTO assignments (
+    id,project_id,worktree_id,agent_id,task_id,scope_json,status,revision,session_id,created_at,updated_at
+  ) VALUES ('assignment-main',?,?,'Codex','review fixture','{"mode":"write"}','active',1,?,?,?)`)
+    .run(f.projectId, worktreeId, sessionId, createdAt, createdAt);
+  const started = startWriteRun(f.db, {
+    commandId: 'start-main', runId: sessionId, worktreeId,
+    canonicalPath: observation.canonicalPath, repositoryIdentity: observation.repositoryIdentity,
+    worktreeIdentity: observation.worktreeIdentity, agentClaim: 'Codex', goal: 'review fixture',
+    baseline: { ...observation.after, coherence: observation.coherence, observedAt: observation.observedAt },
+  });
+  assert.equal(started.ok, true, JSON.stringify(started));
+  const activated = appendProgressEvent(f.db, {
+    sessionId, clientRequestId: 'activate-main', expectedRevision: 1, status: 'active', summary: 'review fixture',
+  });
+  assert.equal(activated.ok, true, JSON.stringify(activated));
+  const service = await createCockpitHttpServer({ dbPath: f.dbPath, token: TOKEN, ...options });
+  f.closers.push(() => service.close());
+  const post = async (route, body) => {
+    const response = await fetch(`http://${service.host}:${service.port}${route}`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const session = { sessionId, expectedRevision: activated.revision, submissionId: submitted.submissionId };
+  const claimed = await post('/api/v1/mcp/integration/begin', {
+    ...session, clientRequestId: 'begin', expectedSubmissionRevision: 0,
+  });
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  const cache = readSubmission(f.db, submitted.submissionId).delivery.reviewCache;
+  f.closers.push(() => discardDeliveryCache(cache));
+  const reviewRequest = {
+    ...session, claimId: claimed.body.claimId, expectedClaimRevision: claimed.body.claimRevision,
+    verdict: 'approved', summary: 'fixture review', findings: [], checks: ['real local bare remote'],
+  };
+  const sourceAvailability = (available) => {
+    const offline = path.join(f.root, 'fork-offline.git');
+    for (const endpoint of [fork, offline]) {
+      assert.equal(path.dirname(path.resolve(endpoint)), path.resolve(f.root));
+    }
+    renameSync(available ? offline : fork, available ? fork : offline);
+  };
+  return { ...f, fork, post, session, reviewRequest, submitted, sourceAvailability };
+}
+
 test('no-init independent clone is scoped, saved, pushed and deduplicated without a fake session', async (t) => {
   const f = await fixture(t);
   writeFileSync(path.join(f.source,'feature.txt'),'feature\n');
@@ -83,6 +151,7 @@ test('no-init independent clone is scoped, saved, pushed and deduplicated withou
   assert.equal(duplicate.submissionId,result.submissionId);
   writeFileSync(path.join(f.source,'feature.txt'),'feature v2\n');
   const next = await f.preflight(['feature.txt'],'next');
+  assert.equal(next.ready,true,JSON.stringify(next));
   const second = await f.submit(next.preflightId,'submit-next');
   assert.equal(second.ok,true,JSON.stringify(second));
   assert.equal(second.deliveryVersion,2);
@@ -114,6 +183,50 @@ test('push failure recovers the same saved commit and preserves truthful partial
   const result = await f.submit(checked.preflightId,'push-retry');
   assert.equal(result.ok,true,JSON.stringify(result)); assert.equal(result.sourceCommit,saved);
   assert.equal(git(f.source,['rev-list','--count','HEAD']),'2');
+});
+
+test('credentials rejected after a real push preserve upload facts and resume the original delivery', async (t) => {
+  const f = await fixture(t);
+  const registration = await f.register();
+  writeFileSync(path.join(f.source, 'feature.txt'), 'feature\n');
+  git(f.source, ['remote', 'set-url', 'origin', 'https://user:fixture@example.invalid/repo.git']);
+  const blockedPreflight = await prepareDelivery(f.db, {
+    commandId: 'credentials-before-save', sourceId: registration.id, files: ['feature.txt'],
+  });
+  assert.equal(blockedPreflight.code, 'CREDENTIALS_IN_REMOTE_URL', JSON.stringify(blockedPreflight));
+  assert.equal(blockedPreflight.localSaved, false);
+  assert.equal(blockedPreflight.pushed, false);
+  assert.match(deliveryResponse(blockedPreflight).required_action, /新的请求号重新预检/);
+  assert.equal(git(f.remote, ['for-each-ref', '--format=%(refname)', 'refs/heads/feature/external']), '');
+  git(f.source, ['remote', 'set-url', 'origin', f.remote]);
+  const checked = await f.preflight(['feature.txt'], 'credentials-preflight-fresh');
+  assert.equal(checked.ready, true, JSON.stringify(checked));
+  let actualRemoteCommit;
+  const partial = await f.submit(checked.preflightId, 'credentials-after-push', {
+    faultInjector(stage) {
+      if (stage !== 'after_delivery_push') return;
+      actualRemoteCommit = git(f.remote, ['rev-parse', 'refs/heads/feature/external']);
+      assert.equal(actualRemoteCommit, git(f.source, ['rev-parse', 'HEAD']));
+      // The validator rejects this fixture URL before any external connection.
+      git(f.source, ['remote', 'set-url', 'origin', 'https://user:fixture@example.invalid/repo.git']);
+    },
+  });
+  assert.equal(partial.code, 'CREDENTIALS_IN_REMOTE_URL', JSON.stringify(partial));
+  assert.equal(partial.localSaved, true);
+  assert.equal(partial.pushed, true);
+  assert.equal(partial.sourceCommit, actualRemoteCommit);
+  assert.equal(partial.retryable, true);
+  assert.equal(partial.requiresNewPreflight, false);
+  const rendered = deliveryResponse(partial);
+  assert.match(rendered.impact, /代码已上传/);
+  assert.match(rendered.required_action, /原请求恢复送审/);
+  assert.doesNotMatch(rendered.required_action, /没有上传任何代码|新的请求号/);
+  git(f.source, ['remote', 'set-url', 'origin', f.remote]);
+  const recovered = await f.submit(checked.preflightId, 'credentials-after-push');
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.sourceCommit, actualRemoteCommit);
+  assert.equal(git(f.remote, ['rev-parse', 'refs/heads/feature/external']), actualRemoteCommit);
+  assert.equal(git(f.source, ['rev-list', '--count', 'HEAD']), '2');
 });
 
 test('unknown and ambiguous projects are not guessed, and fork delivery keeps its own push destination', async (t) => {
@@ -294,4 +407,67 @@ test('a corrupt retained preflight row cannot wedge future preflights', async (t
   assert.equal(result.ready, true, JSON.stringify(result));
   const submit = await f.submit(result.preflightId);
   assert.equal(submit.ok, true, JSON.stringify(submit));
+});
+
+test('HTTP review reference failure guides a new request while the original replays its fixed failure', async (t) => {
+  const f = await integrationFixture(t);
+  const request = { ...f.reviewRequest, clientRequestId: 'review-original' };
+  f.sourceAvailability(false);
+  const failed = await f.post('/api/v1/mcp/integration/review', request);
+  assert.equal(failed.status, 503, JSON.stringify(failed.body));
+  assert.equal(failed.body.code, 'DELIVERY_REVIEW_REF_UNAVAILABLE');
+  assert.match(failed.body.required_action, /新的 clientRequestId/);
+  assert.doesNotMatch(failed.body.required_action, /同一个操作编号继续/);
+  const command = f.db.prepare("SELECT id,state FROM commands WHERE kind = 'integration.review'").get();
+  assert.equal(command.state, 'failed');
+  f.sourceAvailability(true);
+  const healthy = await verifyReviewDelivery(readSubmission(f.db, f.submitted.submissionId), readProjectContext(f.db, f.projectId));
+  assert.equal(healthy.sourceHead, f.submitted.sourceCommit);
+  const replay = await f.post('/api/v1/mcp/integration/review', request);
+  assert.equal(replay.body.code, failed.body.code);
+  assert.equal(replay.body.required_action, failed.body.required_action);
+  assert.equal(f.db.prepare('SELECT state FROM commands WHERE id = ?').get(command.id).state, 'failed');
+  const reviewed = await f.post('/api/v1/mcp/integration/review', { ...request, clientRequestId: 'review-fresh' });
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+  assert.equal(reviewed.body.verdict, 'approved');
+  assert.equal(f.db.prepare("SELECT state FROM commands WHERE kind = 'integration.review' AND id != ?").get(command.id).state, 'committed');
+  assert.equal(git(f.main, ['rev-parse', 'HEAD']), f.submitted.targetHead);
+});
+
+test('HTTP merge reference failure preserves a prior local fast-forward and guides the original request', async (t) => {
+  let fastForwards = 0;
+  const f = await integrationFixture(t, {
+    faultInjector(stage) {
+      if (stage !== 'after_fast_forward_before_persist') return;
+      fastForwards++;
+      if (fastForwards === 1) throw new Error('fixture interruption before persistence');
+    },
+  });
+  const reviewed = await f.post('/api/v1/mcp/integration/review', { ...f.reviewRequest, clientRequestId: 'review' });
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+  const request = {
+    ...f.session, claimId: reviewed.body.claimId,
+    expectedClaimRevision: reviewed.body.claimRevision,
+    expectedSubmissionRevision: reviewed.body.submissionRevision,
+    clientRequestId: 'merge-original', summary: 'merge fixture',
+  };
+  await f.post('/api/v1/mcp/integration/merge', request);
+  assert.equal(git(f.main, ['rev-parse', 'HEAD']), f.submitted.sourceCommit);
+  assert.equal(git(f.remote, ['rev-parse', 'refs/heads/main']), f.submitted.targetHead);
+  assert.equal(f.db.prepare('SELECT state FROM integration_attempts').get().state, 'prepared');
+  f.sourceAvailability(false);
+  const failed = await f.post('/api/v1/mcp/integration/merge', request);
+  assert.equal(failed.status, 503, JSON.stringify(failed.body));
+  assert.equal(failed.body.code, 'DELIVERY_REVIEW_REF_UNAVAILABLE');
+  assert.match(failed.body.impact, /主项目分支可能已经前进/);
+  assert.doesNotMatch(failed.body.impact, /没有修改任何项目的代码/);
+  assert.match(failed.body.required_action, /同一个操作编号继续/);
+  assert.doesNotMatch(failed.body.required_action, /新的 clientRequestId/);
+  f.sourceAvailability(true);
+  const recovered = await f.post('/api/v1/mcp/integration/merge', request);
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+  assert.equal(recovered.body.pushed, true);
+  assert.equal(fastForwards, 1);
+  assert.equal(git(f.main, ['rev-parse', 'HEAD']), f.submitted.sourceCommit);
+  assert.equal(git(f.remote, ['rev-parse', 'refs/heads/main']), f.submitted.sourceCommit);
 });
