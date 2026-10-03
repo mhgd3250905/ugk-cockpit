@@ -3835,8 +3835,24 @@ export async function createCockpitHttpServer({
         const replay = readCommand(db, body.commandId);
         if (replay?.kind === 'project.register' && ['committed', 'failed'].includes(replay.state)) {
           const frozen = JSON.parse(replay.request_json);
-          const grantRow = activeFolderGrants.read(body.grantId);
-          const expectedName = body.name?.trim() || (grantRow ? path.basename(grantRow.canonical_path) : '');
+          // What the platform called the project back then is a historical fact,
+          // so it is taken from the frozen request — the live grant table cannot
+          // answer it. `pruneSpentFolderGrants` deletes consumed rows after the
+          // retention window, and the name the route derived for a nameless
+          // registration was `basename(grant.canonical_path)`; once the row is
+          // gone that expression yields '' and a replay of the *same* payload
+          // was refused with COMMAND_CONFLICT ("这个操作编号已经用于另一项操作"),
+          // inviting the operator to redo a registration that had already
+          // succeeded. `confirm-location` right below already compares only
+          // frozen fields; records written before `canonicalPath` entered the
+          // frozen request keep the old live-row fallback.
+          const grantRow = typeof frozen.canonicalPath === 'string' && frozen.canonicalPath.length > 0
+            ? null
+            : activeFolderGrants.read(body.grantId);
+          const derivedName = typeof frozen.canonicalPath === 'string' && frozen.canonicalPath.length > 0
+            ? path.basename(frozen.canonicalPath)
+            : (grantRow ? path.basename(grantRow.canonical_path) : '');
+          const expectedName = body.name?.trim() || derivedName;
           if (
             frozen.grantId !== body.grantId
             || frozen.name !== expectedName
