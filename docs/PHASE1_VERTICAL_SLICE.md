@@ -6,6 +6,25 @@
 
 ## 实施状态
 
+### alpha.68：第 36 轮审计——注释与门禁声称的把关再次被证伪，判据改用真实引擎（2026-10-04）
+
+- `0.1.0-alpha.68`：基线 `f608abc4e9f2dccaa996b5d5bb20980f18bcd52c`（已含 PR #30/alpha.65 与 PR #31/alpha.66）。本轮 GitHub open PR 为 0（`gh pr list --state open` → `[]`），但本机服务树 `E:\AII\ugk-cockpit` 有一笔**未推送**提交 `42d9bfb`（2026-10-03 22:13，基于 PR #31 之前的 `a0b0ec8`）已把 `VERSION` 推到 `0.1.0-alpha.67` 且正式服务正在跑它（PID 56308、`--port 41737`，`/health` 实测 `{"status":"ok","version":"0.1.0-alpha.67"}`）。按「定版本号必须同时查 open PR 与本机服务树」的既有规则跳过 alpha.67 取 alpha.68。
+
+四条修复，全部有执行证据（取证脚本与日志在本机 gitignore 的 `auditlogs/`，未随 PR 提交）：
+
+1. **P1 恢复记录的读入容忍**（`web/src/workspace-action-recovery.mjs`）。注释声称 unknown key 会被丢弃，代码却在同一个函数里 `return null` → `readRawStrict` 对整份存储抛错 → upsert/mark/remove 全部先过它 → 待核对记录消失且此后任何开发空间操作记不进去。取证：`auditlogs/r36-web-readtolerance.mjs` + `.log`（一条记录多一个键：UI 读到 0 条、upsert 抛 `WORKSPACE_ACTION_RECOVERY_INVALID_DATA`、两条记录里另一条一起消失；写侧 `normalizeStoredActions` 对同一字节是静默丢弃，两个读取器相反）。整改轮把写侧也收口（不再静默丢弃、重复编号响亮失败）。
+2. **P1 caught-error 原始码收束**（新增 `publicErrorCode`，18 个落点）。`git()` 原样重抛 execFile 错误（实测 `typeof code=number value=128`），而 `error.code ?? 'X'` 取的是 128 → 同时成为 HTTP 回执码（两张表都查不到 → 通用回执）、`integration_attempts.last_error_code` 持久值与命令流水。判别用例在 `test/integration-service.test.mjs`，红态原文 `public code was 128`（`auditlogs/r36-d3-red.log`），绿态 `auditlogs/r36-d3-green.log`。
+3. **P0 类：测试门禁接受注册 0 用例的文件**（`scripts/check-test-suite.mjs` + `scripts/test-support/registrar-recorder*.mjs`）。注入实测：块注释包住的 `test(`、`.skip`-only、空列表注册、`.test.js` 四种形状全部被旧判据放行且 `node --test` 把该文件记成 1 项通过（`auditlogs/r36-gate-vacuity.sh` / `.log`）。改判据为「导入文件后它真正注册了什么」（不执行用例体）。交叉核对：本树 948 条可执行注册、7 条平台跳过标注，与全量 runner 报的「7 平台跳过」及 phase0 的 97 项一致。
+4. **P2 项目登记重放核对问给了可变状态**（`src/service/http-server.mjs`）。端到端实测：注册 → 以未来时刻跑一次 `pruneSpentFolderGrants`（等价于重启后的保留期）→ 同号重放 = 409 `COMMAND_CONFLICT`「这个操作编号已经用于另一项操作」（`auditlogs/r36-register-replay-pruned.log`）；未清理时为 200，故按 P2 登记而非夸大为即时故障。
+
+**本轮自己引入并被专审整改轮（第 5 轮）抓出、已修好的缺陷**（按原样登记，不写成一次通过）：① 把读入容忍放进共享的 `normalizeRequest`，连带废掉写路径守卫 → 既有已提交用例 `test/audit-2026-09-28-ignored-content-removal.test.mjs` 由绿转红；漏检原因是定向复验只跑了新用例所在文件，没覆盖被改函数的其它消费者。② 兄弟落点按 `error.` 拼写扫描，漏掉同族 `err.code` 4 处与 `typeof error.code === 'string' ? error.code : X` 3 处（字符串 errno 从三元式漏过去；实测 git 起不来时 execFile 的 code 是 `'ENOENT'`）。③ 新写的形状禁令第一条模式里多打一个冒号（`code:\s*:`）→ 对目标写法永不匹配，而它正是「退回旧写即判红」的那道判据；此前的 M4 变异之所以红是靠另一条 failCommand 专用模式，掩盖了它。④ 替身把 `suite`/`skip`/`only`/`todo` 原样透传给真实 `node:test`：只写 `suite` 的文件被误判 0 注册，且真实 suite 会被排进计数器进程执行，使「不执行任何用例体」成为假话。⑤ 门禁自己的文件集合漏了实测会被执行的 `test-*.mjs` 形状，而本轮新加的两个 helper 恰好叫 `test-registrar-*.mjs` —— 被 runner 当成两个 0 用例文件各记 1 项通过（一次被中止的全量预跑日志里可见 `✔ scripts\test-support\test-registrar-shim.mjs`），门禁对自身的失效视而不见。⑥ 告警与收束判据分叉：`SQLITE_BUSY` 被 `publicErrorCode` 静默收束、却仍被 `noteUncuratedErrorCode` 报成「表里缺一项」。
+
+**台账与文档订正**：(a) 本轮之前台账写「`DELIVERY_*`/`REMOTE_*` 由 `deliveryResponse` 策展，不重复进 `PUBLIC_ERRORS`」——实测 `CREDENTIALS_IN_REMOTE_URL` 与 `DELIVERY_PREFLIGHT_STALE` 也会经审核/接入路由喂给 `sendError`（校验器本体执行证据：`validateRemoteUrlSecurity('https://user:pw@host/r.git')` 抛该码），已登记进 `PUBLIC_ERRORS` 并加入 `BOTH_TABLES`。(b) README alpha.59 段「测试文件被掏空都不再绿灯」与台账第 32 轮「八例双向探针全绿（…只有注释判红）」均为当时即失实的记录，两段属历史快照不改写，失实在本段与 README 新版段就地订正；探针现已成为常驻用例。(c) `docs/TESTING.md`「所有入口先检查测试目录和声明，防止空测试绿灯」在本轮之前不成立，本轮之后成立（判据已换引擎）。
+
+**已核查但不修**：`test/launcher.test.mjs` 的 `runCaptured` 在 `result.code === null` 时用 stdout 是否含 `[ERROR]` 伪造退出码（本机实测信号死亡确实给出 `code:null`，故该分支可达），属测试假件而非产品缺陷，且改它需先决定「pid 已被回收」该判红还是判跳过，留下一轮。`src/service/http-server.mjs` 四处 `sendError(response, error.code ?? 'REQUEST_FAILED')` 已由 sendError 自身收束到已登记的通用码，不入流水。`web/src/submit-notes-view.mjs` 的 `retryable` 名单只含 `SERVICE_UNAVAILABLE`/`REQUEST_FAILED`，本轮新登记的三个码不在任何按码名分支上（已 grep 核实无翻转）。`submission-service.mjs` 的同族 `err.code` 落点仍按「src/ 内零引用」豁免，且该豁免的前提现在每次重查（一旦被 import 即判红）。
+
+**未证实**：MCP stdio 桥输出流死亡后的僵尸化（实测：输出流被销毁后不再有任何回执、无告警、`onShutdown` 不执行，直到宿主关 stdin 才结算；`writeResponse` 的 try/catch 对 destroyed 流不可达）。取证 `auditlogs/r36-mcp-output-death.mjs` / `.log`。本轮不改：修它要动统一的关停路径，而在剩余复核轮次内无法安全取得「关停仍恰好一次」的双向证据。合并前应跑：`node auditlogs/r36-mcp-output-death.mjs`（脚本在本机 gitignore 目录，需从审查副本取）。
+
 ### alpha.66：第 35 轮审计——未登记错误码不再静默塌成通用回执（2026-10-03）
 
 **固定新主线融合（2026-10-04）**：本地回执修复提交 `0eefc117fe2e125d7f0ad3568105c0580b2af88d` 之上融入已合并 PR #30 的固定 `main` 提交 `9793be1925198a4047341c7b902bb0816ac52a2d`。冲突仅在 README、版本及阶段记录五个锚点文件；保留 alpha.66 元数据和双方阶段记录，#30 的敌意驱动辅助代码、消费测试与测试/服务恢复文档均与该主线逐文件一致。融合后的 `src/`、`web/`、Vite 配置、依赖及 `package.json` 的 `scripts` 字段与 `0eefc117` 一致，因此复用前述三项行为回归与其余定向证据，也保留首次 no-init 失败根因未查明的限制；不重复 906 秒定向。融合快组 **147 项 / 146 通过 / 0 失败 / 1 跳过**（5.09 秒），两份错误码定向 **20/20 通过**（22.06 秒），快组前置发现门禁为 **141** 份测试文件。日志为本机 `auditlogs/pr31-main-merge-quick.log`、`pr31-main-merge-error-codes.log`。网页源码与固定主线也一致，本地不重复构建；最终组合候选仍由最新完整 CI 及 build job 覆盖，不把旧候选的成功当成本候选已通过完整门禁。
