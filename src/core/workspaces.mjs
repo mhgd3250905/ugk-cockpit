@@ -8,6 +8,7 @@ import {
 } from './command-journal.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { singleFlight } from './single-flight.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 import { reopenWorkLineStateForReuse, cancelClosedWorkLineInvitations } from './manual-records.mjs';
 import { readProjectContext, resolveWorktreeId } from './projects.mjs';
 import {
@@ -315,7 +316,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
   } catch (err) {
     const res = {
       ok: false,
-      code: err.code ?? 'FOLDER_GRANT_ERROR',
+      code: publicErrorCode(err.code, 'FOLDER_GRANT_ERROR'),
       message: err.message,
       grantId,
     };
@@ -353,7 +354,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
     } catch (err) {
       const res = {
         ok: false,
-        code: err.code ?? 'PROBE_FAILED',
+        code: publicErrorCode(err.code, 'PROBE_FAILED'),
         message: err.message,
       };
       failCommand(db, commandId, res);
@@ -531,7 +532,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
       }
       const res = {
         ok: false,
-        code: err.code ?? 'DIRECTORY_VERIFICATION_FAILED',
+        code: publicErrorCode(err.code, 'DIRECTORY_VERIFICATION_FAILED'),
         message: err.message,
         targetPath,
       };
@@ -1168,7 +1169,7 @@ export async function reuseDevelopmentWorkspace(db, request = {}, options = {}) 
     } catch (error) {
       return failOrUnknown({
         ok: false,
-        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        code: publicErrorCode(error.code, 'WORKSPACE_PROBE_FAILED'),
         spaceId: space.spaceId,
         message: error.message,
       });
@@ -1468,7 +1469,7 @@ export async function removeDevelopmentWorkspace(db, request = {}, options = {})
     } catch (error) {
       return failOrUnknown({
         ok: false,
-        code: error.code ?? 'WORKSPACE_PROBE_FAILED',
+        code: publicErrorCode(error.code, 'WORKSPACE_PROBE_FAILED'),
         spaceId: space.spaceId,
         message: error.message,
       });

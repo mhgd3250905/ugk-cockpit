@@ -9,6 +9,7 @@ import {
 import { withImmediateTransaction } from './database.mjs';
 import { statIdentityPair } from './identity-migration.mjs';
 import { resolveProjectAvatar } from './project-avatars.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 
 function now() {
   return new Date().toISOString();
@@ -796,7 +797,7 @@ export function updateProject(db, request, { avatarStorageRoot } = {}) {
       } catch (err) {
         return failCommand(db, commandId, {
           ok: false,
-          code: err.code || 'INVALID_IMAGE_PATH',
+          code: publicErrorCode(err.code, 'INVALID_IMAGE_PATH'),
           message: err.message,
         });
       }

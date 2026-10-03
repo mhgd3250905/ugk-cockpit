@@ -48,16 +48,33 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+// The canonical body per kind, used as the strictness boundary when a record is
+// being written.
+const CANONICAL_REQUEST_KEYS = {
+  reuse: ['commandId', 'expectedRevision', 'expectedBaseHead'],
+  remove: ['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'],
+};
+
 function normalizeRequest(kind, request) {
   if (!isRecord(request) || !isNonEmptyString(request.commandId) || !hasValidRevision(request.expectedRevision)) {
     return null;
   }
 
+  // READ tolerance. A record whose *required* fields are
+  // missing really is unreadable, and rejecting it loudly is the point:
+  // `readRawStrict` guards every mutation so a corrupt store can never be
+  // silently replaced by an empty list. An *extra* key is a different fact, and
+  // treating it as corruption was a self-inflicted outage: one unknown key threw
+  // for the whole store, so the pending 删除/重新开始 record disappeared from the
+  // UI (there is no discard affordance), every mutation — upsert, mark, remove —
+  // then threw WORKSPACE_ACTION_RECOVERY_INVALID_DATA, and no later workspace
+  // action could be recorded at all. Unknown keys are therefore dropped here;
+  // the canonical body is the fields below, and `workspaceActionRequestBody`
+  // re-derives the removal confirmation at send time, so the dropped
+  // `userConfirmedIgnoredRemoval` (written by an intermediate bundle) has no
+  // reader to disagree with.
   if (kind === 'reuse') {
     if (!isNonEmptyString(request.expectedBaseHead)) return null;
-    if (Object.keys(request).some((key) => !['commandId', 'expectedRevision', 'expectedBaseHead'].includes(key))) {
-      return null;
-    }
     return {
       commandId: request.commandId,
       expectedRevision: request.expectedRevision,
@@ -65,24 +82,30 @@ function normalizeRequest(kind, request) {
     };
   }
 
-  // Read tolerance, not write shape: a record stored by an intermediate bundle
-  // carried the confirmation inside the body, and rejecting an unknown key here
-  // throws for the whole store — the pending record disappears (there is no
-  // other discard affordance) and every later workspace action fails. Unknown
-  // keys are therefore dropped on read; the canonical body is two fields, and
-  // workspaceActionRequestBody re-derives the confirmation at send time.
-  const allowedKeys = ['commandId', 'expectedRevision', 'userConfirmedIgnoredRemoval'];
-  if (Object.keys(request).some((key) => !allowedKeys.includes(key))) {
-    return null;
-  }
-  if (request.userConfirmedIgnoredRemoval !== undefined
-    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
-    return null;
-  }
   return {
     commandId: request.commandId,
     expectedRevision: request.expectedRevision,
   };
+}
+
+// Writing is held to more than reading, deliberately. Tolerance belongs to
+// reading history: a record already on disk is a fact the UI must stay able to
+// clear. A request being *created* is not history yet — if it carries a key the
+// canonical body cannot represent, the caller must find out immediately, while
+// it still believes that key is part of the operation it asked for. `remove`
+// accepts `userConfirmedIgnoredRemoval` here because the workbench sends it and
+// an intermediate bundle stored it; the stored record keeps only the two
+// canonical fields and `workspaceActionRequestBody` re-derives the confirmation.
+function normalizeOutgoingRequest(kind, request) {
+  const normalized = normalizeRequest(kind, request);
+  if (!normalized) return null;
+  const allowed = CANONICAL_REQUEST_KEYS[kind];
+  if (!allowed || Object.keys(request).some((key) => !allowed.includes(key))) return null;
+  if (kind === 'remove' && request.userConfirmedIgnoredRemoval !== undefined
+    && typeof request.userConfirmedIgnoredRemoval !== 'boolean') {
+    return null;
+  }
+  return normalized;
 }
 
 export function workspaceActionRequestBody(record) {
@@ -145,9 +168,20 @@ function normalizeStoredActions(value) {
       ? value.records
       : [];
   const byId = new Map();
+  // Writing must not be more forgiving than reading. Silently dropping a record
+  // here is how pending recovery material disappears: the read side refuses the
+  // same bytes loudly (`readRawStrict` throws), so a quiet writer would let a
+  // partial store look like a clean one. A duplicate id is refused rather than
+  // resolved by "last one wins", matching the duplicate check on read.
   for (const rawAction of rawActions) {
     const action = normalizeStoredAction(rawAction);
-    if (action) byId.set(action.id, action);
+    if (!action) {
+      throw new WorkspaceActionRecoveryDataError('开发空间操作恢复记录无法写成规范形状。');
+    }
+    if (byId.has(action.id)) {
+      throw new WorkspaceActionRecoveryDataError('开发空间操作恢复记录包含重复记录。');
+    }
+    byId.set(action.id, action);
   }
   return [...byId.values()];
 }
@@ -252,7 +286,7 @@ export function createWorkspaceActionRecord({
   now = new Date().toISOString(),
 }) {
   const id = workspaceActionRecordId({ kind, projectId, spaceId });
-  const normalizedRequest = normalizeRequest(kind, request);
+  const normalizedRequest = normalizeOutgoingRequest(kind, request);
   if (!normalizedRequest) {
     throw new TypeError('A workspace action must contain the exact valid request body.');
   }

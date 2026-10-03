@@ -68,7 +68,7 @@ import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { deliveryResponse } from '../core/delivery-messages.mjs';
-import { noteUncuratedErrorCode } from '../core/uncurated-error-code.mjs';
+import { noteUncuratedErrorCode, publicErrorCode } from '../core/uncurated-error-code.mjs';
 import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
 import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
@@ -1284,6 +1284,48 @@ export const PUBLIC_ERRORS = {
     message: '功能已经安全接入本地主项目，但尚未推送到远端。',
     impact: '本地主项目的新保存点保持完整；平台没有回退或重写历史。',
     requiredAction: '请检查网络或远端权限后，用完全相同的合并请求重试。',
+  },
+  // 第 36 轮：这两个码是接入链路上「拿不到产品码」时的收束点（见
+  // src/core/uncurated-error-code.mjs 的 publicErrorCode）。收束点必须自带回执，
+  // 否则修完数字码只是把 128 换成一个同样没登记的常量名。措辞按同族规则不否认任何
+  // 真值字段：INTEGRATION_FAILED 既可能来自快进之前，也可能来自主项目已经前进、
+  // 甚至推送之后落库之前的位置，而 localIntegrated/pushed 由 integration/merge 路由
+  // 随本次响应一并给出（见 integrationErrorExtra），所以这两句必须在两种取值下都读得通。
+  INTEGRATION_FAILED: {
+    status: 409,
+    message: '这次合并没有完成，结果未经确认。',
+    impact: '本地主项目与远端是否已被这次操作前进，以本次回执里的「本地已接入」「已推送」为准；平台没有回退、清理或覆盖任何内容。',
+    requiredAction: '请先在项目页核对主项目当前状态，再用完全相同的合并请求继续；平台会重新复核后再决定，不要换一个操作编号重复合并。',
+  },
+  INTEGRATION_PROBE_FAILED: {
+    status: 503,
+    message: '还没能读到主项目的当前状态，审核或合并已停止。',
+    impact: '这次调用没有改动主项目、开发分支或审核记录；平台不会用读不到的状态代替检查。',
+    requiredAction: '请确认主项目文件夹仍在原位置且没有其它 Git 操作占用它，然后刷新项目状态并重试本次操作。',
+  },
+  // 第 36 轮·跨渲染表面的漂移。这两个码由送审侧的校验器抛出，而审核/接入三条路由
+  // （/api/v1/mcp/integration/{begin,review,merge}）也会经过同一批校验器，其结果喂给
+  // sendError —— sendError 只查这一张表，缺一行就把「必须换新预检」说成「刷新后重试
+  // 同一个请求」。文案沿用送审表已审过的同一事实，不另发明口径。
+  CREDENTIALS_IN_REMOTE_URL: {
+    status: 403,
+    message: '远程地址里带着账号或令牌，平台已停止使用它。',
+    impact: '平台没有连接该远端，也没有改写你的远程地址；本次操作停在这里。',
+    requiredAction: '请把凭据从远程地址中移除，改用 Git 自身的凭据管理器或 SSH 配置，再重新发起本次操作。',
+  },
+  DELIVERY_PREFLIGHT_STALE: {
+    status: 409,
+    message: '检查后代码内容或目标版本发生了变化，这份检查结果已失效。',
+    impact: '已有成果没有被修改、覆盖或推送；本次没有按过期检查继续登记审核。',
+    requiredAction: '请用新的操作编号重新执行送审前检查，再按新结果继续；不要沿用这份已失效的检查。',
+  },
+  // publicErrorCode 新收束出来的兜底（`err.code` 那一族落点），必须自带回执，
+  // 否则只是把 ENOENT 换成另一个查不到的名字。
+  FOLDER_GRANT_ERROR: {
+    status: 409,
+    message: '这次操作使用的文件夹授权已不可用，平台没有读取该文件夹。',
+    impact: '没有创建、修改或删除任何代码；被拒绝的授权记录保持原样。',
+    requiredAction: '请重新在文件夹选择器里选择该代码目录，用新的操作编号再发起一次；平台不会替你延长或重建授权。',
   },
   MAIN_CHANGED_AFTER_INTEGRATION: {
     status: 409,
@@ -3817,8 +3859,24 @@ export async function createCockpitHttpServer({
         const replay = readCommand(db, body.commandId);
         if (replay?.kind === 'project.register' && ['committed', 'failed'].includes(replay.state)) {
           const frozen = JSON.parse(replay.request_json);
-          const grantRow = activeFolderGrants.read(body.grantId);
-          const expectedName = body.name?.trim() || (grantRow ? path.basename(grantRow.canonical_path) : '');
+          // What the platform called the project back then is a historical fact,
+          // so it is taken from the frozen request — the live grant table cannot
+          // answer it. `pruneSpentFolderGrants` deletes consumed rows after the
+          // retention window, and the name the route derived for a nameless
+          // registration was `basename(grant.canonical_path)`; once the row is
+          // gone that expression yields '' and a replay of the *same* payload
+          // was refused with COMMAND_CONFLICT ("这个操作编号已经用于另一项操作"),
+          // inviting the operator to redo a registration that had already
+          // succeeded. `confirm-location` right below already compares only
+          // frozen fields; records written before `canonicalPath` entered the
+          // frozen request keep the old live-row fallback.
+          const grantRow = typeof frozen.canonicalPath === 'string' && frozen.canonicalPath.length > 0
+            ? null
+            : activeFolderGrants.read(body.grantId);
+          const derivedName = typeof frozen.canonicalPath === 'string' && frozen.canonicalPath.length > 0
+            ? path.basename(frozen.canonicalPath)
+            : (grantRow ? path.basename(grantRow.canonical_path) : '');
+          const expectedName = body.name?.trim() || derivedName;
           if (
             frozen.grantId !== body.grantId
             || frozen.name !== expectedName
@@ -5226,7 +5284,7 @@ export async function createCockpitHttpServer({
         } catch (error) {
           sendJson(response, 200, deliveryResponse({
             ok: false,
-            code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+            code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED'),
             ...(error.details !== undefined ? { details: error.details } : {}),
             localSaved: false,
             pushed: false,

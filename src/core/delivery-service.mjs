@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { beginCommand, canonicalJson, parseCommandResponse } from './command-journal.mjs';
 import { singleFlight } from './single-flight.mjs';
+import { publicErrorCode } from './uncurated-error-code.mjs';
 import { withImmediateTransaction } from './database.mjs';
 import { readSessionContext } from './assignments.mjs';
 import { acquireRepositoryLock, releaseRepositoryLock, readSubmission } from './integrations.mjs';
@@ -92,7 +93,7 @@ async function prepareDeliveryOnce(db, request, options = {}) {
     if (completed?.state === 'committed') return parseCommandResponse(completed);
     return finishCommand(db, commandId, {
       ok: false,
-      code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+      code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED'),
       ...(error.details !== undefined ? { details: error.details } : {}),
       localSaved: false,
       pushed: false,
@@ -154,7 +155,8 @@ async function submitDeliveryOnce(db, request, options = {}) {
   const prepared = db.prepare('SELECT * FROM delivery_preflights WHERE id = ?').get(preflightId);
   if (!prepared) return { ok: false, code: 'DELIVERY_PREFLIGHT_REQUIRED', localSaved: false, pushed: false };
   const source = readDeliverySource(db, prepared.source_id);
-  try { assertDeliveryCwd(source, mcpWorkingDirectory); } catch (error) { return { ok: false, code: error.code }; }
+  try { assertDeliveryCwd(source, mcpWorkingDirectory); }
+  catch (error) { return { ok: false, code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED') }; }
   const begun = beginCommand(db, { commandId, kind: 'delivery.submit', request });
   if (['committed', 'failed'].includes(begun.command.state)) return parseCommandResponse(begun.command);
   let attempt = db.prepare('SELECT * FROM delivery_attempts WHERE command_id = ?').get(commandId);
@@ -245,7 +247,7 @@ async function submitDeliveryOnce(db, request, options = {}) {
     const completed = db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
     if (completed?.state === 'committed') return parseCommandResponse(completed);
     if ((error.localSaved || localSaveEvidence) && attempt?.state === 'prepared') update({ state: localSaveEvidence ? 'local_saved' : 'prepared', source_commit: error.sourceCommit ?? localSaveEvidence?.sourceCommit ?? attempt.source_commit });
-    const code = typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED';
+    const code = publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED');
     const requiresNewPreflight = ['DELIVERY_PREFLIGHT_EXPIRED','DELIVERY_PREFLIGHT_STALE','HEAD_MOVED','SOURCE_CONTENT_CHANGED',
       'REMOTE_TARGET_CHANGED','REMOTE_SOURCE_MISMATCH','REMOTE_IDENTITY_CHANGED','BRANCH_MISMATCH','DELIVERY_REMOTE_CHANGED',
       'DELIVERY_CACHE_INVALID','DELIVERY_INDEX_CHANGED','SOURCE_COMMIT_MISMATCH'].includes(code);
