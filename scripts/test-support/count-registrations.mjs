@@ -5,7 +5,7 @@
 import { register } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
-register(new URL('./test-registrar-hooks.mjs', import.meta.url));
+register(new URL('./registrar-recorder-hooks.mjs', import.meta.url));
 
 const files = process.argv.slice(2);
 const registry = [];
@@ -20,11 +20,16 @@ for (const file of files) {
     error = `${caught?.code ?? caught?.name ?? 'Error'}: ${String(caught?.message ?? caught).slice(0, 200)}`;
   }
   const entries = registry.slice(start);
+  // A `describe` is a container, not a check: counting the suite itself as one of
+  // the file's tests would let a group that kept its header and lost its body
+  // still look populated.
+  const tests = entries.filter((entry) => entry.kind !== 'describe');
   process.stdout.write(`${JSON.stringify({
     file,
-    registrations: entries.length,
-    executable: entries.filter((entry) => !entry.skipped).length,
-    skipped: entries.filter((entry) => entry.skipped).length,
+    registrations: tests.length,
+    suites: entries.length - tests.length,
+    executable: tests.filter((entry) => !entry.skipped).length,
+    skipped: tests.filter((entry) => entry.skipped).length,
     error,
   })}\n`);
 }

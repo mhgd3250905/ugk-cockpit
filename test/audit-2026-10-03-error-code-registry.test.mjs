@@ -92,6 +92,11 @@ const RENDERED_BY = {
 const BOTH_TABLES = [
   'DELIVERY_CHECK_FAILED', 'GIT_BUFFER_LIMIT_EXCEEDED', 'PATH_OUTSIDE_SCOPE', 'PATH_CHANGED',
   'REPARSE_POINT', 'WORKTREE_IDENTITY_CHANGED', 'PATH_NOT_AUTHORIZED', 'PROJECT_NOT_FOUND',
+  // 第 36 轮：审核/接入三条路由会经过送审侧的同一批校验器（远程地址凭据检查、预检
+  // 失效检查），其结果喂 sendError 而不是 deliveryResponse。台账里「DELIVERY_*/REMOTE_*
+  // 由 deliveryResponse 策展，不重复进 PUBLIC_ERRORS」那句话把这条通道说成了不存在，
+  // 是本轮实测出的过期契约；先按证据把已证实的两支收进来。
+  'CREDENTIALS_IN_REMOTE_URL', 'DELIVERY_PREFLIGHT_STALE',
 ];
 
 test('跨两个渲染表面的码在两张表里都有登记（不许只堵一个表面）', () => {
@@ -358,11 +363,21 @@ test('告警只点名码本身：大写常量原样、其它形状只报种类�
 const COLLAPSE_SITES = [
   { file: 'src/core/integration-service.mjs', tables: ['PUBLIC_ERRORS'] },
   { file: 'src/core/workspaces.mjs', tables: ['PUBLIC_ERRORS'] },
+  { file: 'src/core/projects.mjs', tables: ['PUBLIC_ERRORS'] },
   // 送审结果的码可能同时被两张表读到，因此这里的兜底要求两边都在。
   { file: 'src/core/delivery-service.mjs', tables: ['PUBLIC_ERRORS', 'delivery-messages'] },
 ];
 
-const COLLAPSE_FILES = COLLAPSE_SITES.map((site) => site.file);
+const COLLAPSE_FILES = [...new Set([
+  ...COLLAPSE_SITES.map((site) => site.file),
+  'src/core/projects.mjs',
+])];
+// 第 36 轮第 2 遍补的两种形态：同一族里还有 `err.code` 的拼写，以及
+// `typeof error.code === 'string' ? error.code : X`（字符串 errno 会从这里漏过去，
+// 本机实测 git 起不来时 execFile 的 code 就是 'ENOENT'）。只匹配 `code: error.code`
+// 的形状禁令对这两类全绿。
+const CAUGHT = '(?:error|err)\\.code';
+const COLLAPSE_TERNARY = new RegExp(`typeof\\s+${CAUGHT}\\s*===\\s*'string'\\s*\\?\\s*${CAUGHT}`, 'g');
 
 function collapseFallbacks(source) {
   return [...source.matchAll(/publicErrorCode\(\s*[\w.]+\s*,\s*'([A-Z][A-Z0-9_]+)'\s*\)/g)].map((m) => m[1]);
@@ -414,10 +429,11 @@ test('收束规则本身双向可判：数字与 errno 塌、产品码原样、�
 // ——第 36 轮变异矩阵实测如此（M1、M4 退回原写法后本文件的判据都没红）。所以再加
 // 一条形状禁令：本族文件里不许再出现「把 caught error 的 code 直接当公开码/持久码」。
 const COLLAPSE_FORBIDDEN = [
-  [/code\s*:\s*error\.code\b(?!\s*\))/g, 'code: error.code'],
-  [/,error\.code\s*\?\?|,\s*error\.code\s*\?\?/g, ', error.code ??'],
-  [/retryableMergeError\([^)]*error\.code/gs, 'retryableMergeError(..., error.code'],
-  [/failCommand\([^)]*code:\s*error\.code/gs, 'failCommand(... code: error.code'],
+  [new RegExp(`code\\s*:\\s*${CAUGHT}\\b(?!\\s*\\))`, 'g'), 'code: <caught>.code'],
+  [new RegExp(`,\\s*${CAUGHT}\\s*\\?\\?`, 'g'), ', <caught>.code ??'],
+  [new RegExp(`retryableMergeError\\([^)]*${CAUGHT}`, 'gs'), 'retryableMergeError(..., <caught>.code'],
+  [new RegExp(`failCommand\\([^)]*code:\\s*${CAUGHT}`, 'gs'), 'failCommand(... code: <caught>.code'],
+  [COLLAPSE_TERNARY, "typeof <caught>.code === 'string' ? <caught>.code"],
 ];
 
 test('接入与开发空间族文件里不再出现把 caught-error 码直接当公开码的写法', () => {
@@ -426,6 +442,34 @@ test('接入与开发空间族文件里不再出现把 caught-error 码直接当
     for (const [pattern, label] of COLLAPSE_FORBIDDEN) {
       const hits = [...source.matchAll(pattern)];
       assert.deepEqual(hits, [], `${file}: ${label} escaped the collapse rule again`);
+    }
+  }
+});
+
+// 每条禁令都必须自己能红：第 36 轮第 2 遍写出的第一条模式里多了一个冒号
+// （`code:\\s*:` 而不是 `code\s*:`），于是它对 `code: err.code ?? X` 永不匹配，
+// 而它所保护的三条落点在退回旧写法时全绿——一道不会红的守卫比没有守卫更糟，
+// 因为它让人以为这一族已经被钉住。这里给每条模式配一对样本。
+test('形状禁令自己能红：每条模式各配违规样本与合法样本', () => {
+  const samples = [
+    ['code: err.code ?? \'FOLDER_GRANT_ERROR\',', true],
+    ['code: error.code || \'INVALID_IMAGE_PATH\',', true],
+    ['return failCommand(db, commandId, { ok: false, code: error.code, message: m }, options);', true],
+    ['return retryableMergeError(db, attempt, error.code ?? \'INTEGRATION_FAILED\', m, options);', true],
+    ["const code = typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED';", true],
+    ['code: publicErrorCode(err.code, \'FOLDER_GRANT_ERROR\'),', false],
+    ['code: publicErrorCode(error.code, \'DELIVERY_CHECK_FAILED\'),', false],
+    ['if (typeof error.code === \'string\' && error.code.length < 4) return;', false],
+  ];
+  for (const [snippet, shouldMatch] of samples) {
+    const hits = COLLAPSE_FORBIDDEN.filter(([pattern]) => {
+      pattern.lastIndex = 0;
+      return pattern.test(snippet);
+    });
+    if (shouldMatch) {
+      assert.ok(hits.length > 0, `ban is dead: no pattern matches the violation ${snippet}`);
+    } else {
+      assert.deepEqual(hits.map(([label]) => label), [], `ban is over-broad on legal code: ${snippet}`);
     }
   }
 });

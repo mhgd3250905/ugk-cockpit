@@ -68,7 +68,7 @@ import { finishRun, releaseOrphanedWriteRun, startWriteRun } from '../core/runs.
 import { prepareDelivery, submitDelivery } from '../core/delivery-service.mjs';
 import { validateDeliveryRequest } from '../core/delivery-contract.mjs';
 import { deliveryResponse } from '../core/delivery-messages.mjs';
-import { noteUncuratedErrorCode } from '../core/uncurated-error-code.mjs';
+import { noteUncuratedErrorCode, publicErrorCode } from '../core/uncurated-error-code.mjs';
 import { checkUnsupportedFeatures } from '../git/delivery-ops.mjs';
 import { authorizeDeliveryObservation, registerDeliveryLocation, observeDeliverySource, assertDeliveryCwd, readDeliverySource } from '../core/delivery-sources.mjs';
 import {
@@ -1302,6 +1302,30 @@ export const PUBLIC_ERRORS = {
     message: '还没能读到主项目的当前状态，审核或合并已停止。',
     impact: '这次调用没有改动主项目、开发分支或审核记录；平台不会用读不到的状态代替检查。',
     requiredAction: '请确认主项目文件夹仍在原位置且没有其它 Git 操作占用它，然后刷新项目状态并重试本次操作。',
+  },
+  // 第 36 轮·跨渲染表面的漂移。这两个码由送审侧的校验器抛出，而审核/接入三条路由
+  // （/api/v1/mcp/integration/{begin,review,merge}）也会经过同一批校验器，其结果喂给
+  // sendError —— sendError 只查这一张表，缺一行就把「必须换新预检」说成「刷新后重试
+  // 同一个请求」。文案沿用送审表已审过的同一事实，不另发明口径。
+  CREDENTIALS_IN_REMOTE_URL: {
+    status: 403,
+    message: '远程地址里带着账号或令牌，平台已停止使用它。',
+    impact: '平台没有连接该远端，也没有改写你的远程地址；本次操作停在这里。',
+    requiredAction: '请把凭据从远程地址中移除，改用 Git 自身的凭据管理器或 SSH 配置，再重新发起本次操作。',
+  },
+  DELIVERY_PREFLIGHT_STALE: {
+    status: 409,
+    message: '检查后代码内容或目标版本发生了变化，这份检查结果已失效。',
+    impact: '已有成果没有被修改、覆盖或推送；本次没有按过期检查继续登记审核。',
+    requiredAction: '请用新的操作编号重新执行送审前检查，再按新结果继续；不要沿用这份已失效的检查。',
+  },
+  // publicErrorCode 新收束出来的兜底（`err.code` 那一族落点），必须自带回执，
+  // 否则只是把 ENOENT 换成另一个查不到的名字。
+  FOLDER_GRANT_ERROR: {
+    status: 409,
+    message: '这次操作使用的文件夹授权已不可用，平台没有读取该文件夹。',
+    impact: '没有创建、修改或删除任何代码；被拒绝的授权记录保持原样。',
+    requiredAction: '请重新在文件夹选择器里选择该代码目录，用新的操作编号再发起一次；平台不会替你延长或重建授权。',
   },
   MAIN_CHANGED_AFTER_INTEGRATION: {
     status: 409,
@@ -5260,7 +5284,7 @@ export async function createCockpitHttpServer({
         } catch (error) {
           sendJson(response, 200, deliveryResponse({
             ok: false,
-            code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+            code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED'),
             ...(error.details !== undefined ? { details: error.details } : {}),
             localSaved: false,
             pushed: false,

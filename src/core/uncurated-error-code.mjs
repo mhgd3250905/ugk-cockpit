@@ -18,6 +18,10 @@ const CODE_NAME = /^[A-Z][A-Z0-9_]{2,63}$/;
 // but they are not a gap in the wording table — describing them as one sends
 // the reader looking for a missing entry instead of a missing file.
 const ERRNO_NAME = /^E[0-9A-Z]{2,9}$/;
+// node:sqlite reports its own constants in the same shape as product codes
+// (`SQLITE_BUSY`, `ERR_SQLITE_ERROR`); they belong with errno, not with a missing
+// wording entry.
+const DRIVER_CODE = /^(?:ERR_)?SQLITE_/;
 
 // Deliberate limit, stated rather than implied: this warns **once per map per
 // shape** for the life of the process. That is what keeps a hot fallback from
@@ -32,7 +36,8 @@ const ERRNO_NAME = /^E[0-9A-Z]{2,9}$/;
 // replay it on every retry. Collapse to the caller's own family code and let
 // `message` keep the diagnostic detail.
 export function isProductErrorCode(value) {
-  return typeof value === 'string' && CODE_NAME.test(value) && !ERRNO_NAME.test(value);
+  if (typeof value !== 'string') return false;
+  return CODE_NAME.test(value) && !ERRNO_NAME.test(value) && !DRIVER_CODE.test(value);
 }
 
 export function publicErrorCode(value, fallback) {
@@ -45,7 +50,11 @@ export function publicErrorCode(value, fallback) {
 
 export function noteUncuratedErrorCode(mapName, code) {
   let shape;
-  if (typeof code === 'string' && CODE_NAME.test(code) && !ERRNO_NAME.test(code)) shape = code;
+  // Same predicate `publicErrorCode` collapses with, on purpose: if the two
+  // disagreed, a driver code would be silently swallowed at the call site while
+  // this alarm still told the operator the wording table was missing an entry.
+  if (isProductErrorCode(code)) shape = code;
+  else if (typeof code === 'string' && DRIVER_CODE.test(code)) shape = `driver(${code})`;
   else if (typeof code === 'string' && ERRNO_NAME.test(code)) shape = `errno(${code})`;
   else if (typeof code === 'string') shape = 'lowercase-or-punctuated(string-code)';
   else if (typeof code === 'number') shape = 'child-process-exit-status(number-code)';

@@ -14,6 +14,7 @@ import {
   removeWorkspaceActionRecord,
   upsertWorkspaceActionRecord,
   workspaceActionRequestBody,
+  writeWorkspaceActionRecords,
 } from '../web/src/workspace-action-recovery.mjs';
 
 function storageFixture(initial = null) {
@@ -231,6 +232,21 @@ test('多余键被丢弃后仍由唯一发送口派生删除确认（不许静�
 // 反向对照（主干上即绿）：宽容只针对多余键。缺必要字段的记录是真的读不出来，
 // 继续响亮失败正是它防止「用空列表顶替损坏存储」的手段——把这条也一并宽容掉，
 // 就等于把上一轮防住的静默清空重新打开。
+test('写路径不比读路径宽容：混进一条坏记录要响亮失败而不是被静默丢掉', () => {
+  // 读侧 `readRawStrict` 对无法归一化的记录抛错（防止用空列表顶替损坏存储），而写侧
+  // `normalizeStoredActions` 原先是 `if (action) byId.set(...)`——同一份字节，一个抛错
+  // 一个丢弃。丢弃就是丢用户还没核对的删除记录，且重复 id 会被「后写覆盖前写」消掉。
+  const storage = storageFixture();
+  assert.throws(() => writeWorkspaceActionRecords([removeRecord(), { not: 'a record' }], storage),
+    (error) => error.code === 'WORKSPACE_ACTION_RECOVERY_INVALID_DATA');
+  assert.equal(storage.raw(), null, 'a refused write must not have replaced the store');
+
+  // 反向对照：两条合法记录照常写入，重复编号也要红而不是择一保留。
+  assert.equal(writeWorkspaceActionRecords([removeRecord(), reuseRecord()], storage).length, 2);
+  assert.throws(() => writeWorkspaceActionRecords([removeRecord(), removeRecord()], storage),
+    (error) => error.code === 'WORKSPACE_ACTION_RECOVERY_INVALID_DATA');
+});
+
 test('反向对照：缺必要字段的记录仍然整份响亮失败', () => {
   const broken = { ...reuseRecord(), request: { expectedRevision: 7, expectedBaseHead: 'head-original' } };
   const storage = storeWith([broken]);

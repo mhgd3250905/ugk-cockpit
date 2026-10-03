@@ -316,7 +316,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
   } catch (err) {
     const res = {
       ok: false,
-      code: err.code ?? 'FOLDER_GRANT_ERROR',
+      code: publicErrorCode(err.code, 'FOLDER_GRANT_ERROR'),
       message: err.message,
       grantId,
     };
@@ -354,7 +354,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
     } catch (err) {
       const res = {
         ok: false,
-        code: err.code ?? 'PROBE_FAILED',
+        code: publicErrorCode(err.code, 'PROBE_FAILED'),
         message: err.message,
       };
       failCommand(db, commandId, res);
@@ -532,7 +532,7 @@ async function createDevelopmentWorkspaceOnce(db, request = {}, options = {}) {
       }
       const res = {
         ok: false,
-        code: err.code ?? 'DIRECTORY_VERIFICATION_FAILED',
+        code: publicErrorCode(err.code, 'DIRECTORY_VERIFICATION_FAILED'),
         message: err.message,
         targetPath,
       };

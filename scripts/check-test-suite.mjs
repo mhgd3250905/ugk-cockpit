@@ -30,17 +30,24 @@ const repoRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const targetDir = path.resolve(repoRoot, target);
 
 const SKIP_DIRS = new Set(['node_modules']);
-// Measured as executed by `node --test` on Node 24.15: `a.test.mjs`, `b.test.js`,
-// `e_test.mjs`, `f-test.mjs`, and *every* module under a directory named `test`.
-// Measured as NOT executed: `c.test.cjs`, `d.spec.mjs`, `g-tests.mjs` (plural).
-// Deliberately not guessed beyond that list: a new discovery shape has to be
+// Measured against Node 24.15's own discovery (`node --test` with no paths, in a
+// scratch tree carrying this package's `type: module`): it runs `*.test.mjs`,
+// `*.test.js`, `*_test.mjs`, `*-test.mjs`, `test-*.mjs`, and every module under a
+// directory named `test`. Measured as NOT executed: `*.test.cjs`, `*.spec.mjs`,
+// `*-tests.mjs` (plural). It also descends into `dist`/coverage, skips dot
+// directories such as `.data`, skips node_modules, and does not follow directory
+// links. Deliberately listed only as far as measured: a new shape has to be
 // measured here first, because widening on a hunch red-fails on helper files.
+// The earlier version listed `.test.mjs` alone while claiming to mirror discovery,
+// and two helpers named `test-registrar-*.mjs` were consequently executed by the
+// runner as zero-test passes that the gate never saw.
 const TEST_SUFFIXES = ['.test.mjs', '.test.js', '_test.mjs', '-test.mjs'];
+const TEST_PREFIX = /^test-.+\.(?:mjs|js)$/;
 
 function isRunnerDiscovered(full, insideTestDir) {
   const name = path.basename(full);
   if (insideTestDir) return /\.(?:mjs|js)$/.test(name);
-  return TEST_SUFFIXES.some((suffix) => name.endsWith(suffix));
+  return TEST_SUFFIXES.some((suffix) => name.endsWith(suffix)) || TEST_PREFIX.test(name);
 }
 
 const files = [];
@@ -68,7 +75,7 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const counter = path.join(repoRoot, 'scripts', 'test-support', 'count-test-registrations.mjs');
+const counter = path.join(repoRoot, 'scripts', 'test-support', 'count-registrations.mjs');
 const child = spawnSync(process.execPath, [counter, ...files], {
   encoding: 'utf8', windowsHide: true, timeout: 120_000, cwd: repoRoot,
 });

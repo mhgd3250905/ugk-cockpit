@@ -93,7 +93,7 @@ async function prepareDeliveryOnce(db, request, options = {}) {
     if (completed?.state === 'committed') return parseCommandResponse(completed);
     return finishCommand(db, commandId, {
       ok: false,
-      code: typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED',
+      code: publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED'),
       ...(error.details !== undefined ? { details: error.details } : {}),
       localSaved: false,
       pushed: false,
@@ -247,7 +247,7 @@ async function submitDeliveryOnce(db, request, options = {}) {
     const completed = db.prepare('SELECT * FROM commands WHERE id = ?').get(commandId);
     if (completed?.state === 'committed') return parseCommandResponse(completed);
     if ((error.localSaved || localSaveEvidence) && attempt?.state === 'prepared') update({ state: localSaveEvidence ? 'local_saved' : 'prepared', source_commit: error.sourceCommit ?? localSaveEvidence?.sourceCommit ?? attempt.source_commit });
-    const code = typeof error.code === 'string' ? error.code : 'DELIVERY_CHECK_FAILED';
+    const code = publicErrorCode(error.code, 'DELIVERY_CHECK_FAILED');
     const requiresNewPreflight = ['DELIVERY_PREFLIGHT_EXPIRED','DELIVERY_PREFLIGHT_STALE','HEAD_MOVED','SOURCE_CONTENT_CHANGED',
       'REMOTE_TARGET_CHANGED','REMOTE_SOURCE_MISMATCH','REMOTE_IDENTITY_CHANGED','BRANCH_MISMATCH','DELIVERY_REMOTE_CHANGED',
       'DELIVERY_CACHE_INVALID','DELIVERY_INDEX_CHANGED','SOURCE_COMMIT_MISMATCH'].includes(code);
