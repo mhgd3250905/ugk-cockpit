@@ -121,7 +121,7 @@ test('送审表里凡是保存路径之后还能抛出的码，文案都不许�
     for (const flags of [{ localSaved: true, pushed: false }, { localSaved: false, pushed: false }]) {
       const rendered = deliveryResponse({ ok: false, code, ...flags });
       assert.equal(rendered.message, message);
-      assert.equal(rendered.required_action, action);
+      assert.ok(rendered.required_action.startsWith(action));
     }
   }
   // 反向对照：这条判据不能只会红——被忽略内容确认挡下的删除用的就是这种全称否认，

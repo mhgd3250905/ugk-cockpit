@@ -1613,15 +1613,41 @@ function sendJson(response, statusCode, body) {
   response.end(payload);
 }
 
-function sendError(response, code, { commandId = null, extra = {}, context = null } = {}) {
+function sendError(response, code, { commandId = null, extra = {}, context = null, integrationPhase = null } = {}) {
   // One lookup, one downgrade. `code` is the raw producer's value and may be a
   // number (an execFile exit code), a Node errno string, or undefined; only the
   // curated name is ever put on the wire, including in `reason`.
   const curated = code !== undefined && code !== null && PUBLIC_ERRORS[code] !== undefined
     && Object.hasOwn(PUBLIC_ERRORS, code);
   if (!curated) noteUncuratedErrorCode('PUBLIC_ERRORS', code);
-  const definition = curated ? PUBLIC_ERRORS[code] : PUBLIC_ERRORS.REQUEST_FAILED;
   const effectiveCode = curated ? code : 'REQUEST_FAILED';
+  let definition = curated ? PUBLIC_ERRORS[code] : PUBLIC_ERRORS.REQUEST_FAILED;
+  // Review verification failures are durably failed requests, while merge
+  // verification failures leave a resumable attempt. The route supplies this
+  // rendering context; it is not a client field or a journal protocol change.
+  if (integrationPhase === 'review' && ['DELIVERY_CHECK_FAILED', 'DELIVERY_REVIEW_REF_UNAVAILABLE'].includes(effectiveCode)) {
+    definition = {
+      ...definition,
+      impact: '本次审核结论没有写入；项目代码和已领取的审核记录保留。',
+      requiredAction: '本次审核请求已记录为失败。请确认代码来源可读取、网络与已有 Git 登录配置正常后，使用新的 clientRequestId 重新提交审核结论；原请求号只会重放这次失败，不要凭旧状态判定审核结果。',
+    };
+  } else if (integrationPhase === 'merge' && [
+    'DELIVERY_CHECK_FAILED', 'DELIVERY_REMOTE_CHANGED',
+    'DELIVERY_REVIEW_REF_UNAVAILABLE', 'DELIVERY_SOURCE_UPDATED',
+  ].includes(effectiveCode)) {
+    // A prepared attempt can already have fast-forwarded before its state was
+    // persisted. Its next import/verification can fail before discovering that
+    // write, so neither the error code nor localIntegrated=false rules it out.
+    definition = {
+      ...definition,
+      impact: '接入操作尚未确认完成；主项目分支可能已经前进，本次没有继续推送远端。',
+      ...(effectiveCode === 'DELIVERY_REMOTE_CHANGED' ? {
+        requiredAction: '请先核对原远端配置和主项目现有成果；恢复原来源与目标后用原操作编号继续，无法恢复时回项目页确认下一步，不要重置或回退主项目分支。',
+      } : effectiveCode === 'DELIVERY_SOURCE_UPDATED' ? {
+        requiredAction: '请先核对主项目现有成果和本次操作记录，再让开发会话重新送审当前成果；新版本需要重新审核，不要重置或回退主项目分支。',
+      } : {}),
+    };
+  }
   const contextFields = normalizeConversationErrorContext(context);
   if (context?.sessionValidated === true && contextFields.sessionId) {
     response.__ugkDiagnosticContext = {
@@ -5286,7 +5312,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_begin', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result), integrationPhase: 'begin' });
         return;
       }
 
@@ -5299,7 +5325,7 @@ export async function createCockpitHttpServer({
           commandId: id('integration_review', `${body.sessionId}:${body.clientRequestId}`),
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
-        else sendError(response, result.code, { extra: integrationErrorExtra(body, result) });
+        else sendError(response, result.code, { extra: integrationErrorExtra(body, result), integrationPhase: 'review' });
         return;
       }
 
@@ -5313,6 +5339,7 @@ export async function createCockpitHttpServer({
         }, { faultInjector, assertSessionWrite: (sessionId) => assertConversationWrite(key, sessionId) });
         if (result.ok) sendJson(response, 200, result);
         else sendError(response, result.code, {
+          integrationPhase: 'merge',
           extra: {
             ...integrationErrorExtra(body, result),
             localIntegrated: Boolean(result.localIntegrated),
