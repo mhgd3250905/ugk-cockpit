@@ -10,6 +10,20 @@ import { fastForwardMain, pushIntegratedMain } from '../src/git/integration-ops.
 import { checkUnsupportedFeatures } from '../src/git/delivery-ops.mjs';
 import { createGitWorktree, generateStableBranchName } from '../src/git/workspace-ops.mjs';
 import { assertRepositoryAllowed, findHostileRepositoryConfiguration } from '../src/git/repository-policy.mjs';
+import {
+  assertCleanDriverRunsHere,
+  assertDriverAttributeBound,
+  hostileDriverBody,
+} from '../scripts/test-support/hostile-driver.mjs';
+
+// Fixture git must observe the same config contract as the product
+// (safeGitEnvironment strips system/global git config). The controls below ask
+// git to run a driver out of repository config; an ambient host setting that
+// changes hashing or line endings would make the control answer about a
+// different repository than the one the product then reads.
+// Same convention as test/submission-service.test.mjs.
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
 // POSIX 的系统临时目录本身可能是符号链接；产品路径授权按契约拒绝穿越链接
 // 的路径，夹具必须建立在真实路径下。
@@ -36,19 +50,45 @@ function gitSyncQuiet(cwd, args) {
   }
 }
 
+// Git config values that name a file use forward slashes on every platform.
 function slashes(value) {
   return value.split(path.sep).join('/');
 }
 
-// 过滤器命令在 Git for Windows 与 POSIX 上同样由 sh 执行，node 必然存在。
+// One body for the whole family: scripts/test-support/hostile-driver.mjs says
+// why the driver command must be a single command whose failure Git cannot mask.
 function markerCommand(marker) {
-  return `node -e "require('fs').writeFileSync('${slashes(marker)}','pwned')"`;
+  return hostileDriverBody(marker);
+}
+
+// Control for the two receivepack markers. Git spawns `remote.<name>.receivepack`
+// for a push to a local path, so running the refused push directly must produce
+// the marker; measured on this machine the marker appeared and the push then
+// failed because that program does not speak the transport protocol. Without this
+// the absence assertion would be exactly as informative as a driver that never
+// runs.
+function assertReceivepackDetector(repo, marker, branch) {
+  try {
+    gitSync(repo, ['push', 'origin', `${branch}:refs/heads/${branch}`]);
+  } catch {
+    // Expected: the repository's own receivepack replacement cannot serve.
+  }
+  assert.equal(existsSync(marker), true,
+    `control failed: git did not run remote.origin.receivepack for this push, so the`
+    + ` "must not be executed" assertion above proves nothing (${marker})`);
 }
 
 function createFixture(t, prefix) {
   const base = mkdtempSync(path.join(fixtureTempRoot(), prefix));
   t.after(() => {
-    try { rmSync(base, { recursive: true, force: true }); } catch {}
+    // Retries because a just-exited git child can keep a handle on Windows, and a
+    // leak is reported instead of swallowed: an invisible leftover fixture is how
+    // a "clean" run quietly accumulates temp directories.
+    try {
+      rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      process.stderr.write(`repository-config-guard: could not remove ${base} (${error.code ?? error.message})\n`);
+    }
   });
   const repo = path.join(base, 'repo');
   const bare = path.join(base, 'remote.git');
@@ -82,6 +122,14 @@ test('worktree creation refuses a repo-local smudge filter bound outside the wor
   );
   assert.equal(existsSync(marker), false,
     'worktree add must not check out files through a repo-local smudge filter');
+  // Control for that assertion, on this same repository and this same driver:
+  // run the refused operation directly. A checkout writes the file, so Git has
+  // no way to skip the smudge filter, and the marker must appear. Without it the
+  // assertion above would also be satisfied by a driver that never runs.
+  gitSync(repo, ['worktree', 'add', path.join(base, 'wt1-control'), '-b', 'cockpit/work/guardwtcontrol', head]);
+  assert.equal(existsSync(marker), true,
+    'control failed: this repository\'s smudge driver did not run on checkout, so the refusal above proves nothing');
+  gitSync(repo, ['worktree', 'remove', '--force', path.join(base, 'wt1-control')]);
 });
 
 test('worktree creation refuses a filter bound by core.attributesFile outside the repository', async (t) => {
@@ -103,6 +151,13 @@ test('worktree creation refuses a filter bound by core.attributesFile outside th
   );
   assert.equal(existsSync(marker), false,
     'core.attributesFile must be treated as an attribute source');
+  // Control for the assertion above: the refused operation, run directly, does
+  // reach the driver through core.attributesFile. This also proves the attribute
+  // binding itself is live, not just configured.
+  gitSync(repo, ['worktree', 'add', path.join(base, 'wt2-control'), '-b', 'cockpit/work/guardattrscontrol', head]);
+  assert.equal(existsSync(marker), true,
+    'control failed: core.attributesFile did not bind the driver on checkout, so the refusal above proves nothing');
+  gitSync(repo, ['worktree', 'remove', '--force', path.join(base, 'wt2-control')]);
 });
 
 test('submit push refuses remote.*.receivepack without running it', async (t) => {
@@ -117,6 +172,7 @@ test('submit push refuses remote.*.receivepack without running it', async (t) =>
   );
   assert.equal(existsSync(marker), false,
     'remote.*.receivepack is executed by git during transport and must be refused');
+  assertReceivepackDetector(repo, marker, 'cockpit/work/guardsubmit01');
 });
 
 test('integration push refuses remote.*.receivepack without running it', async (t) => {
@@ -129,23 +185,41 @@ test('integration push refuses remote.*.receivepack without running it', async (
     () => pushIntegratedMain(repo, { remote: 'origin', branch: 'cockpit/work/guardinteg001' }),
     (error) => error.code === 'UNSAFE_REMOTE_URL',
   );
+  // Same detector as the submission twin: this push path spawns the repository's
+  // receivepack program too, and the control proves it.
   assert.equal(existsSync(marker), false,
     'integration push must apply the same repository policy as submission');
+  assertReceivepackDetector(repo, marker, 'cockpit/work/guardinteg001');
 });
 
 test('integration fast-forward refuses a repo-local smudge filter', async (t) => {
   const { base, repo } = createFixture(t, 'ugk-guard-ff-');
   const marker = path.join(base, 'pwned-ff.txt');
+  // The merge target has to move the working tree. `merge --ff-only <HEAD>`
+  // answers "Already up to date.", writes no file, and therefore cannot run a
+  // checkout-direction driver even with this gate removed — measured on this
+  // machine: 0 of 25 same-head merges produced the marker, 25 of 25 descendant
+  // merges did. A fixture that merged HEAD made the assertion below pass no
+  // matter what the product did.
+  gitSync(repo, ['checkout', '-qb', 'cockpit/work/ff-source']);
+  writeFileSync(path.join(repo, 'README.md'), '# fixture moved\n');
+  gitSync(repo, ['commit', '-qam', 'move']);
+  const sourceCommit = gitSync(repo, ['rev-parse', 'HEAD']);
+  gitSync(repo, ['checkout', '-q', 'main']);
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
   gitSync(repo, ['config', '--local', 'filter.evil.smudge', markerCommand(marker)]);
-  const head = gitSync(repo, ['rev-parse', 'HEAD']);
 
   await assert.rejects(
-    () => fastForwardMain(repo, head),
+    () => fastForwardMain(repo, sourceCommit),
     (error) => error.code === 'GIT_FILTER_UNSUPPORTED',
   );
   assert.equal(existsSync(marker), false,
     'a fast-forward updates the working tree and must not run a smudge filter');
+  // Control for the assertion above, same repository, same driver, same
+  // operation run without the gate: the merge writes the file and must smudge.
+  gitSync(repo, ['merge', '--ff-only', sourceCommit]);
+  assert.equal(existsSync(marker), true,
+    'control failed: this fast-forward did not reach the smudge driver, so the refusal above proves nothing');
 });
 
 test('delivery inspection refuses a smudge-only filter configuration', async (t) => {
@@ -240,8 +314,18 @@ test('the guard runs before the first probe of a hostile main location', async (
   const marker = path.join(repo, 'pwned-by-probe.txt');
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
   gitSync(repo, ['config', '--local', 'filter.evil.clean', markerCommand(marker)]);
+  // Both halves of the claim that the absence assertion below is supposed to
+  // support: this repository binds the driver to a tracked path, and this
+  // repository's own driver really produces its marker when Git has to run it.
+  assertDriverAttributeBound(repo, 'README.md', 'evil');
+  assertCleanDriverRunsHere(repo, marker);
 
-  // 探针本身运行 `git status`，足以触发 clean 过滤器：闸门必须更早。
+  // The probe that follows this gate runs `git status`, and a repository's clean
+  // filter is what that read may exercise — so the gate has to be earlier than
+  // the probe, not merely earlier than a write. Whether a given read re-cleans is
+  // a Git stat-cache decision (see scripts/test-support/hostile-driver.mjs), which
+  // is why the control below forces the driver through `git add` instead of
+  // relying on this read.
   await assert.rejects(
     () => assertRepositoryAllowed(repo),
     (error) => error.code === 'GIT_FILTER_UNSUPPORTED',
